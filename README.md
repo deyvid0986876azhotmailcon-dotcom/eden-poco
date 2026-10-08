@@ -24,6 +24,6 @@ Cada ejecución genera un APK por variante, definida en la matriz de `.github/wo
 | `0002-mali-fp16-workaround.patch` | En drivers ARM desactiva `shaderFloat16` para que los shaders usen fp32. Hipótesis sin confirmar; no forma parte de la variante `geom`. |
 | `0003-mali-position-input-struct.patch` | En drivers ARM envuelve la entrada `Position` de los geometry shaders en una estructura, como ya preveía Eden para otros drivers. Evita el cierre del compilador de shaders de Mali. |
 | `0004-sane-storage-buffer-size.patch` | No acepta como tamaño de un storage buffer un valor de 64 MiB o más leído junto a su dirección, y avisa en el log cuando se crea un búfer de 256 MiB o más. No bastó para evitar el cierre por un búfer de 2 GiB, pero su aviso mostró el tamaño pedido. |
-| `0005-cap-buffer-binding-size.patch` | Limita a 64 MiB lo que puede pedir un enlace de búfer de vértices, índices, transform feedback o textura, y anota en el log cuál lo pidió. Busca evitar el cierre por un búfer de 2 GiB. |
+| `0005-cap-buffer-binding-size.patch` | Limita a 64 MiB lo que puede pedir un enlace de búfer de vértices, índices, transform feedback o textura, y anota en el log cualquier petición de 64 MiB o más con su tipo (también las de DMA, uniformes, storage e indirectos, que no se limitan). Busca evitar el cierre por un búfer de 2 GiB. |
 
 Eden se distribuye bajo GPL-3.0-or-later; los parches de este repositorio usan la misma licencia.

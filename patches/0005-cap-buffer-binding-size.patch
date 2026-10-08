@@ -1,5 +1,5 @@
 diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
-index e6343a4..246ad35 100644
+index e6343a4..0b8879f 100644
 --- a/src/video_core/buffer_cache/buffer_cache.h
 +++ b/src/video_core/buffer_cache/buffer_cache.h
 @@ -9,6 +9,7 @@
@@ -10,7 +10,7 @@ index e6343a4..246ad35 100644
  
  #include "common/range_sets.inc"
  #include "video_core/buffer_cache/buffer_cache_base.h"
-@@ -20,6 +21,23 @@ namespace VideoCommon {
+@@ -20,6 +21,25 @@ namespace VideoCommon {
  
  using Core::DEVICE_PAGESIZE;
  
@@ -18,23 +18,49 @@ index e6343a4..246ad35 100644
 +/// exhausts memory on mobile devices, and no draw reads that much, so bindings are capped here.
 +constexpr u32 MAX_BINDING_SIZE = static_cast<u32>(64_MiB);
 +
-+inline u32 ClampBindingSize(std::string_view kind, u64 address, u32 size) {
-+    if (size < MAX_BINDING_SIZE) {
-+        return size;
-+    }
++/// Logs the first oversized requests, to tell which kind of binding asks for them.
++inline void ReportLargeBinding(std::string_view kind, u64 address, u64 size) {
 +    static u32 reports = 0;
-+    if (reports < 16) {
++    if (size >= MAX_BINDING_SIZE && reports < 16) {
 +        ++reports;
-+        LOG_WARNING(HW_GPU, "{} buffer binding at {:#x} asks for {} MiB, clamping to {} MiB", kind,
-+                    address, size >> 20, MAX_BINDING_SIZE >> 20);
++        LOG_WARNING(HW_GPU, "{} buffer request at {:#x} asks for {} MiB", kind, address,
++                    size >> 20);
 +    }
-+    return MAX_BINDING_SIZE;
++}
++
++inline u32 ClampBindingSize(std::string_view kind, u64 address, u32 size) {
++    ReportLargeBinding(kind, address, size);
++    return (std::min)(size, MAX_BINDING_SIZE);
 +}
 +
  template <class P>
  BufferCache<P>::BufferCache(Tegra::MaxwellDeviceMemoryManager& device_memory_, Runtime& runtime_)
      : runtime{runtime_}, device_memory{device_memory_}, memory_tracker{device_memory} {
-@@ -1339,7 +1357,8 @@ void BufferCache<P>::UpdateIndexBuffer() {
+@@ -203,6 +223,7 @@ bool BufferCache<P>::DMACopy(GPUVAddr src_address, GPUVAddr dest_address, u64 am
+     if (!cpu_src_address || !cpu_dest_address) {
+         return false;
+     }
++    ReportLargeBinding("DMA copy", *cpu_src_address, amount);
+     const bool source_dirty = IsRegionRegistered(*cpu_src_address, amount);
+     const bool dest_dirty = IsRegionRegistered(*cpu_dest_address, amount);
+     if (!source_dirty && !dest_dirty) {
+@@ -267,6 +288,7 @@ bool BufferCache<P>::DMAClear(GPUVAddr dst_address, u64 amount, u32 value) {
+     if (!cpu_dst_address) {
+         return false;
+     }
++    ReportLargeBinding("DMA clear", *cpu_dst_address, amount * sizeof(u32));
+     const bool dest_dirty = IsRegionRegistered(*cpu_dst_address, amount);
+     if (!dest_dirty) {
+         return false;
+@@ -298,6 +320,7 @@ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainBuffer(GPUVAddr gpu_ad
+ template <class P>
+ std::pair<typename P::Buffer*, u32> BufferCache<P>::ObtainCPUBuffer(
+     DAddr device_addr, u32 size, ObtainBufferSynchronize sync_info, ObtainBufferOperation post_op) {
++    ReportLargeBinding("Obtained", device_addr, size);
+     const BufferId buffer_id = FindBuffer(device_addr, size, false);
+     Buffer& buffer = slot_buffers[buffer_id];
+ 
+@@ -1339,7 +1362,8 @@ void BufferCache<P>::UpdateIndexBuffer() {
      const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr_begin);
      const u32 address_size = static_cast<u32>(gpu_addr_end - gpu_addr_begin);
      const u32 draw_size = (index_buffer_ref.count + index_buffer_ref.first) * u32(index_buffer_ref.FormatSizeInBytes());
@@ -44,7 +70,7 @@ index e6343a4..246ad35 100644
      if (size == 0 || !device_addr) {
          channel_state->index_buffer = NULL_BINDING;
          return;
-@@ -1384,6 +1403,7 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
+@@ -1384,6 +1408,7 @@ void BufferCache<P>::UpdateVertexBuffer(u32 index) {
      if (!gpu_memory->IsWithinGPUAddressRange(gpu_addr_end) || size >= 64_MiB) {
          size = static_cast<u32>(gpu_memory->MaxContinuousRange(gpu_addr_begin, size));
      }
@@ -52,7 +78,31 @@ index e6343a4..246ad35 100644
      const BufferId buffer_id = FindBuffer(*device_addr, size, false);
      const Binding binding{
          .device_addr = *device_addr,
-@@ -1467,7 +1487,8 @@ template <class P>
+@@ -1402,6 +1427,7 @@ void BufferCache<P>::UpdateDrawIndirect() {
+             binding = NULL_BINDING;
+             return;
+         }
++        ReportLargeBinding("Indirect", *device_addr, size);
+         binding = Binding{
+             .device_addr = *device_addr,
+             .size = static_cast<u32>(size),
+@@ -1429,6 +1455,7 @@ void BufferCache<P>::UpdateUniformBuffers(size_t stage) {
+             channel_state->dirty_uniform_buffers[stage] |= 1U << index;
+         }
+         // Resolve buffer
++        ReportLargeBinding("Uniform", binding.device_addr, binding.size);
+         binding.buffer_id = FindBuffer(binding.device_addr, binding.size, false);
+     });
+ }
+@@ -1438,6 +1465,7 @@ void BufferCache<P>::UpdateStorageBuffers(size_t stage) {
+     ForEachEnabledBit(channel_state->enabled_storage_buffers[stage], [&](u32 index) {
+         // Resolve buffer
+         Binding& binding = channel_state->storage_buffers[stage][index];
++        ReportLargeBinding("Storage", binding.device_addr, binding.size);
+         const BufferId buffer_id = FindBuffer(binding.device_addr, binding.size, false);
+         binding.buffer_id = buffer_id;
+         const bool is_written = ((channel_state->written_storage_buffers[stage] >> index) & 1) != 0;
+@@ -1467,7 +1495,8 @@ template <class P>
  void BufferCache<P>::UpdateTransformFeedbackBuffer(u32 index) {
      const auto& binding = maxwell3d->regs.transform_feedback.buffers[index];
      const GPUVAddr gpu_addr = binding.Address() + binding.start_offset;
@@ -62,7 +112,7 @@ index e6343a4..246ad35 100644
      const std::optional<DAddr> device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
      if (binding.enable == 0 || size == 0 || !device_addr) {
          channel_state->transform_feedback_buffers[index] = NULL_BINDING;
-@@ -2073,7 +2094,7 @@ TextureBufferBinding BufferCache<P>::GetTextureBufferBinding(GPUVAddr gpu_addr,
+@@ -2073,7 +2102,7 @@ TextureBufferBinding BufferCache<P>::GetTextureBufferBinding(GPUVAddr gpu_addr,
          binding.format = PixelFormat::Invalid;
      } else {
          binding.device_addr = *device_addr;
