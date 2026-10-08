@@ -6,6 +6,8 @@ Este repositorio no contiene el código de Eden. GitHub Actions descarga el comm
 
 ## Uso
 
+Cada ejecución genera un APK por variante, definida en la matriz de `.github/workflows/build.yml`: `all` (todos los parches), `p0001` (solo el primero) y `base` (Eden sin parches). Sirven para comparar y saber qué parche causa un comportamiento. Todas comparten identificador de paquete, así que en el teléfono solo cabe una a la vez.
+
 1. Añadir o modificar un archivo `patches/NNNN-descripcion.patch` (formato `git diff`, rutas relativas a la raíz de Eden).
 2. Hacer `git push` a `main`. La compilación arranca sola; también se puede lanzar a mano en la pestaña **Actions**.
 3. Descargar el APK desde los artefactos de la ejecución e instalarlo:
