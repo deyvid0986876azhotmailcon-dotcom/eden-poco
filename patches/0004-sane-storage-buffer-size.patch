@@ -1,0 +1,29 @@
+diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
+index 9a5d6f3..e6343a4 100644
+--- a/src/video_core/buffer_cache/buffer_cache.h
++++ b/src/video_core/buffer_cache/buffer_cache.h
+@@ -1680,6 +1680,10 @@ BufferId BufferCache<P>::CreateBuffer(DAddr device_addr, u32 wanted_size,
+     wanted_size = static_cast<u32>(device_addr_end - device_addr);
+     const OverlapResult overlap = ResolveOverlaps(device_addr, wanted_size);
+     const u32 size = static_cast<u32>(overlap.end - overlap.begin);
++    if (size >= 256_MiB) {
++        LOG_WARNING(HW_GPU, "Creating a {} MiB buffer at {:#x} for a {} byte request at {:#x}",
++                    size >> 20, overlap.begin, wanted_size, device_addr);
++    }
+     const BufferId new_buffer_id =
+         slot_buffers.insert(runtime, overlap.begin, size, sparse_compatible);
+     auto& new_buffer = slot_buffers[new_buffer_id];
+@@ -2016,9 +2020,12 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
+             static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
+         const u64 next_qword = gpu_memory->Read<u64>(ssbo_addr + 8);
+         const u32 packed_size = static_cast<u32>(next_qword);
++        // Any value stored after the address (a float, a flag) can pass for a size and ask for
++        // gigabytes of buffer, so sizes that no real storage buffer reaches are not trusted.
+         const bool next_qword_is_size = static_cast<u32>(next_qword >> 32) == 0 &&
+                                         packed_size != 0 &&
+-                                        packed_size <= memory_layout_size;
++                                        packed_size <= memory_layout_size &&
++                                        packed_size < 64_MiB;
+         if (next_qword_is_size) {
+             return packed_size;
+         }
