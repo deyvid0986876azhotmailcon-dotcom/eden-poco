@@ -1,0 +1,41 @@
+diff --git a/src/video_core/macro.cpp b/src/video_core/macro.cpp
+index 86f528a..0251ad3 100644
+--- a/src/video_core/macro.cpp
++++ b/src/video_core/macro.cpp
+@@ -62,6 +62,13 @@ bool IsTopologySafe(Maxwell3D::Regs::PrimitiveTopology topology) {
+     }
+ }
+ 
++// The estimate is the size of the memory the index buffer registers span. When a game points
++// them at a whole memory pool it is useless: binding that many indices means caching gigabytes.
++bool IsIndexEstimateUsable(Maxwell3D& maxwell3d, u32 estimate) {
++    static constexpr u64 MAX_ESTIMATED_BYTES = 64ULL << 20;
++    return u64{estimate} * maxwell3d.regs.index_buffer.FormatSizeInBytes() < MAX_ESTIMATED_BYTES;
++}
++
+ } // Anonymous namespace
+ 
+ void HLE_DrawArraysIndirect::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, std::span<const u32> parameters, [[maybe_unused]] u32 method) {
+@@ -131,6 +138,11 @@ void HLE_DrawIndexedIndirect::Execute(Core::System& system, Engines::Maxwell3D&
+     }
+ 
+     const u32 estimate = u32(maxwell3d.EstimateIndexBufferSize());
++    if (!IsIndexEstimateUsable(maxwell3d, estimate)) {
++        // The fallback reads the real index count and offset from the macro parameters.
++        Fallback(system, maxwell3d, parameters);
++        return;
++    }
+     const u32 element_base = parameters[4];
+     const u32 base_instance = parameters[5];
+     maxwell3d.regs.vertex_id_base = element_base;
+@@ -211,6 +223,10 @@ void HLE_MultiDrawIndexedIndirectCount::Execute(Core::System& system, Engines::M
+         const u32 stride = indirect_words * sizeof(u32);
+         const std::size_t draw_count = end_indirect - start_indirect;
+         const u32 estimate = u32(maxwell3d.EstimateIndexBufferSize());
++        if (!IsIndexEstimateUsable(maxwell3d, estimate)) {
++            Fallback(system, maxwell3d, parameters);
++            return;
++        }
+         maxwell3d.dirty.flags[VideoCommon::Dirty::IndexBuffer] = true;
+         auto& params = maxwell3d.draw_manager.indirect_state;
+         params.is_byte_count = false;

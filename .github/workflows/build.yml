@@ -23,7 +23,7 @@ jobs:
         # "target" and "type" are the arguments of Eden's build.sh; "gradle" is the matching variant name.
         include:
           - variant: geom
-            patches: "0001-*.patch 0003-*.patch 0004-*.patch 0005-*.patch"
+            patches: "0001-*.patch 0003-*.patch 0004-*.patch 0005-*.patch 0006-*.patch"
             target: standard
             type: RelWithDebInfo
             gradle: MainlineRelWithDebInfo
@@ -36,7 +36,7 @@ jobs:
           # name of a game that phone makers whitelist for full performance. It must be a Release
           # build, because the other build types append a suffix to the package name.
           - variant: geom-opt
-            patches: "0001-*.patch 0003-*.patch 0004-*.patch 0005-*.patch"
+            patches: "0001-*.patch 0003-*.patch 0004-*.patch 0005-*.patch 0006-*.patch"
             target: optimized
             type: Release
             gradle: GenshinSpoofRelease
