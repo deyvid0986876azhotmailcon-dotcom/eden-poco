@@ -6,7 +6,7 @@ Este repositorio no contiene el código de Eden. GitHub Actions descarga el comm
 
 ## Uso
 
-Cada ejecución genera un APK por variante, definida en la matriz de `.github/workflows/build.yml`. Ahora son `geom` (parches 0001, 0003, 0004 y 0005, el candidato actual) y `all` (todos los parches). Las variantes sirven para comparar y saber qué parche causa un comportamiento. Todas comparten identificador de paquete, así que en el teléfono solo cabe una a la vez.
+Cada ejecución genera un APK por variante, definida en la matriz de `.github/workflows/build.yml`. Ahora son `geom` (parches 0001, 0003, 0004 y 0005, el candidato actual), `all` (todos los parches) y `geom-opt` (los mismos parches que `geom`, compilados como la variante "optimized" de Eden, que se instala con otro nombre de paquete). Las variantes sirven para comparar y saber qué parche causa un comportamiento. Todas comparten identificador de paquete, así que en el teléfono solo cabe una a la vez.
 
 1. Añadir o modificar un archivo `patches/NNNN-descripcion.patch` (formato `git diff`, rutas relativas a la raíz de Eden).
 2. Hacer `git push` a `main`. La compilación arranca sola; también se puede lanzar a mano en la pestaña **Actions**.
