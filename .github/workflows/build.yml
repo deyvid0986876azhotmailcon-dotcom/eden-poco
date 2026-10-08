@@ -21,12 +21,10 @@ jobs:
         # One APK per patch set, to tell which patch causes a given behaviour.
         # "patches" is a space-separated list of globs relative to patches/.
         include:
+          - variant: geom
+            patches: "0001-*.patch 0003-*.patch"
           - variant: all
             patches: "*.patch"
-          - variant: p0001
-            patches: "0001-*.patch"
-          - variant: base
-            patches: ""
     env:
       PATCHES: ${{ matrix.patches }}
       CCACHE: "true"

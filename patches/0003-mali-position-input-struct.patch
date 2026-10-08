@@ -1,0 +1,12 @@
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+index 642b9fa..4397570 100644
+--- a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+@@ -445,5 +445,6 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
+ 
+         .has_broken_spirv_clamp = driver_id == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS,
+-        .has_broken_spirv_position_input = driver_id == false,
++        // Mali's shader compiler crashes on geometry shaders that read Position as a standalone input
++        .has_broken_spirv_position_input = driver_id == VK_DRIVER_ID_ARM_PROPRIETARY,
+         .has_broken_unsigned_image_offsets = false,
+         .has_broken_signed_operations = false,
