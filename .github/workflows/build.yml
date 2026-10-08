@@ -84,7 +84,28 @@ jobs:
         working-directory: eden
         run: |
           chmod +x .ci/android/build.sh
-          .ci/android/build.sh -t standard -b RelWithDebInfo
+          set -o pipefail
+          .ci/android/build.sh -t standard -b RelWithDebInfo 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+
+      # Job logs need a GitHub login, annotations do not: surface the failure there.
+      - name: Report build errors
+        if: failure()
+        run: |
+          [ -f build.log ] || exit 0
+          report() {
+            body=$(cut -c1-300 | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            [ -n "$body" ] && echo "::error title=$1::$body"
+          }
+          grep -n -E "error:|Error:|FAILED|What went wrong|CMake Error|Could not|not found|No such file|Exception" build.log | head -n 40 | report "Matched error lines"
+          tail -n 60 build.log | report "Last 60 log lines"
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: build.log
+          retention-days: 7
 
       - name: ccache stats
         if: always()
