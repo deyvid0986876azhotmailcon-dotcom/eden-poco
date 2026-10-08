@@ -22,7 +22,7 @@ jobs:
         # "patches" is a space-separated list of globs relative to patches/.
         include:
           - variant: geom
-            patches: "0001-*.patch 0003-*.patch 0004-*.patch"
+            patches: "0001-*.patch 0003-*.patch 0004-*.patch 0005-*.patch"
           - variant: all
             patches: "*.patch"
     env:
