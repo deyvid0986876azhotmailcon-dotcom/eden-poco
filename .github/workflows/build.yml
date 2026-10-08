@@ -102,9 +102,16 @@ jobs:
       - name: Build
         working-directory: eden
         run: |
-          chmod +x .ci/android/build.sh
+          chmod +x .ci/android/build.sh src/android/gradlew
           set -o pipefail
-          .ci/android/build.sh -t standard -b RelWithDebInfo 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          # Eden copies SDL's Java sources into the tree during the CMake configure, but Gradle
+          # does not order the Kotlin compile after it, so the build fails at random. Running the
+          # native build first guarantees they exist. Same properties as build.sh, to reuse its output.
+          (cd src/android && ./gradlew :app:externalNativeBuildMainlineRelWithDebInfo \
+              -Dorg.gradle.workers.max="$(nproc)" \
+              -PYUZU_ANDROID_ARGS="-DUSE_CCACHE=${CCACHE}" -Pnightly=false) 2>&1 | tee "$GITHUB_WORKSPACE/build.log" \
+            || echo "::warning title=Native prebuild failed::The Kotlin compile may race with the CMake configure in this run"
+          .ci/android/build.sh -t standard -b RelWithDebInfo 2>&1 | tee -a "$GITHUB_WORKSPACE/build.log"
 
       # Job logs need a GitHub login, annotations do not: surface the failure there.
       - name: Report build errors
@@ -112,11 +119,12 @@ jobs:
         run: |
           [ -f build.log ] || exit 0
           report() {
-            body=$(cut -c1-300 | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            body=$(cut -c1-220 | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
             [ -n "$body" ] && echo "::error title=$1::$body"
           }
-          grep -n -E "error:|Error:|FAILED|What went wrong|CMake Error|Could not|not found|No such file|Exception" build.log | head -n 40 | report "Matched error lines"
-          tail -n 60 build.log | report "Last 60 log lines"
+          # "^e: " is how the Kotlin compiler prefixes its errors. Annotations are truncated near 4 KB.
+          grep -n -E "^e: |error:|FAILED|What went wrong|CMake Error|Could not |No such file|ninja: build stopped" build.log | grep -v "file or directory" | head -n 18 | report "Matched error lines"
+          tail -n 25 build.log | report "Last 25 log lines"
 
       - name: Upload build log
         if: failure()
