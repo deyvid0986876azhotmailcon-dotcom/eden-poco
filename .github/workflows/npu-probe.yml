@@ -27,6 +27,7 @@ jobs:
           mkdir -p out lib/arm64-v8a
 
           "$CC" -O2 -Wall -DPROBE_EXE -o out/npu_probe npu_probe.c -llog -ldl -lm
+          "$CC" -O3 -Wall -o out/run_nnapi run_nnapi.c -llog -ldl -lm || true
           "$CC" -O2 -Wall -shared -fPIC -o lib/arm64-v8a/libnpuprobe.so npu_probe.c -landroid -llog -ldl -lm
 
           "$BT/aapt2" link -o unaligned.apk --manifest AndroidManifest.xml -I "$JAR"
