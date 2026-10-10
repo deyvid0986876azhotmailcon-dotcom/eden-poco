@@ -1,0 +1,46 @@
+name: Build NPU probe
+
+on:
+  push:
+    branches: [main]
+    paths: ["npu-probe/**", ".github/workflows/npu-probe.yml"]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build executable and APK
+        working-directory: npu-probe
+        run: |
+          set -euo pipefail
+          CC="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang"
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)"
+          JAR="$(ls -d "$ANDROID_HOME"/platforms/android-* | sort -V | tail -n 1)/android.jar"
+          echo "clang: $CC"
+          echo "build-tools: $BT"
+          echo "android.jar: $JAR"
+          mkdir -p out lib/arm64-v8a
+
+          "$CC" -O2 -Wall -DPROBE_EXE -o out/npu_probe npu_probe.c -llog -ldl -lm
+          "$CC" -O2 -Wall -shared -fPIC -o lib/arm64-v8a/libnpuprobe.so npu_probe.c -landroid -llog -ldl -lm
+
+          "$BT/aapt2" link -o unaligned.apk --manifest AndroidManifest.xml -I "$JAR"
+          zip -r unaligned.apk lib
+          "$BT/zipalign" -f 4 unaligned.apk aligned.apk
+          keytool -genkeypair -keystore debug.jks -storepass android -keypass android -alias probe \
+            -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=npu-probe"
+          "$BT/apksigner" sign --ks debug.jks --ks-pass pass:android --key-pass pass:android \
+            --out out/npu-probe.apk aligned.apk
+
+      - name: Upload probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: npu-probe-${{ github.run_number }}
+          path: npu-probe/out/*
+          if-no-files-found: error
+          retention-days: 14
