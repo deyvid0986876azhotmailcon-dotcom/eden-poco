@@ -408,9 +408,11 @@ void matmul_cpu(float* xout, float* x, Matrix* w, int n, int d) {
 // declared here, as in eden-poco/npu-probe/npu_probe.c.
 //
 // The weights of an fp32 checkpoint go in as TENSOR_FLOAT32 and are computed in half precision.
-// Those of a Q8_0 checkpoint go in with 8 bits each, in the 8-bit form npu_probe ran on the APU
-// (its case fc2048_x64_q8): TENSOR_QUANT8_ASYMM with the zero at 128 for input, weights and
-// output, and a TENSOR_INT32 bias. NNAPI_Q8=1 does the same with an fp32 checkpoint.
+// Those of a Q8_0 checkpoint go in with 8 bits each, as a TENSOR_QUANT8_ASYMM constant with the
+// zero at 128 that a DEQUANTIZE inside the graph turns into the fp32 weights of the
+// FULLY_CONNECTED: input and output stay fp32. NNAPI_Q8=1 does the same with an fp32 checkpoint.
+// NNAPI_Q8=2 is the all 8-bit graph npu_probe ran on the APU (its case fc2048_x64_q8): input and
+// output are TENSOR_QUANT8_ASYMM too and the bias is TENSOR_INT32.
 
 typedef struct ANeuralNetworksMemory ANeuralNetworksMemory;
 typedef struct ANeuralNetworksModel ANeuralNetworksModel;
@@ -432,7 +434,9 @@ enum {
     ANEURALNETWORKS_TENSOR_INT32 = 4,
     ANEURALNETWORKS_TENSOR_QUANT8_ASYMM = 5,
 };
-enum { ANEURALNETWORKS_FULLY_CONNECTED = 9 };
+enum { ANEURALNETWORKS_DEQUANTIZE = 6, ANEURALNETWORKS_FULLY_CONNECTED = 9 };
+// what nn.q8 can be: fp32 weights, 8-bit weights dequantized in the graph, or 8-bit input and output too
+enum { Q8_OFF, Q8_DEQUANT, Q8_IO };
 #define CACHE_TOKEN_SIZE 32
 #define Q8_ZERO 128           // zero point of every 8-bit tensor
 #define Q8_SCALE (1.0f / 127) // scale of input and weights: [-1,1] is [-127,127] around the zero
@@ -458,6 +462,9 @@ static int (*ANeuralNetworksModel_identifyInputsAndOutputs)(ANeuralNetworksModel
                                                             uint32_t, const uint32_t*);
 static int (*ANeuralNetworksModel_relaxComputationFloat32toFloat16)(ANeuralNetworksModel*, bool);
 static int (*ANeuralNetworksModel_finish)(ANeuralNetworksModel*);
+static int (*ANeuralNetworksModel_getSupportedOperationsForDevices)(const ANeuralNetworksModel*,
+                                                                    const ANeuralNetworksDevice* const*,
+                                                                    uint32_t, bool*);
 static int (*ANeuralNetworksCompilation_createForDevices)(ANeuralNetworksModel*,
                                                           const ANeuralNetworksDevice* const*, uint32_t,
                                                           ANeuralNetworksCompilation**);
@@ -479,12 +486,14 @@ typedef struct {
     void* bias; // FULLY_CONNECTED requires a bias: all zeros
     ANeuralNetworksModel* model; // has to outlive the compilation
     ANeuralNetworksCompilation* compilation; // NULL if the device rejected it: this matrix stays on the CPU
-    // the rest is only for a graph of 8-bit tensors
+    // the rest is only for a graph with 8-bit weights
     uint8_t* w8; // W as the graph takes it, when it is kept in RAM
     ANeuralNetworksMemory* memory; // W as the graph takes it, when it is mapped from the weights file
     uint64_t hash; // of those weights, for the cache token
+    float* row_scale; // (d,) what one unit of each output is worth, for an input that peaks at 1.0
+    float* x1; // (n,) the input of an execution, scaled to [-1,1]
+    // and this only for the all 8-bit graph
     float out_scale; // scale of the output tensor
-    float* row_scale; // (d,) what one step of each output is worth, for an input that peaks at 1.0
     float att; // how much the next input is attenuated so that the outputs fit in their 8 bits
     uint8_t* in; // (n,) the quantized input of an execution
     uint8_t* out; // (d,) its quantized output
@@ -497,7 +506,7 @@ typedef struct {
     char cache_dir[PATH_MAX]; // "" = no compilation caching
     bool verify; // also compute every matmul on the CPU and compare
     const char* checkpoint; // path of the checkpoint, set by main
-    bool q8; // the graphs have 8-bit tensors
+    int q8; // Q8_OFF, or how the graphs take 8-bit weights: Q8_DEQUANT or Q8_IO
     int weights_fd; // file the graphs map their 8-bit weights from. -1 = the weights are kept in RAM
     off_t weights_end; // where the next matrix goes in that file
     MatmulGraph* graphs; // one per weight matrix seen so far
@@ -565,6 +574,7 @@ static bool nnapi_load(void) {
     LOAD(ANeuralNetworksModel_identifyInputsAndOutputs)
     LOAD(ANeuralNetworksModel_relaxComputationFloat32toFloat16)
     LOAD(ANeuralNetworksModel_finish)
+    LOAD(ANeuralNetworksModel_getSupportedOperationsForDevices)
     LOAD(ANeuralNetworksCompilation_createForDevices)
     LOAD(ANeuralNetworksCompilation_free)
     LOAD(ANeuralNetworksCompilation_setCaching)
@@ -603,22 +613,21 @@ static bool pwrite_all(int fd, const void* buffer, size_t size, off_t offset) {
 }
 
 static void weights_file_open(void) {
-    // The 8-bit weights the graphs take are not the bytes of the checkpoint, so they are written
-    // once to a file of their own, <checkpoint>.nnapi8, and NNAPI maps each matrix from it. This
-    // process then holds no copy of them (given a pointer, NNAPI makes a second copy in shared
-    // memory that lives as long as the model), and later runs find them already made
-    char path[PATH_MAX];
+    // The 8-bit weights the graphs take are not the bytes of the checkpoint. By default they
+    // are made in RAM at every run. With NNAPI_WEIGHTS_FILE they are written once to that file
+    // and NNAPI maps each matrix from it: this process then holds no copy of them (given a
+    // pointer, NNAPI makes a second copy in shared memory that lives as long as the model) and
+    // later runs find them already made. A model of several GB needs that, but no run has
+    // shown yet that the driver reads weights given this way
+    const char* path = getenv("NNAPI_WEIGHTS_FILE");
     struct stat st;
-    const char* name = getenv("NNAPI_WEIGHTS_FILE");
     nn.weights_fd = -1;
-    if (name && name[0] == '\0') { return; } // asked to keep them in RAM
+    if (!path || path[0] == '\0') { return; }
     if (!nn.checkpoint || stat(nn.checkpoint, &st) != 0) { return; }
-    if (name) { snprintf(path, sizeof path, "%s", name); }
-    else { snprintf(path, sizeof path, "%s.nnapi8", nn.checkpoint); }
 
     WeightsHeader want, have;
     memset(&want, 0, sizeof want);
-    memcpy(want.magic, "nnapi8-a", 8);
+    memcpy(want.magic, "nnapi8-b", 8);
     want.checkpoint_size = st.st_size;
     want.checkpoint_mtime = st.st_mtime;
     want.group_size = GS;
@@ -679,9 +688,10 @@ static void nnapi_setup(void) {
         }
     }
 
-    // 8-bit tensors: always with a Q8_0 checkpoint, on request with an fp32 one
+    // 8-bit weights: always with a Q8_0 checkpoint, on request with an fp32 one
     const char* q8 = getenv("NNAPI_Q8");
-    nn.q8 = GS != 0 || (q8 && atoi(q8) != 0);
+    int mode = q8 ? atoi(q8) : 0;
+    nn.q8 = mode == 2 ? Q8_IO : (GS != 0 || mode == 1) ? Q8_DEQUANT : Q8_OFF;
     nn.weights_fd = -1;
     if (nn.q8) { weights_file_open(); }
 
@@ -689,15 +699,16 @@ static void nnapi_setup(void) {
     nn.verify = verify && atoi(verify) != 0;
     nn.state = 1;
     fprintf(stderr, "nnapi: matmul runs on %s with %s\n", nn.device_name,
-            nn.q8 ? "8-bit weights" : "fp32 weights in half precision");
+            nn.q8 == Q8_DEQUANT ? "8-bit weights dequantized in the graph, fp32 input and output"
+            : nn.q8 == Q8_IO ? "8-bit weights, input and output" : "fp32 weights in half precision");
 }
 
 static void make_weights_8bit(MatmulGraph* g, uint8_t* w8) {
-    // W as the 8-bit weights of the graph, plus the scales that take its 8-bit outputs back to
-    // floats. Row i is written as m[i] * q, with q in [-127,127] stored as q + 128, so every row
-    // uses the whole range whatever the size of its weights; m[i] is applied to the output
-    // afterwards, on the CPU. Q8_0 has a scaling factor per group of GS weights and the tensor
-    // has a single one: the groups of a row are brought to the largest factor in that row
+    // W as the 8-bit weights of the graph. Row i is written as m[i] * q, with q in [-127,127]
+    // stored as q + 128, so every row uses the whole range whatever the size of its weights;
+    // m[i] is left in row_scale and applied to the output afterwards, on the CPU. Q8_0 has a
+    // scaling factor per group of GS weights and the tensor has a single one: the groups of a
+    // row are brought to the largest factor in that row
     int n = g->n;
     int d = g->d;
     double norm = 0.0; // sum of q * q over the whole matrix
@@ -740,34 +751,44 @@ static void make_weights_8bit(MatmulGraph* g, uint8_t* w8) {
         norm += sum;
     }
 
-    // The scale of the output tensor. With an input that peaks at 1.0, one step of the 8-bit
-    // input moves an output by the norm of its row of weights (omega is the RMS of that norm
-    // over the rows). One step of the output is made as large, so neither side wastes its 8
-    // bits. Outputs that do not fit are dealt with at run time, by attenuating the input
+    // The scale of the output tensor of the all 8-bit graph. With an input that peaks at 1.0,
+    // one step of the 8-bit input moves an output by the norm of its row of weights (omega is
+    // the RMS of that norm over the rows). One step of the output is made as large, so neither
+    // side wastes its 8 bits. Outputs that do not fit are dealt with at run time, by
+    // attenuating the input
     float omega = sqrtf((float)(norm / d)) * Q8_SCALE;
     if (omega < 1.0f) { omega = 1.0f; }
     g->out_scale = omega * Q8_SCALE;
-    for (int i = 0; i < d; i++) {
-        g->row_scale[i] *= omega;
-    }
     g->hash = hash;
 }
 
+static void scale_rows(MatmulGraph* g) {
+    // row_scale comes with the m[i] of make_weights_8bit, which is also how the weights file
+    // keeps it. The weights of the graph are q / 127, so one unit of an fp32 output is worth
+    // 127 * m[i], and one step of an 8-bit output is worth out_scale times that
+    float unit = nn.q8 == Q8_IO ? 127.0f * g->out_scale : 127.0f;
+    for (int i = 0; i < g->d; i++) {
+        g->row_scale[i] *= unit;
+    }
+}
+
 static int prepare_weights_8bit(MatmulGraph* g) {
-    // everything a graph of 8-bit tensors needs besides its model. the weights are taken from
-    // the weights file if an earlier run left them there
+    // everything a graph with 8-bit weights needs besides its model. with a weights file, the
+    // weights are taken from it if an earlier run left them there
     size_t size = (size_t)g->n * g->d;
     size_t scales_size = g->d * sizeof(float);
     g->row_scale = malloc(scales_size);
+    g->x1 = malloc(g->n * sizeof(float));
     g->in = malloc(g->n);
     g->out = malloc(g->d);
-    if (!g->row_scale || !g->in || !g->out) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
+    if (!g->row_scale || !g->x1 || !g->in || !g->out) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
     g->att = 1.0f;
 
     if (nn.weights_fd == -1) {
         g->w8 = malloc(size);
         if (!g->w8) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
         make_weights_8bit(g, g->w8);
+        scale_rows(g);
         return 0;
     }
 
@@ -801,6 +822,7 @@ static int prepare_weights_8bit(MatmulGraph* g) {
             return -1;
         }
     }
+    scale_rows(g);
     // the offset is a multiple of the page size: NNAPI maps the weights from there
     return ANeuralNetworksMemory_createFromFd(size, PROT_READ, nn.weights_fd, offset, &g->memory);
 }
@@ -814,29 +836,38 @@ static int add_operand(ANeuralNetworksModel* m, int32_t type, uint32_t rank, con
 static int build_matmul_model(MatmulGraph* g) {
     // x (1,n) -> FULLY_CONNECTED with weights W (d,n) and a zero bias -> xout (1,d)
     // W is stored exactly as FULLY_CONNECTED wants it: one row of n values per output
+    // 8-bit weights with fp32 tensors go through a DEQUANTIZE first: W8 (d,n) -> W (d,n)
     const uint32_t x_dims[] = {1, (uint32_t)g->n};
     const uint32_t w_dims[] = {(uint32_t)g->d, (uint32_t)g->n};
     const uint32_t bias_dims[] = {(uint32_t)g->d};
     const uint32_t out_dims[] = {1, (uint32_t)g->d};
-    const uint32_t fc_in[] = {0, 1, 2, 3};
+    const uint32_t w8_op[] = {1};
+    const uint32_t w32_op[] = {5};
+    const uint32_t fc_in[] = {0, (uint32_t)(nn.q8 == Q8_DEQUANT ? 5 : 1), 2, 3};
     const uint32_t fc_out[] = {4};
     const uint32_t model_in[] = {0};
     const int32_t no_activation = 0;
-    // 8-bit tensors hold (value - zero) * scale. the bias is int32 and its scale has to be the
-    // product of the scales of input and weights
-    const int32_t type = nn.q8 ? ANEURALNETWORKS_TENSOR_QUANT8_ASYMM : ANEURALNETWORKS_TENSOR_FLOAT32;
-    const int32_t bias_type = nn.q8 ? ANEURALNETWORKS_TENSOR_INT32 : ANEURALNETWORKS_TENSOR_FLOAT32;
-    const int32_t zero = nn.q8 ? Q8_ZERO : 0;
-    const float scale = nn.q8 ? Q8_SCALE : 0.0f;
+    // 8-bit tensors hold (value - zero) * scale. in the all 8-bit graph the bias is int32 and
+    // its scale has to be the product of the scales of input and weights
+    const bool io8 = nn.q8 == Q8_IO;
+    const int32_t fp32 = ANEURALNETWORKS_TENSOR_FLOAT32;
+    const int32_t io_type = io8 ? ANEURALNETWORKS_TENSOR_QUANT8_ASYMM : fp32;
+    const int32_t io_zero = io8 ? Q8_ZERO : 0;
+    const float io_scale = io8 ? Q8_SCALE : 0.0f;
     const size_t w_size = (size_t)g->d * g->n * (nn.q8 ? sizeof(uint8_t) : sizeof(float));
     int e = ANeuralNetworksModel_create(&g->model);
     if (e || !g->model) { return e ? e : -1; }
     ANeuralNetworksModel* m = g->model;
-    e |= add_operand(m, type, 2, x_dims, scale, zero);
-    e |= add_operand(m, type, 2, w_dims, scale, zero);
-    e |= add_operand(m, bias_type, 1, bias_dims, scale * scale, 0);
+    e |= add_operand(m, io_type, 2, x_dims, io_scale, io_zero);
+    if (nn.q8) { e |= add_operand(m, ANEURALNETWORKS_TENSOR_QUANT8_ASYMM, 2, w_dims, Q8_SCALE, Q8_ZERO); }
+    else { e |= add_operand(m, fp32, 2, w_dims, 0.0f, 0); }
+    e |= add_operand(m, io8 ? ANEURALNETWORKS_TENSOR_INT32 : fp32, 1, bias_dims, io_scale * io_scale, 0);
     e |= add_operand(m, ANEURALNETWORKS_INT32, 0, NULL, 0.0f, 0); // fused activation
-    e |= add_operand(m, type, 2, out_dims, nn.q8 ? g->out_scale : 0.0f, zero);
+    e |= add_operand(m, io_type, 2, out_dims, io8 ? g->out_scale : 0.0f, io_zero);
+    if (nn.q8 == Q8_DEQUANT) {
+        // W in fp32: a temporary that DEQUANTIZE fills from the 8-bit constant
+        e |= add_operand(m, fp32, 2, w_dims, 0.0f, 0);
+    }
     // values over 128 bytes are referenced, not copied: W and the bias must outlive the model
     if (g->memory) {
         e |= ANeuralNetworksModel_setOperandValueFromMemory(m, 1, g->memory, 0, w_size);
@@ -845,10 +876,13 @@ static int build_matmul_model(MatmulGraph* g) {
     }
     e |= ANeuralNetworksModel_setOperandValue(m, 2, g->bias, g->d * sizeof(float));
     e |= ANeuralNetworksModel_setOperandValue(m, 3, &no_activation, sizeof no_activation);
+    if (nn.q8 == Q8_DEQUANT) {
+        e |= ANeuralNetworksModel_addOperation(m, ANEURALNETWORKS_DEQUANTIZE, 1, w8_op, 1, w32_op);
+    }
     e |= ANeuralNetworksModel_addOperation(m, ANEURALNETWORKS_FULLY_CONNECTED, 4, fc_in, 1, fc_out);
     e |= ANeuralNetworksModel_identifyInputsAndOutputs(m, 1, model_in, 1, fc_out);
     // with fp32 tensors the accelerator computes in half precision
-    if (!e && !nn.q8) { e = ANeuralNetworksModel_relaxComputationFloat32toFloat16(m, true); }
+    if (!e && !io8) { e = ANeuralNetworksModel_relaxComputationFloat32toFloat16(m, true); }
     if (!e) { e = ANeuralNetworksModel_finish(m); }
     return e;
 }
@@ -867,7 +901,7 @@ static void matmul_cache_token(MatmulGraph* g, uint8_t* token) {
         }
     }
     memset(token, 0, CACHE_TOKEN_SIZE);
-    memcpy(token, nn.q8 ? "matmul-fc-q8a" : "matmul-fc-f16", 13);
+    memcpy(token, nn.q8 == Q8_DEQUANT ? "matmul-fc-q8d" : nn.q8 ? "matmul-fc-q8b" : "matmul-fc-f16", 13);
     memcpy(token + 16, &hash, sizeof hash);
     memcpy(token + 24, &g->n, sizeof g->n);
     memcpy(token + 28, &g->d, sizeof g->d);
@@ -885,6 +919,22 @@ static int compile_matmul_graph(MatmulGraph* g, const uint8_t* token) {
         g->compilation = NULL;
     }
     return e;
+}
+
+static void explain_rejection(MatmulGraph* g) {
+    // which operations of a rejected graph the device takes. said once: it is the same for all
+    static bool said;
+    const ANeuralNetworksDevice* const one[1] = {nn.device};
+    bool takes[2] = {false, false};
+    if (said || !g->model) { return; }
+    if (ANeuralNetworksModel_getSupportedOperationsForDevices(g->model, one, 1, takes) != 0) { return; }
+    said = true;
+    if (nn.q8 == Q8_DEQUANT) {
+        fprintf(stderr, "nnapi: %s takes DEQUANTIZE: %s, the FULLY_CONNECTED it feeds: %s\n",
+                nn.device_name, takes[0] ? "yes" : "no", takes[1] ? "yes" : "no");
+    } else {
+        fprintf(stderr, "nnapi: %s takes FULLY_CONNECTED: %s\n", nn.device_name, takes[0] ? "yes" : "no");
+    }
 }
 
 static MatmulGraph* matmul_graph(Matrix* w, int n, int d) {
@@ -928,6 +978,7 @@ static MatmulGraph* matmul_graph(Matrix* w, int n, int d) {
     if (e) {
         fprintf(stderr, "nnapi: %s rejected matrix %dx%d (error %d), it stays on the CPU\n",
                 nn.device_name, d, n, e);
+        explain_rejection(g);
     }
     return g;
 }
@@ -1016,6 +1067,32 @@ static int run_matmul_8bit(MatmulGraph* g, float* xout, float* x) {
     return 0;
 }
 
+static int run_matmul_dequant(MatmulGraph* g, float* xout, float* x) {
+    // 8-bit weights, fp32 input and output. The graph has every row of W scaled to [-1,1] and
+    // is given x scaled the same way, so nothing in it can be larger than n whatever the sizes
+    // in the model: the accelerator computes in half precision, which ends at 65504. Both
+    // scales are put back here
+    int n = g->n;
+    int d = g->d;
+    float xmax = 0.0f;
+    for (int j = 0; j < n; j++) {
+        if (fabsf(x[j]) > xmax) { xmax = fabsf(x[j]); }
+    }
+    if (!(xmax > 0.0f)) {
+        memset(xout, 0, d * sizeof(float));
+        return 0;
+    }
+    for (int j = 0; j < n; j++) {
+        g->x1[j] = x[j] / xmax;
+    }
+    int e = run_matmul_graph(g, g->x1, n * sizeof(float), xout, d * sizeof(float));
+    if (e) { return e; }
+    for (int i = 0; i < d; i++) {
+        xout[i] *= g->row_scale[i] * xmax;
+    }
+    return 0;
+}
+
 void matmul(float* xout, float* x, Matrix* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
@@ -1023,8 +1100,9 @@ void matmul(float* xout, float* x, Matrix* w, int n, int d) {
     MatmulGraph* g = nn.state > 0 ? matmul_graph(w, n, d) : NULL;
     if (g && g->compilation) {
         double start = now_ms();
-        int e = nn.q8 ? run_matmul_8bit(g, xout, x)
-                      : run_matmul_graph(g, x, n * sizeof(float), xout, d * sizeof(float));
+        int e = nn.q8 == Q8_IO ? run_matmul_8bit(g, xout, x)
+              : nn.q8 == Q8_DEQUANT ? run_matmul_dequant(g, xout, x)
+              : run_matmul_graph(g, x, n * sizeof(float), xout, d * sizeof(float));
         if (!e) {
             nn.run_ms += now_ms() - start;
             nn.nnapi_runs++;
@@ -1059,7 +1137,7 @@ void report_matmul() {
             compiled, nn.n_graphs, nn.device_name, nn.compile_ms);
     fprintf(stderr, "nnapi: %ld matmuls on %s at %.3f ms each, %ld on the CPU\n",
             nn.nnapi_runs, nn.device_name, nn.nnapi_runs ? nn.run_ms / nn.nnapi_runs : 0.0, nn.cpu_runs);
-    if (nn.q8) {
+    if (nn.q8 == Q8_IO) {
         fprintf(stderr, "nnapi: %ld executions repeated because the outputs did not fit in 8 bits\n", nn.retries);
     }
     if (nn.verify) {
@@ -1080,6 +1158,7 @@ void free_matmul() {
         free(g->bias);
         free(g->w8);
         free(g->row_scale);
+        free(g->x1);
         free(g->in);
         free(g->out);
     }
@@ -1763,10 +1842,11 @@ void error_usage() {
     fprintf(stderr, "                   off = no NNAPI, the plain C matmul\n");
     fprintf(stderr, "  NNAPI_CACHE_DIR  compilation cache directory, default ./nnapi_cache. empty = no cache\n");
     fprintf(stderr, "  NNAPI_VERIFY     1 = also run every matmul on the CPU and report the largest difference\n");
-    fprintf(stderr, "  NNAPI_Q8         1 = 8-bit weights in the NNAPI graphs for an fp32 checkpoint too.\n");
-    fprintf(stderr, "                   a Q8_0 checkpoint always has them\n");
-    fprintf(stderr, "  NNAPI_WEIGHTS_FILE  file those 8-bit weights are kept in, default <checkpoint>.nnapi8.\n");
-    fprintf(stderr, "                   empty = keep them in RAM\n");
+    fprintf(stderr, "  NNAPI_Q8         1 = 8-bit weights in the NNAPI graphs for an fp32 checkpoint too, turned\n");
+    fprintf(stderr, "                   into fp32 inside the graph. a Q8_0 checkpoint always has them.\n");
+    fprintf(stderr, "                   2 = input and output of the graphs in 8 bits as well\n");
+    fprintf(stderr, "  NNAPI_WEIGHTS_FILE  file to keep those 8-bit weights in and map them from, e.g.\n");
+    fprintf(stderr, "                   model.bin.nnapi8. default: they are made in RAM at every run\n");
     exit(EXIT_FAILURE);
 }
 
@@ -1811,7 +1891,7 @@ int main(int argc, char *argv[]) {
     // build the Transformer via the model .bin file
     Transformer transformer;
     build_transformer(&transformer, checkpoint_path);
-    nn.checkpoint = checkpoint_path; // the file of 8-bit weights is named after it
+    nn.checkpoint = checkpoint_path; // a file of 8-bit weights is checked against it
     if (steps == 0 || steps > transformer.config.seq_len) steps = transformer.config.seq_len; // override to ~max length
 
     // build the Tokenizer via the tokenizer .bin file
