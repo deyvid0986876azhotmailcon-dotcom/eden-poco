@@ -23,8 +23,7 @@ jobs:
       - name: Build run_nnapi as shared library
         run: |
           mkdir -p chat_apk/app/src/main/jniLibs/arm64-v8a
-          $ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang -O3 npu-probe/run_nnapi.c npu-probe/fp16.c -o chat_apk/app/src/main/jniLibs/arm64-v8a/librun_nnapi.so -lm -ldl -llog
-
+          $ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang -O3 npu-probe/run_nnapi.c -o chat_apk/app/src/main/jniLibs/arm64-v8a/librun_nnapi.so -lm -ldl -llog
       - name: Build APK
         working-directory: chat_apk
         run: gradle assembleDebug
