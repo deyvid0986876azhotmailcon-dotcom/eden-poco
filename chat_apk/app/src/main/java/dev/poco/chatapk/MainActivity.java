@@ -6,14 +6,26 @@ import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 
 public class MainActivity extends Activity {
+    private String nativeLibDir;
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        
+        nativeLibDir = getApplicationInfo().nativeLibraryDir;
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, 1);
+            }
+        }
 
         WebView webView = new WebView(this);
         WebSettings settings = webView.getSettings();
@@ -24,13 +36,13 @@ public class MainActivity extends Activity {
         setContentView(webView);
     }
 
-    public static final class AndroidBackend {
+    public final class AndroidBackend {
         @JavascriptInterface
         public String send(String prompt) {
             try {
                 Process process = new ProcessBuilder(
-                        "/data/local/tmp/llm/run_nnapi",
-                        "/data/local/tmp/llm/stories15M.bin",
+                        MainActivity.this.nativeLibDir + "/librun_nnapi.so",
+                        "/sdcard/Download/stories15M.bin",
                         "-i",
                         prompt == null ? "" : prompt)
                         .redirectErrorStream(true)
