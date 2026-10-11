@@ -10,8 +10,10 @@ import android.Manifest;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 
 public class MainActivity extends Activity {
     private String nativeLibDir;
@@ -40,12 +42,25 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String send(String prompt) {
             try {
+                File files = MainActivity.this.getFilesDir();
+                // the 7B checkpoint if it has been copied in, else the small test model
+                File model = new File(files, "llama2_7b.bin");
+                if (!model.exists()) {
+                    model = new File(files, "stories15M.bin");
+                }
+                File cache = new File(files, "nnapi_cache");
+                cache.mkdirs();
                 ProcessBuilder pb = new ProcessBuilder(
                         MainActivity.this.nativeLibDir + "/librun_nnapi.so",
-                        MainActivity.this.getFilesDir().getAbsolutePath() + "/stories15M.bin",
-                        "-z", MainActivity.this.getFilesDir().getAbsolutePath() + "/tokenizer.bin",
+                        model.getAbsolutePath(),
+                        "-z", new File(files, "tokenizer.bin").getAbsolutePath(),
                         "-i", prompt == null ? "" : prompt);
-                pb.directory(MainActivity.this.getFilesDir());
+                Map<String, String> env = pb.environment();
+                env.put("NNAPI_Q8", "2");
+                env.put("NNAPI_CACHE_DIR", cache.getAbsolutePath());
+                // 8-bit weights mapped from files: kept in RAM, a 7B does not fit
+                env.put("NNAPI_WEIGHTS_FILE", model.getAbsolutePath() + ".nnapi8");
+                pb.directory(files);
                 pb.redirectErrorStream(true);
                 Process process = pb.start();
 

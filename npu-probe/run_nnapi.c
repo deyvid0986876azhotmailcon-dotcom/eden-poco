@@ -442,7 +442,6 @@ enum { Q8_OFF, Q8_DEQUANT, Q8_IO };
 #define Q8_SCALE (1.0f / 127) // scale of input and weights: [-1,1] is [-127,127] around the zero
 #define Q8_PEAK 96            // where the largest output of a matmul is aimed at, out of 127
 #define Q8_MAX_TRIES 8        // executions of one matmul before it is given to the CPU
-#define WEIGHTS_ALIGN 65536   // every matrix starts at a multiple of this in the weights file
 #define WEIGHTS_DONE 0x38716e6eu
 
 static int (*ANeuralNetworks_getDeviceCount)(uint32_t*);
@@ -488,7 +487,7 @@ typedef struct {
     ANeuralNetworksCompilation* compilation; // NULL if the device rejected it: this matrix stays on the CPU
     // the rest is only for a graph with 8-bit weights
     uint8_t* w8; // W as the graph takes it, when it is kept in RAM
-    ANeuralNetworksMemory* memory; // W as the graph takes it, when it is mapped from the weights file
+    ANeuralNetworksMemory* memory; // W as the graph takes it, when it is mapped from its weights file
     uint64_t hash; // of those weights, for the cache token
     float* row_scale; // (d,) what one unit of each output is worth, for an input that peaks at 1.0
     float* x1; // (n,) the input of an execution, scaled to [-1,1]
@@ -499,6 +498,26 @@ typedef struct {
     uint8_t* out; // (d,) its quantized output
 } MatmulGraph;
 
+// which checkpoint the weights files were made from.
+// the magic has to change if make_weights_8bit or the order of the matmuls in forward do
+typedef struct {
+    char magic[8];
+    int64_t checkpoint_size;
+    int64_t checkpoint_mtime;
+    int64_t group_size;
+} WeightsHeader;
+
+// what follows the weights and the row scales of a matrix in its weights file.
+// it is written last and marks them as complete
+typedef struct {
+    WeightsHeader made_from;
+    uint64_t hash;
+    float out_scale;
+    int32_t n;
+    int32_t d;
+    uint32_t done;
+} WeightsTail;
+
 typedef struct {
     int state; // 0 = not set up yet, 1 = ready, -1 = unavailable
     const ANeuralNetworksDevice* device;
@@ -507,8 +526,8 @@ typedef struct {
     bool verify; // also compute every matmul on the CPU and compare
     const char* checkpoint; // path of the checkpoint, set by main
     int q8; // Q8_OFF, or how the graphs take 8-bit weights: Q8_DEQUANT or Q8_IO
-    int weights_fd; // file the graphs map their 8-bit weights from. -1 = the weights are kept in RAM
-    off_t weights_end; // where the next matrix goes in that file
+    char weights_path[PATH_MAX]; // prefix of the files the graphs map their 8-bit weights from. "" = kept in RAM
+    WeightsHeader weights_from; // what the tail of each of those files has to say
     MatmulGraph* graphs; // one per weight matrix seen so far
     int n_graphs;
     // counters for report_matmul
@@ -527,25 +546,6 @@ typedef struct {
 } MatmulState;
 
 static MatmulState nn;
-
-// what the weights file starts with: which checkpoint its weights were made from.
-// the magic has to change if make_weights_8bit or the order of the matmuls in forward do
-typedef struct {
-    char magic[8];
-    int64_t checkpoint_size;
-    int64_t checkpoint_mtime;
-    int64_t group_size;
-} WeightsHeader;
-
-// what follows the weights and the row scales of each matrix in the weights file.
-// it is written last and marks them as complete
-typedef struct {
-    uint64_t hash;
-    float out_scale;
-    int32_t n;
-    int32_t d;
-    uint32_t done;
-} WeightsTail;
 
 static double now_ms(void) {
     struct timespec time;
@@ -612,40 +612,29 @@ static bool pwrite_all(int fd, const void* buffer, size_t size, off_t offset) {
     return true;
 }
 
-static void weights_file_open(void) {
+static void weights_files_setup(void) {
     // The 8-bit weights the graphs take are not the bytes of the checkpoint. By default they
-    // are made in RAM at every run. With NNAPI_WEIGHTS_FILE they are written once to that file
-    // and NNAPI maps each matrix from it: this process then holds no copy of them (given a
-    // pointer, NNAPI makes a second copy in shared memory that lives as long as the model) and
-    // later runs find them already made. A model of several GB needs that, but no run has
-    // shown yet that the driver reads weights given this way
+    // are made in RAM at every run. With NNAPI_WEIGHTS_FILE they are written once to files
+    // named after it, one per matrix (<path>.0, <path>.1, ...), and NNAPI maps each matrix from
+    // its file: this process then holds no copy of them (given a pointer, NNAPI makes a second
+    // copy in shared memory that lives as long as the model) and later runs find them already
+    // made. A model of several GB needs that.
+    // It is a file per matrix and not one for all because the weights have to be at the first
+    // byte: the MediaTek driver maps the fd from its start whatever the offset the memory was
+    // created with (bytes of the file ahead of that offset changed the outputs)
     const char* path = getenv("NNAPI_WEIGHTS_FILE");
     struct stat st;
-    nn.weights_fd = -1;
     if (!path || path[0] == '\0') { return; }
-    if (!nn.checkpoint || stat(nn.checkpoint, &st) != 0) { return; }
-
-    WeightsHeader want, have;
-    memset(&want, 0, sizeof want);
-    memcpy(want.magic, "nnapi8-b", 8);
-    want.checkpoint_size = st.st_size;
-    want.checkpoint_mtime = st.st_mtime;
-    want.group_size = GS;
-    int fd = open(path, O_RDWR | O_CREAT, 0600);
-    if (fd != -1 && (!pread_all(fd, &have, sizeof have, 0) || memcmp(&have, &want, sizeof want) != 0)) {
-        // a new file, or one made from another checkpoint: start it over
-        if (ftruncate(fd, 0) != 0 || !pwrite_all(fd, &want, sizeof want, 0)) {
-            close(fd);
-            fd = -1;
-        }
-    }
-    if (fd == -1) {
+    if (!nn.checkpoint || stat(nn.checkpoint, &st) != 0 || strlen(path) + 12 > sizeof nn.weights_path) {
         fprintf(stderr, "nnapi: cannot use weights file %s, the 8-bit weights stay in RAM\n", path);
         return;
     }
-    nn.weights_fd = fd;
-    nn.weights_end = WEIGHTS_ALIGN;
-    fprintf(stderr, "nnapi: 8-bit weights in %s\n", path);
+    memcpy(nn.weights_from.magic, "nnapi8-c", 8);
+    nn.weights_from.checkpoint_size = st.st_size;
+    nn.weights_from.checkpoint_mtime = st.st_mtime;
+    nn.weights_from.group_size = GS;
+    strcpy(nn.weights_path, path);
+    fprintf(stderr, "nnapi: 8-bit weights in %s.<matrix>\n", path);
 }
 
 static void nnapi_setup(void) {
@@ -692,8 +681,7 @@ static void nnapi_setup(void) {
     const char* q8 = getenv("NNAPI_Q8");
     int mode = q8 ? atoi(q8) : 0;
     nn.q8 = mode == 2 ? Q8_IO : (GS != 0 || mode == 1) ? Q8_DEQUANT : Q8_OFF;
-    nn.weights_fd = -1;
-    if (nn.q8) { weights_file_open(); }
+    if (nn.q8) { weights_files_setup(); }
 
     const char* verify = getenv("NNAPI_VERIFY");
     nn.verify = verify && atoi(verify) != 0;
@@ -773,8 +761,8 @@ static void scale_rows(MatmulGraph* g) {
 }
 
 static int prepare_weights_8bit(MatmulGraph* g) {
-    // everything a graph with 8-bit weights needs besides its model. with a weights file, the
-    // weights are taken from it if an earlier run left them there
+    // everything a graph with 8-bit weights needs besides its model. with weights files, the
+    // weights are taken from the file of this matrix if an earlier run left them there
     size_t size = (size_t)g->n * g->d;
     size_t scales_size = g->d * sizeof(float);
     g->row_scale = malloc(scales_size);
@@ -784,7 +772,7 @@ static int prepare_weights_8bit(MatmulGraph* g) {
     if (!g->row_scale || !g->x1 || !g->in || !g->out) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
     g->att = 1.0f;
 
-    if (nn.weights_fd == -1) {
+    if (nn.weights_path[0] == '\0') {
         g->w8 = malloc(size);
         if (!g->w8) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
         make_weights_8bit(g, g->w8);
@@ -792,39 +780,50 @@ static int prepare_weights_8bit(MatmulGraph* g) {
         return 0;
     }
 
-    // in the file: the weights, the row scales and the tail. the matrices are always first
-    // used in the same order, so each one is found where an earlier run put it
-    off_t offset = nn.weights_end;
-    off_t tail_offset = offset + size + scales_size;
+    // in the file of this matrix: the weights, the row scales and the tail. the matrices are
+    // always first used in the same order, so each one finds the file an earlier run left it
+    char path[PATH_MAX];
+    off_t tail_offset = size + scales_size;
     WeightsTail tail;
-    nn.weights_end = (tail_offset + sizeof tail + WEIGHTS_ALIGN - 1) / WEIGHTS_ALIGN * WEIGHTS_ALIGN;
-    if (pread_all(nn.weights_fd, &tail, sizeof tail, tail_offset) && tail.done == WEIGHTS_DONE
+    snprintf(path, sizeof path, "%s.%d", nn.weights_path, (int)(g - nn.graphs));
+    int fd = open(path, O_RDONLY);
+    if (fd != -1 && pread_all(fd, &tail, sizeof tail, tail_offset) && tail.done == WEIGHTS_DONE
+        && memcmp(&tail.made_from, &nn.weights_from, sizeof tail.made_from) == 0
         && tail.n == g->n && tail.d == g->d && tail.out_scale > 0.0f
-        && pread_all(nn.weights_fd, g->row_scale, scales_size, offset + size)) {
+        && pread_all(fd, g->row_scale, scales_size, size)) {
         g->hash = tail.hash;
         g->out_scale = tail.out_scale;
     } else {
+        // no file yet, or one made from another checkpoint: start it over
+        if (fd != -1) { close(fd); }
         uint8_t* w8 = malloc(size);
         if (!w8) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
         make_weights_8bit(g, w8);
         memset(&tail, 0, sizeof tail);
+        tail.made_from = nn.weights_from;
         tail.hash = g->hash;
         tail.out_scale = g->out_scale;
         tail.n = g->n;
         tail.d = g->d;
         tail.done = WEIGHTS_DONE;
-        bool written = pwrite_all(nn.weights_fd, w8, size, offset)
-                    && pwrite_all(nn.weights_fd, g->row_scale, scales_size, offset + size)
-                    && pwrite_all(nn.weights_fd, &tail, sizeof tail, tail_offset);
+        fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        bool written = fd != -1 && pwrite_all(fd, w8, size, 0)
+                    && pwrite_all(fd, g->row_scale, scales_size, size)
+                    && pwrite_all(fd, &tail, sizeof tail, tail_offset);
         free(w8);
-        if (!written) {
-            fprintf(stderr, "nnapi: writing the weights file failed: %s\n", strerror(errno));
+        if (fd != -1) { close(fd); }
+        // the driver only has to read it
+        fd = written ? open(path, O_RDONLY) : -1;
+        if (fd == -1) {
+            fprintf(stderr, "nnapi: writing weights file %s failed: %s\n", path, strerror(errno));
             return -1;
         }
     }
     scale_rows(g);
-    // the offset is a multiple of the page size: NNAPI maps the weights from there
-    return ANeuralNetworksMemory_createFromFd(size, PROT_READ, nn.weights_fd, offset, &g->memory);
+    // the memory starts at the first byte of the file. NNAPI duplicates the fd
+    int e = ANeuralNetworksMemory_createFromFd(size, PROT_READ, fd, 0, &g->memory);
+    close(fd);
+    return e;
 }
 
 static int add_operand(ANeuralNetworksModel* m, int32_t type, uint32_t rank, const uint32_t* dims,
@@ -901,7 +900,9 @@ static void matmul_cache_token(MatmulGraph* g, uint8_t* token) {
         }
     }
     memset(token, 0, CACHE_TOKEN_SIZE);
-    memcpy(token, nn.q8 == Q8_DEQUANT ? "matmul-fc-q8d" : nn.q8 ? "matmul-fc-q8b" : "matmul-fc-f16", 13);
+    // the names of the 8-bit graphs are not the ones of the versions that gave the memory an
+    // fd offset: what those compiled from the wrong bytes of the file may still be in a cache
+    memcpy(token, nn.q8 == Q8_DEQUANT ? "matmul-fc-q8e" : nn.q8 ? "matmul-fc-q8c" : "matmul-fc-f16", 13);
     memcpy(token + 16, &hash, sizeof hash);
     memcpy(token + 24, &g->n, sizeof g->n);
     memcpy(token + 28, &g->d, sizeof g->d);
@@ -1131,7 +1132,7 @@ void report_matmul() {
     }
     if (nn.q8) {
         fprintf(stderr, "nnapi: 8-bit weights made ready in %.0f ms, kept in %s\n",
-                nn.weights_ms, nn.weights_fd != -1 ? "the weights file" : "RAM");
+                nn.weights_ms, nn.weights_path[0] != '\0' ? "the weights files" : "RAM");
     }
     fprintf(stderr, "nnapi: %d of %d matmul graphs compiled for %s in %.0f ms\n",
             compiled, nn.n_graphs, nn.device_name, nn.compile_ms);
@@ -1163,7 +1164,6 @@ void free_matmul() {
         free(g->out);
     }
     free(nn.graphs);
-    if (nn.state > 0 && nn.weights_fd != -1) { close(nn.weights_fd); }
 }
 
 float* forward(Transformer* transformer, int token, int pos) {
@@ -1845,8 +1845,9 @@ void error_usage() {
     fprintf(stderr, "  NNAPI_Q8         1 = 8-bit weights in the NNAPI graphs for an fp32 checkpoint too, turned\n");
     fprintf(stderr, "                   into fp32 inside the graph. a Q8_0 checkpoint always has them.\n");
     fprintf(stderr, "                   2 = input and output of the graphs in 8 bits as well\n");
-    fprintf(stderr, "  NNAPI_WEIGHTS_FILE  file to keep those 8-bit weights in and map them from, e.g.\n");
-    fprintf(stderr, "                   model.bin.nnapi8. default: they are made in RAM at every run\n");
+    fprintf(stderr, "  NNAPI_WEIGHTS_FILE  name of the files to keep those 8-bit weights in and map them from,\n");
+    fprintf(stderr, "                   one per matrix: model.bin.nnapi8 gives model.bin.nnapi8.0, .1, ...\n");
+    fprintf(stderr, "                   default: they are made in RAM at every run\n");
     exit(EXIT_FAILURE);
 }
 
