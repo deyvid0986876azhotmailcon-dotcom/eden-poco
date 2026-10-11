@@ -5,6 +5,7 @@
 
     <application
         android:allowBackup="false"
+        android:extractNativeLibs="true"
         android:label="Chat APK"
         android:theme="@style/AppTheme">
         <activity
