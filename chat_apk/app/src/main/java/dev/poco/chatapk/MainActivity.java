@@ -40,13 +40,14 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String send(String prompt) {
             try {
-                Process process = new ProcessBuilder(
+                ProcessBuilder pb = new ProcessBuilder(
                         MainActivity.this.nativeLibDir + "/librun_nnapi.so",
                         MainActivity.this.getFilesDir().getAbsolutePath() + "/stories15M.bin",
-                        "-i",
-                        prompt == null ? "" : prompt)
-                        .redirectErrorStream(true)
-                        .start();
+                        "-z", MainActivity.this.getFilesDir().getAbsolutePath() + "/tokenizer.bin",
+                        "-i", prompt == null ? "" : prompt);
+                pb.directory(MainActivity.this.getFilesDir());
+                pb.redirectErrorStream(true);
+                Process process = pb.start();
 
                 StringBuilder output = new StringBuilder();
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(
