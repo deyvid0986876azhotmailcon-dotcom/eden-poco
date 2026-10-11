@@ -42,7 +42,7 @@ public class MainActivity extends Activity {
             try {
                 Process process = new ProcessBuilder(
                         MainActivity.this.nativeLibDir + "/librun_nnapi.so",
-                        MainActivity.this.getExternalFilesDir(null).getAbsolutePath() + "/stories15M.bin",
+                        MainActivity.this.getFilesDir().getAbsolutePath() + "/stories15M.bin",
                         "-i",
                         prompt == null ? "" : prompt)
                         .redirectErrorStream(true)
