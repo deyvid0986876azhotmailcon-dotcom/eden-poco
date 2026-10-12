@@ -147,8 +147,12 @@
             text-overflow: ellipsis;
         }
 
+        /* Con cuatro modelos la fila no cabe en pantallas estrechas: se encoge y se desliza */
         .models {
-            flex: none;
+            flex: 0 1 auto;
+            min-width: 0;
+            overflow-x: auto;
+            scrollbar-width: none;
             display: flex;
             padding: 3px;
             border: 1px solid var(--line);
@@ -156,7 +160,12 @@
             background: var(--surface);
         }
 
+        .models::-webkit-scrollbar {
+            display: none;
+        }
+
         .model {
+            flex: none;
             height: 34px;
             padding: 0 11px;
             border: 0;
@@ -714,7 +723,25 @@
 (() => {
     'use strict';
 
+    const CHAT_CHIPS = [
+        ['¿Quién eres?', '¿Quién eres y qué puedes hacer?'],
+        ['¿Cómo funciona una NPU?', 'Explícame de forma simple cómo funciona una NPU en un celular.'],
+        ['Historia de ciencia ficción', 'Escribe una pequeña historia de ciencia ficción.'],
+        ['Consejos de batería', 'Dame 3 consejos para optimizar la batería en Android.'],
+    ];
     const MODELS = [
+        {
+            id: 'qwen15',
+            label: 'Qwen 1.5B',
+            hint: 'el más rápido, conversa en español, corre en CPU',
+            chips: CHAT_CHIPS,
+        },
+        {
+            id: 'llama32_3b',
+            label: 'Llama 3B',
+            hint: 'mejores respuestas, más lento, corre en CPU',
+            chips: CHAT_CHIPS,
+        },
         {
             id: 'llama2_7b',
             label: 'Llama 2 7B',

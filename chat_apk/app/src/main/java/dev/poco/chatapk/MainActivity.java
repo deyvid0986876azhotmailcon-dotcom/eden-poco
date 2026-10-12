@@ -60,6 +60,18 @@ public class MainActivity extends Activity {
     private static final Pattern APU_RUNS = Pattern.compile("nnapi: (\\d+) matmuls on \\S+ at \\S+ ms each, (\\d+) on the CPU");
     private static final Pattern CPU_ONLY = Pattern.compile("nnapi: not used, (\\d+) matmuls on the CPU");
 
+    // Modelos GGUF: los corre llama.cpp en CPU (libllama_completion.so). Los archivos se bajan aparte
+    private static final String GGUF_DIR = "/data/local/tmp/lc/";
+    private static final String SYSTEM_PROMPT =
+            "Eres un asistente útil. Responde siempre en español, de forma clara y breve.";
+    // Con lo que llama.cpp cierra la respuesta en su salida
+    private static final String END_OF_TEXT = "[end of text]";
+    private static final int MAX_GGUF_PROMPT_CHARS = 4000;
+    // "eval time = 9074.51 ms / 32 runs ( 283.58 ms per token, 3.53 tokens per second)". La línea del
+    // prompt dice "tokens" donde esta dice "runs"
+    private static final Pattern LLAMA_EVAL = Pattern.compile(
+            "eval time =\\s*[\\d.]+ ms /\\s*(\\d+) runs\\s*\\(\\s*[\\d.]+ ms per token,\\s*([\\d.]+) tokens per second");
+
     private String nativeLibDir;
     private WebView webView;
     private volatile Run current = null;
@@ -82,6 +94,8 @@ public class MainActivity extends Activity {
         volatile int graphsTotal = -1;
         volatile long apuRuns = -1;
         volatile long cpuRuns = -1;
+        // llama.cpp: todo en CPU, y cierra la respuesta de otra forma que run_nnapi
+        volatile boolean cpuEngine;
         // última lectura del tiempo de CPU del motor
         long cpuTicks;
         long cpuTicksAtMs;
@@ -246,6 +260,17 @@ public class MainActivity extends Activity {
         return 0;
     }
 
+    /** El archivo GGUF de un modelo que corre llama.cpp, o null si el modelo es de run_nnapi. */
+    private static String ggufFor(String modelChoice) {
+        if ("qwen15".equals(modelChoice)) {
+            return "qwen15-q4km.gguf";
+        }
+        if ("llama32_3b".equals(modelChoice)) {
+            return "llama32-3b-q4km.gguf";
+        }
+        return null;
+    }
+
     private static String clampPrompt(String prompt) {
         String text = prompt == null ? "" : prompt;
         while (text.getBytes(StandardCharsets.UTF_8).length > MAX_PROMPT_BYTES) {
@@ -349,6 +374,12 @@ public class MainActivity extends Activity {
             // No hay forma de leer la carga de la APU desde una app. Lo que se muestra es lo que el
             // motor dice de sí mismo: si está usando el acelerador y, al terminar, qué parte de los
             // matmul corrió en él
+            if (run.cpuEngine) {
+                stats.put("apuState", "cpu");
+                stats.put("apuSummary", "Sin usar · llama.cpp en 4 núcleos de CPU");
+                stats.put("apuPercent", -1);
+                return;
+            }
             String state;
             String summary;
             int percent = -1;
@@ -401,6 +432,10 @@ public class MainActivity extends Activity {
                     } else if (line.contains("matmul runs on the CPU") || line.contains("nnapi: dlopen failed")
                             || line.contains("nnapi: missing symbol")) {
                         run.apuMissing = true;
+                    } else if (run.cpuEngine && (matcher = LLAMA_EVAL.matcher(line)).find()) {
+                        // llama.cpp: los tokens que generó y su velocidad, medidos por el propio motor
+                        run.tokens = Integer.parseInt(matcher.group(1));
+                        callPage("onFinalSpeedReport", JSONObject.quote(matcher.group(2)));
                     } else if (line.contains("it stays on the CPU")) {
                         run.onCpu++;
                     } else if (line.contains("achieved tok/s:")) {
@@ -417,35 +452,42 @@ public class MainActivity extends Activity {
         private void streamAnswer(Run run) throws IOException {
             // stdout: el texto, trozo a trozo según lo va escribiendo el motor. El lector guarda
             // los bytes de un carácter UTF-8 que llegue partido entre dos lecturas
+            // run_nnapi antepone "Assistant: " y avisa del turno siguiente; llama.cpp no antepone nada y
+            // cierra con "[end of text]"
+            final String prefix = run.cpuEngine ? "" : ANSWER_PREFIX;
+            final String end = run.cpuEngine ? END_OF_TEXT : NEXT_TURN;
             try (Reader reader = new InputStreamReader(run.process.getInputStream(), StandardCharsets.UTF_8)) {
                 char[] buffer = new char[256];
                 StringBuilder pending = new StringBuilder(); // recibido y todavía sin enviar a la página
-                boolean prefixSeen = false;
-                boolean nextTurn = false;
+                boolean prefixSeen = prefix.isEmpty();
+                boolean ended = false;
                 int length;
-                while (!nextTurn && (length = reader.read(buffer)) != -1) {
+                while (!ended && (length = reader.read(buffer)) != -1) {
                     pending.append(buffer, 0, length);
                     if (!prefixSeen) {
-                        if (pending.length() < ANSWER_PREFIX.length() && ANSWER_PREFIX.startsWith(pending.toString())) {
+                        if (pending.length() < prefix.length() && prefix.startsWith(pending.toString())) {
                             continue; // todavía puede ser el prefijo
                         }
-                        if (pending.indexOf(ANSWER_PREFIX) == 0) {
-                            pending.delete(0, ANSWER_PREFIX.length());
+                        if (pending.indexOf(prefix) == 0) {
+                            pending.delete(0, prefix.length());
                         }
                         prefixSeen = true;
                     }
-                    int cut = pending.indexOf(NEXT_TURN);
-                    nextTurn = cut >= 0;
-                    if (!nextTurn) {
+                    int cut = pending.indexOf(end);
+                    ended = cut >= 0;
+                    if (!ended) {
                         // se retiene el final que todavía podría ser el principio de ese aviso
-                        cut = pending.length() - heldBack(pending, NEXT_TURN);
+                        cut = pending.length() - heldBack(pending, end);
                     }
                     if (cut > 0) {
                         sendChunk(run, pending.substring(0, cut));
                         pending.delete(0, cut);
                     }
                 }
-                if (nextTurn) {
+                if (ended && run.cpuEngine) {
+                    // llama.cpp escribe su velocidad al salir: se le deja terminar, sin cortarle la salida
+                    while (reader.read(buffer) != -1) { /* nada: ya no es parte de la respuesta */ }
+                } else if (ended) {
                     run.process.destroy(); // lo que siga ya no es de esta respuesta
                 } else if (prefixSeen && pending.length() > 0) {
                     sendChunk(run, pending.toString());
@@ -479,8 +521,11 @@ public class MainActivity extends Activity {
                 File tokenizer = null;
                 String weightsPrefix = null;
 
+                final String gguf = ggufFor(modelChoice);
                 boolean useLlama = !"stories15M".equalsIgnoreCase(modelChoice);
-                if (useLlama) {
+                if (gguf != null) {
+                    model = new File(GGUF_DIR, gguf);
+                } else if (useLlama) {
                     File tmp7b = new File("/data/local/tmp/llm/llama2_7b.bin");
                     File internal7b = new File(files, "llama2_7b.bin");
                     model = tmp7b.exists() ? tmp7b : internal7b;
@@ -502,26 +547,53 @@ public class MainActivity extends Activity {
                 }
 
                 List<String> cmd = new ArrayList<>();
-                cmd.add(MainActivity.this.nativeLibDir + "/librun_nnapi.so");
-                cmd.add(model.getAbsolutePath());
-                cmd.add("-z");
-                cmd.add(tokenizer.getAbsolutePath());
-                cmd.add("-m");
-                cmd.add("chat");
-                cmd.add("-y");
-                cmd.add("");
-                cmd.add("-n");
-                cmd.add(useLlama ? "64" : "128");
-                cmd.add("-i");
-                cmd.add(clampPrompt(prompt));
+                if (gguf != null) {
+                    // llama.cpp: una sola pregunta con la plantilla de chat del modelo, en los 4 núcleos grandes
+                    cmd.add(MainActivity.this.nativeLibDir + "/libllama_completion.so");
+                    cmd.add("-m");
+                    cmd.add(model.getAbsolutePath());
+                    cmd.add("-t");
+                    cmd.add("4");
+                    cmd.add("-C");
+                    cmd.add("f0");
+                    cmd.add("-c");
+                    cmd.add("4096");
+                    cmd.add("-n");
+                    cmd.add("512");
+                    cmd.add("--temp");
+                    cmd.add("0.7");
+                    cmd.add("-sys");
+                    cmd.add(SYSTEM_PROMPT);
+                    cmd.add("-p");
+                    cmd.add(prompt.length() > MAX_GGUF_PROMPT_CHARS ? prompt.substring(0, MAX_GGUF_PROMPT_CHARS) : prompt);
+                    cmd.add("-cnv");
+                    cmd.add("-st");
+                    cmd.add("--simple-io");
+                    cmd.add("--no-display-prompt");
+                } else {
+                    cmd.add(MainActivity.this.nativeLibDir + "/librun_nnapi.so");
+                    cmd.add(model.getAbsolutePath());
+                    cmd.add("-z");
+                    cmd.add(tokenizer.getAbsolutePath());
+                    cmd.add("-m");
+                    cmd.add("chat");
+                    cmd.add("-y");
+                    cmd.add("");
+                    cmd.add("-n");
+                    cmd.add(useLlama ? "64" : "128");
+                    cmd.add("-i");
+                    cmd.add(clampPrompt(prompt));
+                }
 
                 ProcessBuilder pb = new ProcessBuilder(cmd);
                 Map<String, String> env = pb.environment();
-                env.put("NNAPI_DEVICE", "mtk-mdla_shim");
-                env.put("NNAPI_Q8", "2");
-                env.put("NNAPI_CACHE_DIR", cache.getAbsolutePath());
-                if (weightsPrefix != null) {
-                    env.put("NNAPI_WEIGHTS_FILE", weightsPrefix);
+                if (gguf == null) {
+                    env.put("NNAPI_DEVICE", "mtk-mdla_shim");
+                    env.put("NNAPI_Q8", "2");
+                    env.put("NNAPI_CACHE_DIR", cache.getAbsolutePath());
+                    if (weightsPrefix != null) {
+                        env.put("NNAPI_WEIGHTS_FILE", weightsPrefix);
+                    }
                 }
                 pb.directory(files);
                 pb.redirectErrorStream(false);
@@ -532,6 +604,7 @@ public class MainActivity extends Activity {
                         return;
                     }
                     run = new Run(pb.start());
+                    run.cpuEngine = gguf != null;
                     current = run;
                 }
                 final Run active = run;

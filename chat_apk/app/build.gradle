@@ -13,4 +13,15 @@ android {
         versionCode 1
         versionName '1.0'
     }
+
+    // The same key in every build (Eden's public debug keystore), so a new APK installs over the
+    // previous one and the app keeps its data.
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
 }

@@ -10,6 +10,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,6 +27,19 @@ jobs:
         run: |
           mkdir -p chat_apk/app/src/main/jniLibs/arm64-v8a
           $ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang -O3 npu-probe/run_nnapi.c -o chat_apk/app/src/main/jniLibs/arm64-v8a/librun_nnapi.so -lm -ldl -llog
+
+      # The llama.cpp engine is built by llama-android.yml: take it from its latest successful run.
+      # It is an executable, but only files named lib*.so are unpacked next to the app.
+      - name: Fetch llama.cpp engine
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow llama-android.yml --status success --limit 1 --json databaseId -q '.[0].databaseId')
+          echo "llama-android run: $RUN"
+          gh run download "$RUN" --repo "$GITHUB_REPOSITORY" -n llama-android -D llama_bin
+          cp llama_bin/llama-completion chat_apk/app/src/main/jniLibs/arm64-v8a/libllama_completion.so
+          ls -la chat_apk/app/src/main/jniLibs/arm64-v8a/
+
       - name: Build APK
         working-directory: chat_apk
         run: gradle assembleDebug
