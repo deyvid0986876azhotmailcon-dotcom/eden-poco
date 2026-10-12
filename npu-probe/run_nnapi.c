@@ -1,5 +1,6 @@
 /* Inference for Llama-2 Transformer model in pure C, with the matmuls run through NNAPI (Android) */
-/* Reads the fp32 checkpoints of run.c and the Q8_0 (int8) ones of runq.c */
+/* Reads the fp32 checkpoints of run.c and the Q8_0 (int8) ones of runq.c. Besides Llama 2 it */
+/* runs the models gguf2bin.c makes a Q8_0 checkpoint of: Qwen 2 and Llama 3 (see ModelExtras) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +24,31 @@
 // ----------------------------------------------------------------------------
 // Globals
 int GS = 0; // group size global for quantization of the weights. 0 = the checkpoint is fp32
+float NORM_EPS = 1e-5f; // epsilon of the rmsnorms. the checkpoint can bring another
+
+// ----------------------------------------------------------------------------
+// What llama2.c has fixed in its code and other models change
+
+// gguf2bin.c writes it in the header of a Q8_0 checkpoint from byte 64 on, which export.py
+// leaves as zeros: a checkpoint without the magic is a Llama 2 one. gguf2bin.c has the same struct
+typedef struct {
+    uint32_t magic;       // EXTRAS_MAGIC
+    float rope_base;      // 10000 in Llama 2
+    float norm_eps;       // of the rmsnorms, 1e-5 in Llama 2
+    int32_t rope_halves;  // RoPE pairs element i of a head with i + head_size/2 (Qwen), not with i + 1
+    int32_t qkv_bias;     // wq, wk and wv have a bias: fp32, after the rmsnorm weights (Qwen)
+    int32_t rope_factors; // the frequencies of RoPE are divided by a table: fp32, after those (Llama 3.1 on)
+    int32_t tokenizer;    // TOKENIZER_*
+    int32_t chat;         // CHAT_*
+    int32_t bos;          // token every sequence starts with, -1 = none
+    int32_t eos;          // token that ends a turn
+} ModelExtras;
+#define EXTRAS_MAGIC 0x31747865 // "ext1"
+#define EXTRAS_OFFSET 64
+// sentencepiece with scores (tokenizer.bin of llama2.c), or the byte-level BPE of Qwen or of Llama 3
+enum { TOKENIZER_SPM, TOKENIZER_BPE_QWEN, TOKENIZER_BPE_LLAMA3 };
+// [INST] of Llama 2, ChatML (<|im_start|>, Qwen) or the headers of Llama 3
+enum { CHAT_LLAMA2, CHAT_CHATML, CHAT_LLAMA3 };
 
 // ----------------------------------------------------------------------------
 // Transformer model
@@ -63,6 +89,11 @@ typedef struct {
     float* rms_final_weight; // (dim,)
     // (optional) classifier weights for the logits, on the last layer
     Matrix* wcls;
+    // only in the models that have them, NULL in the rest
+    float* bq; // (layer, dim) bias of wq
+    float* bk; // (layer, n_kv_heads * head_size) bias of wk
+    float* bv; // (layer, n_kv_heads * head_size) bias of wv
+    float* rope_factors; // (head_size / 2,) what each frequency of RoPE is divided by
 } TransformerWeights;
 
 typedef struct {
@@ -84,6 +115,7 @@ typedef struct {
 
 typedef struct {
     Config config; // the hyperparameters of the architecture (the blueprint)
+    ModelExtras extras; // and the ones Config has no place for
     TransformerWeights weights; // the weights of the model
     RunState state; // buffers for the "wave" of activations in the forward pass
     // some more state needed to properly clean up the memory mapping (sigh)
@@ -155,8 +187,9 @@ Matrix* map_matrices(void** ptr, int n, size_t size_each) {
     return res;
 }
 
-void memory_map_weights(TransformerWeights *w, Config* p, void* ptr, int shared_weights) {
+void memory_map_weights(TransformerWeights *w, Config* p, void* ptr, int shared_weights, ModelExtras* extras) {
     int head_size = p->dim / p->n_heads;
+    w->bq = w->bk = w->bv = w->rope_factors = NULL;
     // make sure the multiplications below are done in 64bit to fit the parameter counts of 13B+ models
     size_t dim = p->dim;
     size_t hidden_dim = p->hidden_dim;
@@ -183,6 +216,13 @@ void memory_map_weights(TransformerWeights *w, Config* p, void* ptr, int shared_
         w->rms_att_weight = map_floats(&ptr, n_layers * dim);
         w->rms_ffn_weight = map_floats(&ptr, n_layers * dim);
         w->rms_final_weight = map_floats(&ptr, dim);
+        // and, in the models that have them, the biases of wq, wk and wv and the table of RoPE
+        if (extras->qkv_bias) {
+            w->bq = map_floats(&ptr, n_layers * q_dim);
+            w->bk = map_floats(&ptr, n_layers * kv_dim);
+            w->bv = map_floats(&ptr, n_layers * kv_dim);
+        }
+        if (extras->rope_factors) { w->rope_factors = map_floats(&ptr, head_size / 2); }
         // now read all the quantized weights
         w->token_embedding_table = map_matrices(&ptr, 1, p->vocab_size * dim);
         w->wq = map_matrices(&ptr, p->n_layers, dim * q_dim);
@@ -197,9 +237,15 @@ void memory_map_weights(TransformerWeights *w, Config* p, void* ptr, int shared_
 }
 
 void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weights,
-                     int* fd, void** data, ssize_t* file_size) {
+                     int* fd, void** data, ssize_t* file_size, ModelExtras* extras) {
     FILE *file = fopen(checkpoint, "rb");
     if (!file) { fprintf(stderr, "Couldn't open file %s\n", checkpoint); exit(EXIT_FAILURE); }
+    // as in Llama 2, unless the checkpoint says otherwise
+    memset(extras, 0, sizeof(ModelExtras));
+    extras->rope_base = 10000.0f;
+    extras->norm_eps = 1e-5f;
+    extras->bos = 1;
+    extras->eos = 2;
     // a Q8_0 checkpoint (version 2 of export.py, the one runq.c reads) starts with a magic number
     // (uint32), 0x616b3432, i.e. "ak42" in ASCII. an fp32 one starts with the Config itself
     uint32_t magic_number;
@@ -226,6 +272,13 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
         }
         GS = group_size; // set as global, as it will be used in many places
         shared_weights = shared_classifier;
+        // what gguf2bin.c adds for the models that are not Llama 2
+        ModelExtras from_file;
+        if (fseek(file, EXTRAS_OFFSET, SEEK_SET) == 0 && fread(&from_file, sizeof(ModelExtras), 1, file) == 1
+            && from_file.magic == EXTRAS_MAGIC && from_file.rope_base > 1.0f && from_file.norm_eps > 0.0f) {
+            *extras = from_file;
+            NORM_EPS = extras->norm_eps;
+        }
     } else {
         // read in the config header
         rewind(file);
@@ -244,12 +297,12 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
     *data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
     if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
     void* weights_ptr = (char*)*data + header_size; // skip header bytes. char is 1 byte
-    memory_map_weights(weights, config, weights_ptr, shared_weights);
+    memory_map_weights(weights, config, weights_ptr, shared_weights, extras);
 }
 
 void build_transformer(Transformer *t, char* checkpoint_path) {
     // read in the Config and the Weights from the checkpoint
-    read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->fd, &t->data, &t->file_size);
+    read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->fd, &t->data, &t->file_size, &t->extras);
     // allocate the RunState buffers
     malloc_run_state(&t->state, &t->config);
 }
@@ -327,7 +380,7 @@ void rmsnorm(float* o, float* x, float* weight, int size) {
         ss += x[j] * x[j];
     }
     ss /= size;
-    ss += 1e-5f;
+    ss += NORM_EPS;
     ss = 1.0f / sqrtf(ss);
     // normalize and scale
     for (int j = 0; j < size; j++) {
@@ -1198,20 +1251,60 @@ float* forward(Transformer* transformer, int token, int pos) {
         matmul(s->k, s->xb, w->wk + l, dim, kv_dim);
         matmul(s->v, s->xb, w->wv + l, dim, kv_dim);
 
-        // RoPE relative positional encoding: complex-valued rotate q and k in each head
-        for (int i = 0; i < dim; i+=2) {
-            int head_dim = i % head_size;
-            float freq = 1.0f / powf(10000.0f, head_dim / (float)head_size);
-            float val = pos * freq;
-            float fcr = cosf(val);
-            float fci = sinf(val);
-            int rotn = i < kv_dim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
-            for (int v = 0; v < rotn; v++) {
-                float* vec = v == 0 ? s->q : s->k; // the vector to rotate (query or key)
-                float v0 = vec[i];
-                float v1 = vec[i+1];
-                vec[i]   = v0 * fcr - v1 * fci;
-                vec[i+1] = v0 * fci + v1 * fcr;
+        // QKV bias for Qwen models if present
+        if (w->bq) {
+            for (int i = 0; i < dim; i++) { s->q[i] += w->bq[l * dim + i]; }
+            for (int i = 0; i < kv_dim; i++) { s->k[i] += w->bk[l * kv_dim + i]; }
+            for (int i = 0; i < kv_dim; i++) { s->v[i] += w->bv[l * kv_dim + i]; }
+        }
+
+        // RoPE relative positional encoding
+        float rope_base = transformer->extras.rope_base > 1.0f ? transformer->extras.rope_base : 10000.0f;
+        if (transformer->extras.rope_halves) {
+            // Qwen style (neox RoPE): rotate first half with second half of each head
+            for (int h = 0; h < p->n_heads; h++) {
+                float* qhead = s->q + h * head_size;
+                for (int i = 0; i < head_size / 2; i++) {
+                    float freq = 1.0f / powf(rope_base, (2.0f * i) / (float)head_size);
+                    float val = pos * freq;
+                    float fcr = cosf(val);
+                    float fci = sinf(val);
+                    float v0 = qhead[i];
+                    float v1 = qhead[i + head_size / 2];
+                    qhead[i]                 = v0 * fcr - v1 * fci;
+                    qhead[i + head_size / 2] = v0 * fci + v1 * fcr;
+                }
+            }
+            for (int h = 0; h < p->n_kv_heads; h++) {
+                float* khead = s->k + h * head_size;
+                for (int i = 0; i < head_size / 2; i++) {
+                    float freq = 1.0f / powf(rope_base, (2.0f * i) / (float)head_size);
+                    float val = pos * freq;
+                    float fcr = cosf(val);
+                    float fci = sinf(val);
+                    float v0 = khead[i];
+                    float v1 = khead[i + head_size / 2];
+                    khead[i]                 = v0 * fcr - v1 * fci;
+                    khead[i + head_size / 2] = v0 * fci + v1 * fcr;
+                }
+            }
+        } else {
+            // Llama style RoPE: rotate adjacent pairs
+            for (int i = 0; i < dim; i += 2) {
+                int head_dim = i % head_size;
+                float freq = 1.0f / powf(rope_base, head_dim / (float)head_size);
+                if (w->rope_factors) { freq /= w->rope_factors[head_dim / 2]; }
+                float val = pos * freq;
+                float fcr = cosf(val);
+                float fci = sinf(val);
+                int rotn = i < kv_dim ? 2 : 1;
+                for (int v = 0; v < rotn; v++) {
+                    float* vec = v == 0 ? s->q : s->k;
+                    float v0 = vec[i];
+                    float v1 = vec[i+1];
+                    vec[i]   = v0 * fcr - v1 * fci;
+                    vec[i+1] = v0 * fci + v1 * fcr;
+                }
             }
         }
 
@@ -1410,45 +1503,49 @@ void encode(Tokenizer* t, char *text, int8_t bos, int8_t eos, int *tokens, int *
     *n_tokens = 0;
 
     // add optional BOS (=1) token, if desired
-    if (bos) tokens[(*n_tokens)++] = 1;
+    if (bos > 0) tokens[(*n_tokens)++] = bos;
 
-    // add_dummy_prefix is true by default
-    // so prepend a dummy prefix token to the input string, but only if text != ""
-    // TODO: pretty sure this isn't correct in the general case but I don't have the
-    // energy to read more of the sentencepiece code to figure out what it's doing
-    if (text[0] != '\0') {
+    // add_dummy_prefix is true by default for SentencePiece (Llama 2 with BOS)
+    // but in BPE / ChatML (Qwen, Llama 3) adding a leading space corrupts special tokens like <|im_start|>
+    if (text[0] != '\0' && bos > 0) {
         int dummy_prefix = str_lookup(" ", t->sorted_vocab, t->vocab_size);
-        tokens[(*n_tokens)++] = dummy_prefix;
+        if (dummy_prefix != -1) {
+            tokens[(*n_tokens)++] = dummy_prefix;
+        }
     }
 
-    // Okay UTF-8 time. This will get messy. Here is the reference from Wikipedia:
-    // Code point ↔ UTF-8 conversion
-    // First code point	Last code point	Byte 1	Byte 2	Byte 3	Byte 4
-    // U+0000	U+007F	    0xxxxxxx
-    // U+0080	U+07FF	    110xxxxx	10xxxxxx
-    // U+0800	U+FFFF	    1110xxxx	10xxxxxx	10xxxxxx
-    // U+10000	U+10FFFF    11110xxx	10xxxxxx	10xxxxxx	10xxxxxx
-
-    // process the raw (UTF-8) byte sequence of the input string
+    // Process the raw byte sequence of the input string
     for (char *c = text; *c != '\0'; c++) {
+        // Atomic special tokens pass-through for ChatML (<|im_start|>, <|im_end|>) and Llama 3 (<|start_header_id|>, etc.)
+        if (c[0] == '<' && c[1] == '|') {
+            char* end_tag = strstr(c + 2, "|>");
+            if (end_tag) {
+                int tag_len = (int)(end_tag + 2 - c);
+                if (tag_len < 64) {
+                    char tag[64];
+                    memcpy(tag, c, tag_len);
+                    tag[tag_len] = '\0';
+                    int tag_id = str_lookup(tag, t->sorted_vocab, t->vocab_size);
+                    if (tag_id != -1) {
+                        tokens[(*n_tokens)++] = tag_id;
+                        c += tag_len - 1; // loop increment does the remaining +1
+                        str_len = 0;
+                        continue;
+                    }
+                }
+            }
+        }
 
         // reset buffer if the current byte is ASCII or a leading byte
-        // 0xC0 is 11000000, so (*c & 0xC0) keeps the first 2 bits and zeros the rest
-        // 0x80 is 10000000
-        // in UTF-8, all continuation bytes start with "10" in first two bits
-        // so in English this is: "if this byte is not a continuation byte"
         if ((*c & 0xC0) != 0x80) {
-            // this byte must be either a leading byte (11...) or an ASCII char (0x...)
-            // => reset our location, as we're starting a new UTF-8 codepoint
             str_len = 0;
         }
 
         // append the current byte to the buffer
-        str_buffer[str_len++] = *c; // ++ is post-increment, incremented after this line
+        str_buffer[str_len++] = *c;
         str_buffer[str_len] = '\0';
 
         // while the next character is a continuation byte, continue appending
-        // but if there are too many of them, just stop to avoid overruning str_buffer size.
         if ((*(c+1) & 0xC0) == 0x80 && str_len < 4) {
             continue;
         }
@@ -1460,14 +1557,18 @@ void encode(Tokenizer* t, char *text, int8_t bos, int8_t eos, int *tokens, int *
             // we found this codepoint in vocab, add it as a token
             tokens[(*n_tokens)++] = id;
         } else {
-            // byte_fallback encoding: just encode each byte as a token
-            // +3 is here because the first 3 vocab elements are <unk>, <s>, </s>
-            // so the individual bytes only start at index 3
-            for (int i=0; i < str_len; i++) {
-                tokens[(*n_tokens)++] = (unsigned char)str_buffer[i] + 3;
+            // byte_fallback encoding: encode each byte
+            for (int i=0; i < (int)str_len; i++) {
+                char bstr[2] = { str_buffer[i], '\0' };
+                int bid = str_lookup(bstr, t->sorted_vocab, t->vocab_size);
+                if (bid != -1) {
+                    tokens[(*n_tokens)++] = bid;
+                } else {
+                    tokens[(*n_tokens)++] = (unsigned char)str_buffer[i] + 3;
+                }
             }
         }
-        str_len = 0; // protect against a sequence of stray UTF8 continuation bytes
+        str_len = 0;
     }
 
     // merge the best consecutive pair each iteration, according the scores in vocab_scores
@@ -1742,10 +1843,10 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
     // buffers for reading the system prompt and user prompt from stdin
     // you'll notice they are soomewhat haphazardly and unsafely set atm
     char system_prompt[512];
-    char user_prompt[512];
-    char rendered_prompt[1152];
+    char user_prompt[1024];
+    char rendered_prompt[4096];
     int num_prompt_tokens = 0;
-    int* prompt_tokens = (int*)malloc(1152 * sizeof(int));
+    int* prompt_tokens = (int*)malloc(4096 * sizeof(int));
     int user_idx;
 
     // start the main loop
@@ -1754,6 +1855,9 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
     int token;       // stores the current token to feed into the transformer
     int prev_token;
     int pos = 0;     // position in the sequence
+    int eos_token = transformer->extras.eos > 0 ? transformer->extras.eos : 2;
+    int add_bos = transformer->extras.bos != -1 ? 1 : 0;
+
     while (pos < steps) {
 
         // when it is the user's turn to contribute tokens to the dialog...
@@ -1777,16 +1881,35 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
                 // otherwise get user prompt from stdin
                 read_stdin("User: ", user_prompt, sizeof(user_prompt));
             }
-            // render user/system prompts into the Llama 2 Chat schema
-            if (pos == 0 && system_prompt[0] != '\0') {
-                char system_template[] = "[INST] <<SYS>>\n%s\n<</SYS>>\n\n%s [/INST]";
-                sprintf(rendered_prompt, system_template, system_prompt, user_prompt);
+            // render user/system prompts into the appropriate schema
+            if (transformer->extras.chat == CHAT_CHATML) {
+                // Qwen ChatML schema
+                if (pos == 0 && system_prompt[0] != '\0') {
+                    sprintf(rendered_prompt, "<|im_start|>system\n%s<|im_end|>\n<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n",
+                            system_prompt, user_prompt);
+                } else {
+                    sprintf(rendered_prompt, "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", user_prompt);
+                }
+            } else if (transformer->extras.chat == CHAT_LLAMA3) {
+                // Llama 3 schema
+                if (pos == 0 && system_prompt[0] != '\0') {
+                    sprintf(rendered_prompt, "<|start_header_id|>system<|end_header_id|>\n\n%s<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n%s<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+                            system_prompt, user_prompt);
+                } else {
+                    sprintf(rendered_prompt, "<|start_header_id|>user<|end_header_id|>\n\n%s<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", user_prompt);
+                }
             } else {
-                char user_template[] = "[INST] %s [/INST]";
-                sprintf(rendered_prompt, user_template, user_prompt);
+                // Llama 2 default schema
+                if (pos == 0 && system_prompt[0] != '\0') {
+                    char system_template[] = "[INST] <<SYS>>\n%s\n<</SYS>>\n\n%s [/INST]";
+                    sprintf(rendered_prompt, system_template, system_prompt, user_prompt);
+                } else {
+                    char user_template[] = "[INST] %s [/INST]";
+                    sprintf(rendered_prompt, user_template, user_prompt);
+                }
             }
             // encode the rendered prompt into tokens
-            encode(tokenizer, rendered_prompt, 1, 0, prompt_tokens, &num_prompt_tokens);
+            encode(tokenizer, rendered_prompt, add_bos, 0, prompt_tokens, &num_prompt_tokens);
             user_idx = 0; // reset the user index
             user_turn = 0;
             printf("Assistant: ");
@@ -1800,8 +1923,8 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
             // otherwise use the next token sampled from previous turn
             token = next;
         }
-        // EOS (=2) token ends the Assistant turn
-        if (token == 2) {
+        // EOS token ends the Assistant turn
+        if (token == eos_token) {
             user_turn = 1;
             if (cli_user_prompt != NULL) { break; }
         }
@@ -1811,13 +1934,13 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
         next = sample(sampler, logits);
         pos++;
 
-        if (user_idx >= num_prompt_tokens && next != 2) {
+        if (user_idx >= num_prompt_tokens && next != eos_token) {
             // the Assistant is responding, so print its output
             char* piece = decode(tokenizer, token, next);
             safe_printf(piece); // same as printf("%s", piece), but skips "unsafe" bytes
             fflush(stdout);
         }
-        if (next == 2) {
+        if (next == eos_token) {
             printf("\n");
             if (cli_user_prompt != NULL) { break; }
         }
@@ -1894,6 +2017,9 @@ int main(int argc, char *argv[]) {
     if (temperature < 0.0) temperature = 0.0;
     if (topp < 0.0 || 1.0 < topp) topp = 0.9;
     if (steps < 0) steps = 0;
+    if (system_prompt == NULL) {
+        system_prompt = "Eres un asistente de inteligencia artificial útil, educado y sabio. Responde siempre en español fluido y claro.";
+    }
 
     // build the Transformer via the model .bin file
     Transformer transformer;

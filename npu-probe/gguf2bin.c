@@ -1,6 +1,9 @@
-/* Converts a Llama 2 GGUF quantized as Q8_0 (llama.cpp) into the Q8_0 checkpoint of llama2.c */
-/* (version 2 of export.py), the one runq.c and run_nnapi.c read. Nothing is requantized: both */
-/* formats hold int8 weights with one scaling factor per group, and the GGUF groups are of 32 */
+/* Converts a GGUF quantized as Q8_0 (llama.cpp) into the Q8_0 checkpoint of llama2.c (version 2 */
+/* of export.py), the one runq.c and run_nnapi.c read. Nothing is requantized: both formats hold */
+/* int8 weights with one scaling factor per group, and the GGUF groups are of 32. */
+/* Llama 2 gives the checkpoint of export.py. Qwen 2 and Llama 3 need what llama2.c lacks: it */
+/* goes in the unused part of the header (ModelExtras), in more fp32 tensors after the rmsnorm */
+/* weights, and in a tokenizer file written next to the checkpoint. run_nnapi.c reads all three */
 
 #define _FILE_OFFSET_BITS 64
 #include <stdio.h>
@@ -102,19 +105,59 @@ void skip_value(uint32_t type) {
     }
 }
 
+// the architectures this converter knows. the keys of a model carry the name of its
+// architecture: llama.block_count, qwen2.block_count...
+const char* ARCHITECTURES[] = { "llama", "qwen2" };
+
 // the metadata that is used here: the rest is skipped
-enum { ARCHITECTURE, NAME, TOKENIZER, N_STRINGS };
-const char* string_keys[N_STRINGS] = { "general.architecture", "general.name", "tokenizer.ggml.model" };
+enum { ARCHITECTURE, NAME, TOKENIZER, PRE_TOKENIZER, CHAT_TEMPLATE, N_STRINGS };
+const char* string_keys[N_STRINGS] = {
+    "general.architecture", "general.name", "tokenizer.ggml.model", "tokenizer.ggml.pre", "tokenizer.chat_template",
+};
 char* strings[N_STRINGS];
 
-enum { ALIGNMENT, CONTEXT, DIM, LAYERS, HIDDEN_DIM, HEADS, KV_HEADS, ROPE_BASE, BOS, EOS, N_NUMBERS };
+enum { ALIGNMENT, CONTEXT, DIM, LAYERS, HIDDEN_DIM, HEADS, KV_HEADS, ROPE_BASE, NORM_EPS, BOS, EOS, ADD_BOS, N_NUMBERS };
+// a key that starts with a dot goes after the name of the architecture
 const char* number_keys[N_NUMBERS] = {
-    "general.alignment", "llama.context_length", "llama.embedding_length", "llama.block_count",
-    "llama.feed_forward_length", "llama.attention.head_count", "llama.attention.head_count_kv",
-    "llama.rope.freq_base", "tokenizer.ggml.bos_token_id", "tokenizer.ggml.eos_token_id",
+    "general.alignment", ".context_length", ".embedding_length", ".block_count",
+    ".feed_forward_length", ".attention.head_count", ".attention.head_count_kv",
+    ".rope.freq_base", ".attention.layer_norm_rms_epsilon",
+    "tokenizer.ggml.bos_token_id", "tokenizer.ggml.eos_token_id", "tokenizer.ggml.add_bos_token",
 };
 double numbers[N_NUMBERS];
 int found[N_NUMBERS];
+
+char** vocab;         // the tokens as the GGUF has them
+uint64_t n_vocab = 0;
+int32_t* token_types; // of each token: 1 = normal, 3 = control... NULL if the GGUF doesn't say
+uint64_t n_token_types = 0;
+
+int is_key(const char* key, const char* wanted) {
+    if (wanted[0] != '.') { return strcmp(key, wanted) == 0; }
+    for (size_t a = 0; a < sizeof(ARCHITECTURES) / sizeof(ARCHITECTURES[0]); a++) {
+        size_t n = strlen(ARCHITECTURES[a]);
+        if (strncmp(key, ARCHITECTURES[a], n) == 0 && strcmp(key + n, wanted) == 0) { return 1; }
+    }
+    return 0;
+}
+
+void read_vocab(void) {
+    uint32_t item_type = read_u32();
+    n_vocab = read_u64();
+    if (item_type != T_STRING || n_vocab > 10000000) { die("%s is not a valid GGUF\n", in_path); }
+    vocab = malloc((n_vocab + 1) * sizeof(char*));
+    if (!vocab) { die("malloc failed!\n"); }
+    for (uint64_t i = 0; i < n_vocab; i++) { vocab[i] = read_string(); }
+}
+
+void read_token_types(void) {
+    uint32_t item_type = read_u32();
+    n_token_types = read_u64();
+    if (scalar_size(item_type) == 0 || n_token_types > 10000000) { die("%s is not a valid GGUF\n", in_path); }
+    token_types = malloc((n_token_types + 1) * sizeof(int32_t));
+    if (!token_types) { die("malloc failed!\n"); }
+    for (uint64_t i = 0; i < n_token_types; i++) { token_types[i] = (int32_t)read_number(item_type); }
+}
 
 void read_metadata(uint64_t n_metadata) {
     for (uint64_t i = 0; i < n_metadata; i++) {
@@ -125,8 +168,12 @@ void read_metadata(uint64_t n_metadata) {
             for (k = 0; k < N_STRINGS && strcmp(key, string_keys[k]) != 0; k++) {}
             if (k < N_STRINGS) { strings[k] = read_string(); } else { skip_value(type); }
         } else if (scalar_size(type) > 0) {
-            for (k = 0; k < N_NUMBERS && strcmp(key, number_keys[k]) != 0; k++) {}
+            for (k = 0; k < N_NUMBERS && !is_key(key, number_keys[k]); k++) {}
             if (k < N_NUMBERS) { numbers[k] = read_number(type); found[k] = 1; } else { skip_value(type); }
+        } else if (type == T_ARRAY && strcmp(key, "tokenizer.ggml.tokens") == 0) {
+            read_vocab();
+        } else if (type == T_ARRAY && strcmp(key, "tokenizer.ggml.token_type") == 0) {
+            read_token_types();
         } else {
             skip_value(type);
         }
@@ -145,6 +192,7 @@ typedef struct {
     uint64_t ne[4];  // the shape, in the reverse order of PyTorch: ne[0] is the length of a row
     uint32_t type;
     uint64_t offset; // of its data, from the start of the file
+    int used;        // it has a place in the checkpoint
 } Tensor;
 
 Tensor* tensors;
@@ -204,15 +252,109 @@ void plan_tensor(const char* name, uint64_t row_length, uint64_t rows, int quant
     if (t->offset > in_size || bytes > in_size - t->offset) {
         die("%s is past the end of %s: incomplete download?\n", name, in_path);
     }
+    t->used = 1;
     plan[n_plan++] = t;
 }
 
 void plan_layers(int n_layers, const char* part, uint64_t row_length, uint64_t rows, int quantized) {
     char name[64];
     for (int l = 0; l < n_layers; l++) {
-        snprintf(name, sizeof(name), "blk.%d.%s.weight", l, part);
+        snprintf(name, sizeof(name), "blk.%d.%s", l, part);
         plan_tensor(name, row_length, rows, quantized);
     }
+}
+
+// ----------------------------------------------------------------------------
+// What llama2.c has fixed in its code and other models change
+
+// It goes in the header of export.py from byte 64 on, which that leaves as zeros: a checkpoint
+// without the magic is a Llama 2 one. run_nnapi.c has the same struct
+typedef struct {
+    uint32_t magic;       // EXTRAS_MAGIC
+    float rope_base;      // 10000 in Llama 2
+    float norm_eps;       // of the rmsnorms, 1e-5 in Llama 2
+    int32_t rope_halves;  // RoPE pairs element i of a head with i + head_size/2 (Qwen), not with i + 1
+    int32_t qkv_bias;     // wq, wk and wv have a bias: fp32, after the rmsnorm weights (Qwen)
+    int32_t rope_factors; // the frequencies of RoPE are divided by a table: fp32, after those (Llama 3.1 on)
+    int32_t tokenizer;    // TOKENIZER_*
+    int32_t chat;         // CHAT_*
+    int32_t bos;          // token every sequence starts with, -1 = none
+    int32_t eos;          // token that ends a turn
+} ModelExtras;
+#define EXTRAS_MAGIC 0x31747865 // "ext1"
+#define EXTRAS_OFFSET 64
+// sentencepiece with scores (tokenizer.bin of llama2.c), or the byte-level BPE of Qwen or of Llama 3
+enum { TOKENIZER_SPM, TOKENIZER_BPE_QWEN, TOKENIZER_BPE_LLAMA3 };
+// [INST] of Llama 2, ChatML (<|im_start|>, Qwen) or the headers of Llama 3
+enum { CHAT_LLAMA2, CHAT_CHATML, CHAT_LLAMA3 };
+
+size_t token_bytes(const char* token, unsigned char* bytes) {
+    // A byte-level BPE vocabulary writes its tokens with one character per byte: the printable
+    // bytes as themselves and the others (0 to 32, 127 to 160 and 173) as U+0100 to U+0143.
+    // This gives the bytes back
+    size_t n = 0;
+    for (const unsigned char* c = (const unsigned char*)token; *c != '\0'; ) {
+        uint32_t cp = 0xFFFFFFFF; // of the characters above U+07FF, that alphabet has none: copied as they are
+        int len = 1;
+        if (*c < 0x80) {
+            cp = *c;
+        } else if ((*c & 0xE0) == 0xC0 && (c[1] & 0xC0) == 0x80) {
+            cp = (uint32_t)(*c & 0x1F) << 6 | (c[1] & 0x3F);
+            len = 2;
+        }
+        if (cp < 0x100) { bytes[n++] = (unsigned char)cp; }
+        else if (cp <= 0x120) { bytes[n++] = (unsigned char)(cp - 0x100); }
+        else if (cp <= 0x142) { bytes[n++] = (unsigned char)(cp - 0x121 + 127); }
+        else if (cp == 0x143) { bytes[n++] = 173; }
+        else { for (int k = 0; k < len; k++) { bytes[n++] = c[k]; } }
+        c += len;
+    }
+    return n;
+}
+
+size_t token_text(uint64_t id, unsigned char* bytes) {
+    // the bytes that token stands for, as run_nnapi.c will have them: a C string
+    size_t n;
+    if (token_types == NULL || id >= n_token_types || token_types[id] == 1) {
+        n = token_bytes(vocab[id], bytes);
+    } else {
+        // control and added tokens (<|im_start|>...) are written as plain text
+        n = strlen(vocab[id]);
+        memcpy(bytes, vocab[id], n);
+    }
+    if (n == 0 || memchr(bytes, 0, n) != NULL) {
+        // a zero byte can't be in a C string. no text has one: this token gets a name no text has either
+        n = (size_t)sprintf((char*)bytes, "\xff\xff%" PRIu64, id);
+    }
+    return n;
+}
+
+void write_tokenizer(const char* path) {
+    // The format of tokenizer.bin of llama2.c: the length of the longest token and then score,
+    // length and bytes of each one. The encoder of llama2.c merges the two neighbours whose
+    // union is the token with the highest score. These vocabularies come from tiktoken, which
+    // merges the pair whose union has the lowest id: the score is minus the id
+    size_t longest = 0;
+    for (uint64_t i = 0; i < n_vocab; i++) {
+        if (strlen(vocab[i]) > longest) { longest = strlen(vocab[i]); }
+    }
+    unsigned char* bytes = malloc(longest + 32);
+    FILE* file = fopen(path, "wb");
+    if (!bytes || !file) { die("Couldn't create file %s: %s\n", path, strerror(errno)); }
+    int32_t max_token_length = 0;
+    for (uint64_t i = 0; i < n_vocab; i++) {
+        int32_t len = (int32_t)token_text(i, bytes);
+        if (len > max_token_length) { max_token_length = len; }
+    }
+    int failed = fwrite(&max_token_length, sizeof(int32_t), 1, file) != 1;
+    for (uint64_t i = 0; i < n_vocab && !failed; i++) {
+        float score = -(float)i;
+        int32_t len = (int32_t)token_text(i, bytes);
+        failed = fwrite(&score, sizeof(float), 1, file) != 1 || fwrite(&len, sizeof(int32_t), 1, file) != 1
+              || fwrite(bytes, 1, len, file) != (size_t)len;
+    }
+    if (fclose(file) != 0 || failed) { die("write failed on %s: %s\n", path, strerror(errno)); }
+    free(bytes);
 }
 
 // ----------------------------------------------------------------------------
@@ -257,7 +399,7 @@ float half_to_float(uint16_t h) {
 }
 
 void write_floats(Tensor* t) {
-    // a 1D tensor (rmsnorm weights), that stays in fp32
+    // a 1D tensor (rmsnorm weights, biases, the table of RoPE), that stays in fp32
     size_t n = t->ne[0];
     float* f = malloc(n * sizeof(float));
     if (!f) { die("malloc failed!\n"); }
@@ -342,9 +484,10 @@ int main(int argc, char* argv[]) {
     read_tensors((uint64_t)numbers[ALIGNMENT]);
 
     // the Config of llama2.c
-    if (!strings[ARCHITECTURE] || strcmp(strings[ARCHITECTURE], "llama") != 0) {
-        die("The architecture is %s and llama2.c only runs llama\n",
-            strings[ARCHITECTURE] ? strings[ARCHITECTURE] : "unknown");
+    const char* architecture = strings[ARCHITECTURE] ? strings[ARCHITECTURE] : "unknown";
+    int qwen = strcmp(architecture, "qwen2") == 0;
+    if (!qwen && strcmp(architecture, "llama") != 0) {
+        die("The architecture is %s: this converter knows llama and qwen2\n", architecture);
     }
     for (int k = DIM; k <= HEADS; k++) {
         if (!found[k] || numbers[k] < 1 || numbers[k] > 1e6) { die("Bad or missing %s\n", number_keys[k]); }
@@ -373,50 +516,100 @@ int main(int argc, char* argv[]) {
     int seq_len = argc == 4 ? atoi(argv[3]) : (context > 0 && context < 2048) ? context : 2048;
     if (seq_len < 1) { die("Bad seq_len %s\n", argv[3]); }
 
-    fprintf(stderr, "%s: %s, GGUF v%u, %" PRIu64 " tensors\n", in_path,
-            strings[NAME] ? strings[NAME] : "(no name)", version, n_tensors);
+    // what is not as in Llama 2
+    ModelExtras extras;
+    memset(&extras, 0, sizeof(extras));
+    extras.magic = EXTRAS_MAGIC;
+    extras.rope_base = found[ROPE_BASE] && numbers[ROPE_BASE] > 1 ? (float)numbers[ROPE_BASE] : 10000.0f;
+    extras.norm_eps = found[NORM_EPS] && numbers[NORM_EPS] > 0 ? (float)numbers[NORM_EPS] : 1e-5f;
+    extras.rope_halves = qwen; // as llama.cpp does: its "neox" RoPE for qwen2, the "norm" one for llama
+    extras.qkv_bias = find_tensor("blk.0.attn_q.bias") != NULL;
+    extras.rope_factors = find_tensor("rope_freqs.weight") != NULL;
+    const char* tokenizer_model = strings[TOKENIZER] ? strings[TOKENIZER] : "llama";
+    const char* pre_tokenizer = strings[PRE_TOKENIZER] ? strings[PRE_TOKENIZER] : "";
+    if (strcmp(tokenizer_model, "gpt2") == 0) {
+        if (strcmp(pre_tokenizer, "qwen2") == 0) {
+            extras.tokenizer = TOKENIZER_BPE_QWEN;
+        } else if (strcmp(pre_tokenizer, "llama-bpe") == 0 || strcmp(pre_tokenizer, "llama3") == 0
+                   || strcmp(pre_tokenizer, "llama-v3") == 0) {
+            extras.tokenizer = TOKENIZER_BPE_LLAMA3;
+        } else {
+            die("The BPE tokenizer is '%s': this converter knows those of Qwen 2 and Llama 3\n", pre_tokenizer);
+        }
+        if (n_vocab != (uint64_t)vocab_size) {
+            die("%s has %" PRIu64 " tokens for %d embeddings\n", in_path, n_vocab, vocab_size);
+        }
+    } else if (strcmp(tokenizer_model, "llama") != 0) {
+        die("The tokenizer is %s: this converter knows llama (sentencepiece) and gpt2 (BPE)\n", tokenizer_model);
+    }
+    const char* chat_template = strings[CHAT_TEMPLATE] ? strings[CHAT_TEMPLATE] : "";
+    extras.chat = strstr(chat_template, "<|im_start|>") ? CHAT_CHATML
+                : strstr(chat_template, "<|start_header_id|>") ? CHAT_LLAMA3 : CHAT_LLAMA2;
+    if ((found[BOS] && (numbers[BOS] < 0 || numbers[BOS] >= vocab_size))
+        || (found[EOS] && (numbers[EOS] < 0 || numbers[EOS] >= vocab_size))) {
+        die("Bad BOS or EOS token\n");
+    }
+    extras.bos = found[BOS] ? (int32_t)numbers[BOS] : 1;
+    extras.eos = found[EOS] ? (int32_t)numbers[EOS] : 2;
+    if (extras.tokenizer == TOKENIZER_SPM) {
+        if (extras.bos != 1 || extras.eos != 2 || vocab_size != 32000) {
+            fprintf(stderr, "WARNING: not the vocabulary of tokenizer.bin of llama2.c (32000 tokens, BOS 1, EOS 2)\n");
+        }
+    } else if (!(found[ADD_BOS] ? numbers[ADD_BOS] != 0 : extras.tokenizer == TOKENIZER_BPE_LLAMA3)) {
+        // as llama.cpp does: a BPE tokenizer adds no BOS unless the GGUF asks for it, except the one of Llama 3
+        extras.bos = -1;
+    }
+
+    fprintf(stderr, "%s: %s (%s), GGUF v%u, %" PRIu64 " tensors\n", in_path,
+            strings[NAME] ? strings[NAME] : "no name", architecture, version, n_tensors);
     fprintf(stderr, "dim %d, hidden_dim %d, n_layers %d, n_heads %d, n_kv_heads %d, vocab_size %d, seq_len %d",
             dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len);
     if (context > 0 && context != seq_len) { fprintf(stderr, " (the GGUF says %d)", context); }
     fprintf(stderr, "\n");
-    // what llama2.c has fixed in its code and a model can have different
-    if (found[ROPE_BASE] && numbers[ROPE_BASE] != 10000) {
-        fprintf(stderr, "WARNING: the RoPE base is %g and llama2.c uses 10000\n", numbers[ROPE_BASE]);
-    }
-    if (strings[TOKENIZER] && strcmp(strings[TOKENIZER], "llama") != 0) {
-        fprintf(stderr, "WARNING: the tokenizer is %s, not the SentencePiece one of tokenizer.bin\n", strings[TOKENIZER]);
-    }
-    if ((found[BOS] && numbers[BOS] != 1) || (found[EOS] && numbers[EOS] != 2)) {
-        fprintf(stderr, "WARNING: BOS and EOS are not the tokens 1 and 2 of llama2.c\n");
-    }
-    if (vocab_size != 32000) {
-        fprintf(stderr, "WARNING: tokenizer.bin of llama2.c has 32000 tokens\n");
-    }
+    fprintf(stderr, "RoPE base %g on %s%s, rmsnorm epsilon %g, %s on wq wk wv, %s, %s chat, BOS %d, EOS %d\n",
+            extras.rope_base, extras.rope_halves ? "the halves of a head" : "neighbours",
+            extras.rope_factors ? " with a table of factors" : "", extras.norm_eps,
+            extras.qkv_bias ? "bias" : "no bias",
+            extras.tokenizer == TOKENIZER_SPM ? "sentencepiece tokenizer"
+            : extras.tokenizer == TOKENIZER_BPE_QWEN ? "BPE tokenizer of Qwen" : "BPE tokenizer of Llama 3",
+            extras.chat == CHAT_CHATML ? "ChatML" : extras.chat == CHAT_LLAMA3 ? "Llama 3" : "Llama 2",
+            extras.bos, extras.eos);
 
-    // first the rmsnorm weights, that stay in fp32...
-    int n_norms = 2 * n_layers + 1;
-    plan = malloc((9 * (size_t)n_layers + 3) * sizeof(Tensor*));
+    // first what stays in fp32: the rmsnorm weights and, in the models that have them, the
+    // biases of wq, wk and wv and the table of RoPE...
+    plan = malloc((12 * (size_t)n_layers + 4) * sizeof(Tensor*));
     if (!plan) { die("malloc failed!\n"); }
-    plan_layers(n_layers, "attn_norm", dim, 1, 0);
-    plan_layers(n_layers, "ffn_norm", dim, 1, 0);
+    plan_layers(n_layers, "attn_norm.weight", dim, 1, 0);
+    plan_layers(n_layers, "ffn_norm.weight", dim, 1, 0);
     plan_tensor("output_norm.weight", dim, 1, 0);
+    if (extras.qkv_bias) {
+        plan_layers(n_layers, "attn_q.bias", dim, 1, 0);
+        plan_layers(n_layers, "attn_k.bias", kv_dim, 1, 0);
+        plan_layers(n_layers, "attn_v.bias", kv_dim, 1, 0);
+    }
+    if (extras.rope_factors) { plan_tensor("rope_freqs.weight", dim / n_heads / 2, 1, 0); }
+    int n_floats = n_plan;
     // ...and then the matrices
     plan_tensor("token_embd.weight", dim, vocab_size, 1);
-    plan_layers(n_layers, "attn_q", dim, dim, 1);          // wq
-    plan_layers(n_layers, "attn_k", dim, kv_dim, 1);       // wk
-    plan_layers(n_layers, "attn_v", dim, kv_dim, 1);       // wv
-    plan_layers(n_layers, "attn_output", dim, dim, 1);     // wo
-    plan_layers(n_layers, "ffn_gate", dim, hidden_dim, 1); // w1
-    plan_layers(n_layers, "ffn_down", hidden_dim, dim, 1); // w2
-    plan_layers(n_layers, "ffn_up", dim, hidden_dim, 1);   // w3
+    plan_layers(n_layers, "attn_q.weight", dim, dim, 1);          // wq
+    plan_layers(n_layers, "attn_k.weight", dim, kv_dim, 1);       // wk
+    plan_layers(n_layers, "attn_v.weight", dim, kv_dim, 1);       // wv
+    plan_layers(n_layers, "attn_output.weight", dim, dim, 1);     // wo
+    plan_layers(n_layers, "ffn_gate.weight", dim, hidden_dim, 1); // w1
+    plan_layers(n_layers, "ffn_down.weight", hidden_dim, dim, 1); // w2
+    plan_layers(n_layers, "ffn_up.weight", dim, hidden_dim, 1);   // w3
     // a model whose classifier is the embedding table has no output.weight. llama 2 has it
     int shared_classifier = find_tensor("output.weight") == NULL;
     if (!shared_classifier) { plan_tensor("output.weight", dim, vocab_size, 1); }
+    // a tensor left out would be a part of the model that run_nnapi.c doesn't compute
+    for (uint64_t i = 0; i < n_tensors; i++) {
+        if (!tensors[i].used) { die("%s has a tensor with no place in the checkpoint: %s\n", in_path, tensors[i].name); }
+    }
 
     uint64_t expected = 256;
     for (int i = 0; i < n_plan; i++) {
         uint64_t n = plan[i]->ne[0] * plan[i]->ne[1];
-        expected += i < n_norms ? n * sizeof(float) : n + n / QK * sizeof(float);
+        expected += i < n_floats ? n * sizeof(float) : n + n / QK * sizeof(float);
     }
 
     tmp_path = malloc(strlen(out_path) + 5);
@@ -436,12 +629,13 @@ int main(int argc, char* argv[]) {
     memcpy(header + 4, version_and_config, 32);
     header[36] = (uint8_t)shared_classifier;
     memcpy(header + 37, &group_size, 4);
+    memcpy(header + EXTRAS_OFFSET, &extras, sizeof(extras));
     write_bytes(header, sizeof(header));
 
     time_t start = time(NULL);
     int shown = 0;
     for (int i = 0; i < n_plan; i++) {
-        if (i < n_norms) { write_floats(plan[i]); } else { write_q8(plan[i]); }
+        if (i < n_floats) { write_floats(plan[i]); } else { write_q8(plan[i]); }
         int percent = (int)(written * 100 / expected);
         if (percent >= shown + 5) {
             shown = percent - percent % 5;
@@ -455,5 +649,13 @@ int main(int argc, char* argv[]) {
     tmp_path = NULL; // nothing to discard anymore
     fprintf(stderr, "OK: %s, %" PRIu64 " bytes, group size %d, scaling factors from %g to %g\n",
             out_path, written, QK, scale_min, scale_max);
+    if (extras.tokenizer != TOKENIZER_SPM) {
+        // tokenizer.bin of llama2.c is the vocabulary of Llama 2: these models bring their own
+        char* tokenizer_path = malloc(strlen(out_path) + 11);
+        if (!tokenizer_path) { die("malloc failed!\n"); }
+        sprintf(tokenizer_path, "%s.tokenizer", out_path);
+        write_tokenizer(tokenizer_path);
+        fprintf(stderr, "OK: %s, its tokenizer (run_nnapi -z)\n", tokenizer_path);
+    }
     return 0;
 }

@@ -268,6 +268,9 @@ public class MainActivity extends Activity {
         if ("llama32_3b".equals(modelChoice)) {
             return "llama32-3b-q4km.gguf";
         }
+        if ("lfm25".equals(modelChoice)) {
+            return "lfm25-q4_0.gguf";
+        }
         return null;
     }
 
@@ -521,25 +524,51 @@ public class MainActivity extends Activity {
                 File tokenizer = null;
                 String weightsPrefix = null;
 
-                final String gguf = ggufFor(modelChoice);
+                String gguf = ggufFor(modelChoice);
                 boolean useLlama = !"stories15M".equalsIgnoreCase(modelChoice);
-                if (gguf != null) {
-                    model = new File(GGUF_DIR, gguf);
-                } else if (useLlama) {
-                    File tmp7b = new File("/data/local/tmp/llm/llama2_7b.bin");
-                    File internal7b = new File(files, "llama2_7b.bin");
-                    model = tmp7b.exists() ? tmp7b : internal7b;
-                    weightsPrefix = "/data/local/tmp/llm/wf7/l2";
-                } else {
-                    File tmp15m = new File("/data/local/tmp/llm/stories15M.bin");
-                    File internal15m = new File(files, "stories15M.bin");
-                    model = tmp15m.exists() ? tmp15m : internal15m;
-                    weightsPrefix = "/data/local/tmp/llm/wf/s15";
+
+                // Si existe el modelo convertido para la APU, corre 100% en la APU con run_nnapi
+                if ("qwen15".equals(modelChoice)) {
+                    File qwenBin = new File("/data/local/tmp/llm/qwen2.5_1.5b.bin");
+                    if (qwenBin.exists()) {
+                        model = qwenBin;
+                        weightsPrefix = "/data/local/tmp/llm/wf_qwen/q15";
+                        File qwenTok = new File("/data/local/tmp/llm/qwen2.5_1.5b.bin.tokenizer");
+                        tokenizer = qwenTok.exists() ? qwenTok : new File("/data/local/tmp/llm/tokenizer.bin");
+                        gguf = null;
+                    }
+                } else if ("llama32_3b".equals(modelChoice)) {
+                    File llama3Bin = new File("/data/local/tmp/llm/llama3_2_3b.bin");
+                    if (llama3Bin.exists()) {
+                        model = llama3Bin;
+                        weightsPrefix = "/data/local/tmp/llm/wf_l3/l3";
+                        File llama3Tok = new File("/data/local/tmp/llm/llama3_2_3b.bin.tokenizer");
+                        tokenizer = llama3Tok.exists() ? llama3Tok : new File("/data/local/tmp/llm/tokenizer.bin");
+                        gguf = null;
+                    }
                 }
 
-                File tmpTok = new File("/data/local/tmp/llm/tokenizer.bin");
-                File internalTok = new File(files, "tokenizer.bin");
-                tokenizer = tmpTok.exists() ? tmpTok : internalTok;
+                if (gguf != null) {
+                    model = new File(GGUF_DIR, gguf);
+                } else if (model == null) {
+                    if (useLlama) {
+                        File tmp7b = new File("/data/local/tmp/llm/llama2_7b.bin");
+                        File internal7b = new File(files, "llama2_7b.bin");
+                        model = tmp7b.exists() ? tmp7b : internal7b;
+                        weightsPrefix = "/data/local/tmp/llm/wf7/l2";
+                    } else {
+                        File tmp15m = new File("/data/local/tmp/llm/stories15M.bin");
+                        File internal15m = new File(files, "stories15M.bin");
+                        model = tmp15m.exists() ? tmp15m : internal15m;
+                        weightsPrefix = "/data/local/tmp/llm/wf/s15";
+                    }
+                }
+
+                if (tokenizer == null) {
+                    File tmpTok = new File("/data/local/tmp/llm/tokenizer.bin");
+                    File internalTok = new File(files, "tokenizer.bin");
+                    tokenizer = tmpTok.exists() ? tmpTok : internalTok;
+                }
 
                 if (!model.exists()) {
                     error = "Modelo no encontrado: " + model.getAbsolutePath();
