@@ -38,6 +38,12 @@ jobs:
           echo "llama-android run: $RUN"
           gh run download "$RUN" --repo "$GITHUB_REPOSITORY" -n llama-android -D llama_bin
           cp llama_bin/llama-completion chat_apk/app/src/main/jniLibs/arm64-v8a/libllama_completion.so
+          # The server, for the assistant to keep one model loaded. Not every llama.cpp release builds it.
+          if [ -f llama_bin/llama-server ]; then
+            cp llama_bin/llama-server chat_apk/app/src/main/jniLibs/arm64-v8a/libllama_server.so
+          else
+            echo "::warning title=No llama-server::the llama-android artifact has no llama-server"
+          fi
           ls -la chat_apk/app/src/main/jniLibs/arm64-v8a/
 
       - name: Build APK

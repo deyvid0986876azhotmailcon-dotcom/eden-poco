@@ -11,7 +11,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -48,6 +48,36 @@ jobs:
           test -f out/llama-bench
           "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" out/*
           echo "$TAG" > out/VERSION.txt
+          ls -la out
+
+      # A second build with the Vulkan backend, to try the Mali-G615 (-ngl 99 puts the layers on
+      # the GPU). Its tools get a -vulkan suffix. The CPU ones above stay as they are, because
+      # chat-apk.yml packages those: a failure here does not fail the job.
+      - name: Configure with Vulkan
+        continue-on-error: true
+        run: |
+          # glslc (the shader compiler) comes with the NDK; the Vulkan headers and library, from its sysroot.
+          cmake -S llama.cpp -B build-vulkan \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=OFF -DGGML_OPENMP=OFF \
+            -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+i8mm+fp16 \
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DGGML_VULKAN=ON -DVK_USE_PLATFORM_ANDROID_KHR=ON \
+            -DVulkan_GLSLC_EXECUTABLE="$ANDROID_NDK_LATEST_HOME/shader-tools/linux-x86_64/glslc"
+
+      - name: Build with Vulkan
+        continue-on-error: true
+        run: |
+          for t in llama-bench llama-completion llama-server; do
+            if cmake --build build-vulkan -j"$(nproc)" --target "$t"; then
+              cp "build-vulkan/bin/$t" "out/$t-vulkan"
+              "$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" "out/$t-vulkan"
+            else
+              echo "::warning title=Vulkan target failed::$t"
+            fi
+          done
           ls -la out
 
       - name: Upload

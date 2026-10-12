@@ -1173,13 +1173,16 @@ void matmul(float* xout, float* x, Matrix* w, int n, int d) {
     nn.cpu_runs++;
 }
 
+// whole layers as one graph each, instead of a graph per matmul
+#include "nnapi_blocks.h"
+
 void report_matmul() {
     // where the matmuls actually ran, to stderr like the tok/s
     if (nn.state <= 0) {
         fprintf(stderr, "nnapi: not used, %ld matmuls on the CPU\n", nn.cpu_runs);
         return;
     }
-    int compiled = 0;
+    int compiled = blocks_matrices(); // the ones inside the graph of a group of layers
     for (int i = 0; i < nn.n_graphs; i++) {
         if (nn.graphs[i].compilation) { compiled++; }
     }
@@ -1191,6 +1194,7 @@ void report_matmul() {
             compiled, nn.n_graphs, nn.device_name, nn.compile_ms);
     fprintf(stderr, "nnapi: %ld matmuls on %s at %.3f ms each, %ld on the CPU\n",
             nn.nnapi_runs, nn.device_name, nn.nnapi_runs ? nn.run_ms / nn.nnapi_runs : 0.0, nn.cpu_runs);
+    blocks_report();
     if (nn.q8 == Q8_IO) {
         fprintf(stderr, "nnapi: %ld executions repeated because the outputs did not fit in 8 bits\n", nn.retries);
     }
@@ -1204,6 +1208,7 @@ void report_matmul() {
 
 void free_matmul() {
     // call this before the checkpoint is unmapped: the models point at the weights
+    blocks_free();
     for (int i = 0; i < nn.n_graphs; i++) {
         MatmulGraph* g = &nn.graphs[i];
         if (g->compilation) { ANeuralNetworksCompilation_free(g->compilation); }
@@ -1237,6 +1242,9 @@ float* forward(Transformer* transformer, int token, int pos) {
 
     // forward all the layers
     for(unsigned long long l = 0; l < p->n_layers; l++) {
+
+        // the layers that run as one graph on the accelerator, if one starts here: l comes back as its last one
+        if (blocks_forward(transformer, &l, pos)) { continue; }
 
         // attention rmsnorm
         rmsnorm(s->xb, x, w->rms_att_weight + l*dim, dim);
@@ -1382,6 +1390,7 @@ float* forward(Transformer* transformer, int token, int pos) {
             x[i] += s->xb[i];
         }
     }
+    blocks_check(transformer, p->n_layers); // NNAPI_VERIFY: the last group against what the CPU just computed
 
     // final rmsnorm
     rmsnorm(x, x, w->rms_final_weight, dim);
@@ -1978,6 +1987,8 @@ void error_usage() {
     fprintf(stderr, "  NNAPI_WEIGHTS_FILE  name of the files to keep those 8-bit weights in and map them from,\n");
     fprintf(stderr, "                   one per matrix: model.bin.nnapi8 gives model.bin.nnapi8.0, .1, ...\n");
     fprintf(stderr, "                   default: they are made in RAM at every run\n");
+    fprintf(stderr, "  NNAPI_BLOCKS     layers that go in one graph, instead of one graph per matmul. 0 = off,\n");
+    fprintf(stderr, "                   default 4 with a checkpoint of gguf2bin. nnapi_blocks.h has the rest\n");
     exit(EXIT_FAILURE);
 }
 
