@@ -2,23 +2,25 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Poco X6 Pro - APU AI Chat</title>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- viewport-fit=cover es lo que deja a env(safe-area-inset-*) recibir los márgenes del sistema -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="dark">
+    <title>Poco AI</title>
     <style>
         :root {
-            --bg: #090d16;
-            --surface: #111827;
-            --surface-glass: rgba(17, 24, 39, 0.75);
-            --border: rgba(255, 255, 255, 0.08);
-            --border-active: rgba(99, 102, 241, 0.4);
-            --text-primary: #f8fafc;
-            --text-secondary: #94a3b8;
-            --accent-cyan: #06b6d4;
-            --accent-indigo: #6366f1;
-            --user-bubble: linear-gradient(135deg, #3b82f6, #1d4ed8);
-            --ai-bubble: #1e293b;
-            --apu-green: #10b981;
+            color-scheme: dark;
+            --bg: #0b0f17; /* el mismo valor que BACKGROUND en MainActivity.java */
+            --surface: #141b27;
+            --surface-2: #1c2636;
+            --line: rgba(255, 255, 255, 0.08);
+            --text: #eef2f8;
+            --text-2: #a7b1c4;
+            --text-3: #7f8a9e;
+            --accent: #7c9cff;
+            /* colores de estado: solo para los medidores y los puntos de estado */
+            --ok: #34d399;
+            --warn: #fbbf24;
+            --crit: #f87171;
         }
 
         * {
@@ -26,515 +28,1095 @@
             -webkit-tap-highlight-color: transparent;
         }
 
-        body, html {
-            margin: 0;
-            padding: 0;
+        [hidden] {
+            display: none !important;
+        }
+
+        html, body {
             height: 100%;
-            font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
-            background-color: var(--bg);
-            color: var(--text-primary);
+            margin: 0;
             overflow: hidden;
+            overscroll-behavior: none;
+            background: var(--bg);
+            color: var(--text);
+            font: 15px/1.5 system-ui, -apple-system, "Roboto", sans-serif;
         }
 
-        .chat-app {
-            display: flex;
-            flex-direction: column;
-            height: 100vh;
-            max-width: 900px;
-            margin: 0 auto;
-            position: relative;
+        button, textarea {
+            font: inherit;
+            color: inherit;
         }
 
-        /* Ambient Glow Background */
-        .ambient-glow {
+        button {
+            cursor: pointer;
+        }
+
+        .sr-only {
             position: absolute;
-            top: -100px;
-            left: 50%;
-            transform: translateX(-50%);
-            width: 400px;
-            height: 300px;
-            background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, rgba(6, 182, 212, 0.08) 50%, transparent 70%);
-            filter: blur(60px);
-            pointer-events: none;
-            z-index: 0;
+            width: 1px;
+            height: 1px;
+            overflow: hidden;
+            clip-path: inset(50%);
         }
 
-        /* Header */
-        .header {
-            padding: 14px 20px;
-            background: var(--surface-glass);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border-bottom: 1px solid var(--border);
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            z-index: 10;
-        }
-
-        .header-title {
+        .app {
+            height: 100%;
+            max-width: 760px;
+            margin: 0 auto;
             display: flex;
             flex-direction: column;
-            gap: 2px;
+            /* MainActivity ya deja la página fuera de las barras del sistema y del teclado y consume
+               esos márgenes, así que dentro de la app esto vale 0. Cubre el caso de abrir la página
+               sin ese contenedor. Nunca se suman los dos */
+            padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+                     env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
         }
 
-        .brand-name {
-            font-size: 1.05rem;
-            font-weight: 700;
-            background: linear-gradient(135deg, #ffffff, #cbd5e1);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            letter-spacing: -0.3px;
-        }
-
-        .hardware-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 0.72rem;
-            color: var(--apu-green);
-            font-weight: 600;
-            letter-spacing: 0.3px;
-        }
-
-        .pulse-dot {
-            width: 7px;
-            height: 7px;
+        .dot {
+            flex: none;
+            width: 8px;
+            height: 8px;
             border-radius: 50%;
-            background-color: var(--apu-green);
-            box-shadow: 0 0 8px var(--apu-green);
-            animation: pulse 2s infinite ease-in-out;
+            background: var(--text-3);
         }
+
+        .dot[data-tone="ok"] { background: var(--ok); }
+        .dot[data-tone="warn"] { background: var(--warn); }
+        .dot[data-tone="crit"] { background: var(--crit); }
+        .dot[data-live="true"] { animation: pulse 1.6s ease-in-out infinite; }
 
         @keyframes pulse {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.4; transform: scale(0.85); }
+            50% { opacity: 0.35; transform: scale(0.8); }
         }
 
-        .model-selector {
-            background: rgba(15, 23, 42, 0.8);
-            border: 1px solid var(--border);
-            color: var(--text-primary);
-            padding: 7px 12px;
-            border-radius: 20px;
-            font-size: 0.78rem;
-            font-weight: 600;
-            outline: none;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-
-        .model-selector:focus {
-            border-color: var(--accent-indigo);
-            box-shadow: 0 0 10px rgba(99, 102, 241, 0.3);
-        }
-
-        /* Telemetry Bar */
-        .telemetry-bar {
-            background: rgba(15, 23, 42, 0.6);
-            border-bottom: 1px solid var(--border);
-            padding: 6px 20px;
-            font-size: 0.72rem;
-            color: var(--text-secondary);
+        /* Cabecera */
+        .topbar {
+            flex: none;
             display: flex;
-            justify-content: space-between;
             align-items: center;
-            z-index: 5;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 10px 14px;
+            user-select: none;
+            -webkit-user-select: none;
         }
 
-        .speed-badge {
-            color: var(--accent-cyan);
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+        }
+
+        .brand-mark {
+            flex: none;
+            width: 36px;
+            height: 36px;
+            border-radius: 12px;
+            display: grid;
+            place-items: center;
+            background: linear-gradient(135deg, #8aa5ff, #6a56e0);
+            color: #fff;
+        }
+
+        .brand-text {
+            min-width: 0;
+        }
+
+        .brand h1 {
+            margin: 0;
+            font-size: 16px;
+            font-weight: 700;
+            line-height: 1.25;
+            letter-spacing: -0.01em;
+        }
+
+        .status {
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--text-2);
+        }
+
+        .status span {
+            min-width: 0;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+
+        .models {
+            flex: none;
+            display: flex;
+            padding: 3px;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            background: var(--surface);
+        }
+
+        .model {
+            height: 34px;
+            padding: 0 11px;
+            border: 0;
+            border-radius: 11px;
+            background: none;
+            color: var(--text-2);
+            font-size: 12.5px;
             font-weight: 600;
+            white-space: nowrap;
         }
 
-        /* Messages Area */
+        .model[aria-checked="true"] {
+            background: var(--surface-2);
+            color: var(--text);
+            box-shadow: inset 0 0 0 1px rgba(124, 156, 255, 0.5);
+        }
+
+        .model:disabled {
+            opacity: 0.5;
+        }
+
+        /* Conversación */
+        .stage {
+            flex: 1 1 0;
+            min-height: 0; /* sin esto la lista crece con su contenido en vez de desplazarse */
+            position: relative;
+            display: flex;
+        }
+
         .messages {
-            flex-grow: 1;
-            padding: 20px 16px;
+            flex: 1 1 0;
+            min-width: 0;
             overflow-y: auto;
+            overscroll-behavior: contain;
             display: flex;
             flex-direction: column;
-            gap: 16px;
-            scroll-behavior: smooth;
-            z-index: 1;
+            gap: 14px;
+            padding: 8px 14px 16px;
         }
 
-        .message-row {
+        .welcome {
+            margin: auto 0;
+            padding: 24px 8px;
+            text-align: center;
+        }
+
+        .welcome h2 {
+            margin: 0 0 8px;
+            font-size: 20px;
+            letter-spacing: -0.02em;
+        }
+
+        .welcome p {
+            margin: 0 auto;
+            max-width: 34em;
+            color: var(--text-2);
+            font-size: 14px;
+        }
+
+        .welcome .welcome-hint {
+            margin-top: 12px;
+            color: var(--text-3);
+            font-size: 12.5px;
+        }
+
+        .msg {
+            flex: none;
             display: flex;
-            gap: 10px;
-            max-width: 86%;
-            animation: fadeIn 0.25s ease-out;
+            flex-direction: column;
+            animation: rise 0.22s ease-out;
         }
 
-        .message-row.user-row {
-            align-self: flex-end;
-            flex-direction: row-reverse;
+        .msg.user {
+            align-items: flex-end;
         }
 
-        .message-row.ai-row {
-            align-self: flex-start;
+        .msg.ai {
+            align-items: flex-start;
         }
 
-        .avatar {
-            width: 32px;
-            height: 32px;
-            border-radius: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 0.85rem;
-            flex-shrink: 0;
-            margin-top: 2px;
-        }
-
-        .user-avatar {
-            background: linear-gradient(135deg, #3b82f6, #1d4ed8);
-            color: white;
-        }
-
-        .ai-avatar {
-            background: linear-gradient(135deg, #0f172a, #1e293b);
-            border: 1px solid var(--border);
-            color: var(--accent-cyan);
-            box-shadow: 0 0 10px rgba(6, 182, 212, 0.2);
+        @keyframes rise {
+            from { opacity: 0; transform: translateY(6px); }
         }
 
         .bubble {
-            padding: 12px 16px;
+            max-width: 88%;
+            padding: 10px 14px;
             border-radius: 18px;
-            line-height: 1.55;
-            font-size: 0.92rem;
-            word-wrap: break-word;
             white-space: pre-wrap;
+            overflow-wrap: anywhere;
         }
 
-        .user-bubble {
-            background: var(--user-bubble);
-            color: #ffffff;
-            border-bottom-right-radius: 4px;
-            box-shadow: 0 4px 14px rgba(37, 99, 235, 0.25);
+        .msg.user .bubble {
+            background: linear-gradient(135deg, #4f6fe6, #6a56e0);
+            color: #fff;
+            border-bottom-right-radius: 6px;
         }
 
-        .ai-bubble {
-            background: var(--ai-bubble);
-            color: var(--text-primary);
-            border: 1px solid var(--border);
-            border-bottom-left-radius: 4px;
-            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+        .msg.ai .bubble {
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-bottom-left-radius: 6px;
         }
 
-        /* Streaming Cursor */
         .cursor {
             display: inline-block;
             width: 7px;
             height: 15px;
-            background: var(--accent-cyan);
-            margin-left: 4px;
-            vertical-align: middle;
-            animation: blink 0.8s infinite;
+            margin-left: 2px;
+            vertical-align: -2px;
             border-radius: 2px;
+            background: var(--accent);
+            animation: blink 0.9s steps(2, start) infinite;
         }
 
         @keyframes blink {
-            0%, 50% { opacity: 1; }
-            51%, 100% { opacity: 0; }
+            to { visibility: hidden; }
         }
 
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(8px); }
-            to { opacity: 1; transform: translateY(0); }
+        .note {
+            margin-top: 6px;
+            font-size: 12.5px;
+            color: var(--text-3);
         }
 
-        /* Quick Prompts */
-        .quick-prompts {
-            padding: 6px 16px 12px;
+        .note.error {
+            padding: 8px 11px;
+            border: 1px solid rgba(248, 113, 113, 0.4);
+            border-radius: 12px;
+            background: rgba(248, 113, 113, 0.1);
+            color: #fecaca;
+        }
+
+        .jump {
+            position: absolute;
+            right: 14px;
+            bottom: 10px;
+            width: 40px;
+            height: 40px;
+            border: 1px solid var(--line);
+            border-radius: 50%;
+            display: grid;
+            place-items: center;
+            background: var(--surface-2);
+            color: var(--text-2);
+            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+        }
+
+        /* Tarjeta de telemetría, debajo de cada respuesta */
+        .tele {
+            width: 100%;
+            max-width: 460px;
+            margin-top: 8px;
+            overflow: hidden;
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            background: var(--surface);
+        }
+
+        .tele-head {
+            width: 100%;
+            min-height: 42px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            border: 0;
+            background: none;
+            text-align: left;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        .tele-state {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-2);
+        }
+
+        .tele-brief {
+            margin-left: auto;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12.5px;
+            color: var(--text-2);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .tele-brief b {
+            color: var(--text);
+        }
+
+        .chev {
+            flex: none;
+            color: var(--text-3);
+            transition: transform 0.2s;
+        }
+
+        .tele[data-open="true"] .chev { transform: rotate(180deg); }
+        .tele[data-open="true"] .b-speed { display: none; } /* abierta, ya está en grande */
+        .tele[data-open="false"] .tele-body { display: none; }
+
+        .tele-body {
+            display: grid;
+            gap: 12px;
+            padding: 12px;
+            border-top: 1px solid var(--line);
+        }
+
+        .tele-main {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .hero {
+            flex: 1 1 auto;
+            min-width: 0;
+            padding: 10px 12px;
+            border: 1px solid transparent;
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.035);
+        }
+
+        .hero-tag {
+            display: none;
+            margin-bottom: 4px;
+            font-size: 10.5px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--accent);
+        }
+
+        .hero-value {
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+        }
+
+        .speed {
+            font-size: 28px;
+            line-height: 1.1;
+            font-weight: 750;
+            letter-spacing: -0.03em;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .unit {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-2);
+        }
+
+        .hero-sub {
+            margin-top: 2px;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            font-size: 11.5px;
+            color: var(--text-3);
+            font-variant-numeric: tabular-nums;
+        }
+
+        /* Regla de los 60 segundos: la velocidad pasa a ser el dato principal de la tarjeta */
+        .tele[data-long="true"] .hero {
+            border-color: rgba(124, 156, 255, 0.6);
+            background: linear-gradient(135deg, rgba(124, 156, 255, 0.22), rgba(124, 156, 255, 0.06));
+            animation: pop 0.5s ease-out;
+        }
+
+        .tele[data-long="true"] .hero-tag { display: block; }
+        .tele[data-long="true"] .speed { font-size: 38px; }
+        .tele[data-long="true"] .unit { font-size: 14px; color: var(--text); }
+
+        .tele[data-long="true"] .b-speed {
+            padding: 2px 8px;
+            border-radius: 9px;
+            background: rgba(124, 156, 255, 0.22);
+            box-shadow: inset 0 0 0 1px rgba(124, 156, 255, 0.6);
+        }
+
+        @keyframes pop {
+            from { transform: scale(0.96); }
+            60% { transform: scale(1.03); }
+        }
+
+        .rings {
+            flex: none;
+            display: flex;
+            gap: 10px;
+        }
+
+        .gauge {
+            position: relative;
+            width: 64px;
+            height: 64px;
+        }
+
+        .gauge svg {
+            display: block;
+            width: 100%;
+            height: 100%;
+            transform: rotate(-90deg); /* el anillo empieza arriba */
+        }
+
+        .g-track, .g-value {
+            fill: none;
+            stroke-width: 6;
+        }
+
+        .g-track {
+            stroke: rgba(255, 255, 255, 0.09);
+        }
+
+        /* pathLength="100" en el círculo: el trazo se mide en tantos por ciento */
+        .g-value {
+            stroke: var(--ok);
+            stroke-linecap: round;
+            stroke-dasharray: 100;
+            stroke-dashoffset: 100;
+            opacity: 0;
+            transition: stroke-dashoffset 0.5s ease, stroke 0.3s ease, opacity 0.2s;
+        }
+
+        .gauge[data-level] .g-value { opacity: 1; }
+        .gauge[data-level="warn"] .g-value { stroke: var(--warn); }
+        .gauge[data-level="crit"] .g-value { stroke: var(--crit); }
+
+        .g-text {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            line-height: 1.1;
+        }
+
+        .g-text b {
+            font-size: 15px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .g-text small {
+            font-size: 9.5px;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            color: var(--text-3);
+        }
+
+        .rows {
+            margin: 0;
+        }
+
+        .rows > div {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 7px 0;
+            border-top: 1px solid var(--line);
+            font-size: 12.5px;
+        }
+
+        .rows dt {
+            flex: none;
+            color: var(--text-3);
+        }
+
+        .rows dd {
+            min-width: 0;
+            margin: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 7px;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .tele-foot {
+            margin: -4px 0 0;
+            font-size: 11px;
+            color: var(--text-3);
+        }
+
+        /* Sugerencias y caja de texto */
+        .dock {
+            flex: none;
+            padding: 6px 14px 10px;
+        }
+
+        .chips {
             display: flex;
             gap: 8px;
             overflow-x: auto;
+            padding: 2px 0 10px;
             scrollbar-width: none;
-            z-index: 5;
+            user-select: none;
+            -webkit-user-select: none;
         }
 
-        .quick-prompts::-webkit-scrollbar {
+        .chips::-webkit-scrollbar {
             display: none;
         }
 
-        .prompt-chip {
-            background: rgba(30, 41, 59, 0.7);
-            border: 1px solid var(--border);
-            padding: 6px 12px;
-            border-radius: 16px;
-            font-size: 0.75rem;
-            color: var(--text-secondary);
+        .chip {
+            flex: none;
+            height: 36px;
+            padding: 0 13px;
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            background: var(--surface);
+            color: var(--text-2);
+            font-size: 13px;
             white-space: nowrap;
-            cursor: pointer;
-            transition: all 0.2s;
         }
 
-        .prompt-chip:active {
-            transform: scale(0.96);
-            background: rgba(59, 130, 246, 0.2);
-            border-color: var(--accent-cyan);
-            color: var(--text-primary);
+        .chip:active {
+            background: var(--surface-2);
+            color: var(--text);
         }
 
-        /* Input Bar */
-        .input-bar {
-            padding: 12px 16px 18px;
-            background: var(--surface-glass);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border-top: 1px solid var(--border);
+        .composer {
             display: flex;
-            gap: 10px;
-            align-items: center;
-            z-index: 10;
+            align-items: flex-end;
+            gap: 8px;
+            padding: 5px 5px 5px 16px;
+            border: 1px solid var(--line);
+            border-radius: 27px;
+            background: var(--surface);
+            transition: border-color 0.2s;
         }
 
-        .input-container {
-            flex-grow: 1;
-            position: relative;
-            display: flex;
-            align-items: center;
+        .composer:focus-within {
+            border-color: rgba(124, 156, 255, 0.65);
         }
 
-        input {
-            width: 100%;
-            padding: 13px 18px;
-            border-radius: 24px;
-            border: 1px solid var(--border);
-            background: rgba(15, 23, 42, 0.9);
-            color: var(--text-primary);
-            font-size: 0.95rem;
-            outline: none;
-            transition: all 0.2s;
-            font-family: inherit;
+        .composer textarea {
+            flex: 1;
+            min-width: 0;
+            max-height: 132px;
+            padding: 11px 0;
+            border: 0;
+            outline: 0;
+            resize: none;
+            background: none;
+            font-size: 16px;
+            line-height: 1.4;
         }
 
-        input:focus {
-            border-color: var(--accent-cyan);
-            box-shadow: 0 0 14px rgba(6, 182, 212, 0.25);
+        .composer textarea::placeholder {
+            color: var(--text-3);
         }
 
-        .action-btn {
-            width: 46px;
-            height: 46px;
+        .round {
+            flex: none;
+            width: 44px;
+            height: 44px;
+            border: 0;
             border-radius: 50%;
-            border: none;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            flex-shrink: 0;
-            transition: all 0.2s;
+            display: grid;
+            place-items: center;
+            transition: transform 0.15s, background 0.2s;
         }
 
-        .send-btn {
-            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-indigo));
-            color: white;
-            box-shadow: 0 4px 14px rgba(99, 102, 241, 0.4);
+        .round:active {
+            transform: scale(0.94);
         }
 
-        .send-btn:active {
-            transform: scale(0.93);
+        .send {
+            background: var(--accent);
+            color: #0b1020;
         }
 
-        .stop-btn {
-            background: #ef4444;
-            color: white;
-            box-shadow: 0 4px 14px rgba(239, 68, 68, 0.4);
-            display: none;
+        .send:disabled {
+            background: var(--surface-2);
+            color: var(--text-3);
+        }
+
+        .stop {
+            border: 1px solid rgba(248, 113, 113, 0.5);
+            background: rgba(248, 113, 113, 0.16);
+            color: var(--crit);
+        }
+
+        .stop:disabled {
+            opacity: 0.5;
+        }
+
+        @media (max-width: 350px) {
+            .gauge { width: 54px; height: 54px; }
+            .model { padding: 0 8px; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation: none !important;
+                transition: none !important;
+            }
         }
     </style>
 </head>
 <body>
 
-<div class="chat-app">
-    <div class="ambient-glow"></div>
-
-    <!-- Header -->
-    <header class="header">
-        <div class="header-title">
-            <div class="brand-name">Poco X6 Pro AI</div>
-            <div class="hardware-badge">
-                <span class="pulse-dot"></span>
-                <span>MediaTek APU 780 (MDLA 5.3)</span>
+<div class="app">
+    <header class="topbar">
+        <div class="brand">
+            <div class="brand-mark" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.3 6.7L21 11l-6.7 2.3L12 20l-2.3-6.7L3 11l6.7-2.3z"/></svg>
+            </div>
+            <div class="brand-text">
+                <h1>Poco AI</h1>
+                <p class="status"><i class="dot" id="statusDot"></i><span id="statusText"></span></p>
             </div>
         </div>
-        <select id="modelChoice" class="model-selector">
-            <option value="llama2_7b">🧠 Llama 2 7B Chat</option>
-            <option value="stories15M">⚡ Stories 15M (Rápido)</option>
-        </select>
+        <div class="models" id="models" role="radiogroup" aria-label="Modelo"></div>
     </header>
 
-    <!-- Telemetry Bar -->
-    <div class="telemetry-bar">
-        <span>Aceleración NPU: <b style="color:#10b981;">Activa (NNAPI)</b></span>
-        <span id="speedBadge" class="speed-badge">Listo</span>
-    </div>
-
-    <!-- Chat Messages -->
-    <div class="messages" id="messagesContainer">
-        <div class="message-row ai-row">
-            <div class="avatar ai-avatar">⚡</div>
-            <div class="bubble ai-bubble">¡Hola! Soy tu asistente de IA corriendo directamente en la **APU (NPU MediaTek APU 780)** de tu Poco X6 Pro. 
-
-No dependo de internet y funciono mediante aceleración de hardware neuronal. ¿Qué te gustaría conversar o consultar hoy?</div>
-        </div>
-    </div>
-
-    <!-- Quick Prompts -->
-    <div class="quick-prompts">
-        <div class="prompt-chip" onclick="applyPrompt('¿Quién eres y qué hardware estás usando?')">¿Quién eres?</div>
-        <div class="prompt-chip" onclick="applyPrompt('Explícame de forma simple cómo funciona una NPU en un celular.')">¿Cómo funciona una NPU?</div>
-        <div class="prompt-chip" onclick="applyPrompt('Escribe una pequeña historia de ciencia ficción.')">Historia de ciencia ficción</div>
-        <div class="prompt-chip" onclick="applyPrompt('Dame 3 consejos para optimizar la batería en Android.')">Consejos de batería</div>
-    </div>
-
-    <!-- Input Bar -->
-    <footer class="input-bar">
-        <div class="input-container">
-            <input type="text" id="userInput" placeholder="Escribe tu mensaje a la APU..." autocomplete="off">
-        </div>
-        <button id="sendBtn" class="action-btn send-btn" onclick="handleSend()">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="22" y1="2" x2="11" y2="13"></line>
-                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-            </svg>
+    <div class="stage">
+        <main class="messages" id="messages" role="log" aria-live="off">
+            <section class="welcome" id="welcome">
+                <h2>IA local en tu Poco X6 Pro</h2>
+                <p>Todo se calcula en el teléfono, sin conexión. El modelo corre en la APU 780 (MDLA 5.3) cuando el acelerador lo admite y el resto va por CPU.</p>
+                <p class="welcome-hint" id="modelHint"></p>
+            </section>
+        </main>
+        <button class="jump" id="jump" type="button" aria-label="Ir al final" hidden>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
         </button>
-        <button id="stopBtn" class="action-btn stop-btn" onclick="handleStop()">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                <rect x="5" y="5" width="14" height="14" rx="2" ry="2"></rect>
-            </svg>
-        </button>
+    </div>
+
+    <footer class="dock">
+        <div class="chips" id="chips"></div>
+        <form class="composer" id="composer">
+            <textarea id="prompt" rows="1" maxlength="240" placeholder="Escribe un mensaje…" aria-label="Mensaje" enterkeyhint="send" autocomplete="off"></textarea>
+            <button class="round send" id="send" type="submit" aria-label="Enviar">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            </button>
+            <button class="round stop" id="stop" type="button" aria-label="Detener" hidden>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
+            </button>
+        </form>
     </footer>
+
+    <div class="sr-only" id="announce" aria-live="polite"></div>
 </div>
 
 <script>
-    const messagesContainer = document.getElementById('messagesContainer');
-    const userInput = document.getElementById('userInput');
-    const modelChoice = document.getElementById('modelChoice');
-    const sendBtn = document.getElementById('sendBtn');
-    const stopBtn = document.getElementById('stopBtn');
-    const speedBadge = document.getElementById('speedBadge');
+(() => {
+    'use strict';
 
-    let isGenerating = false;
-    let currentAiBubble = null;
-    let currentCursor = null;
+    const MODELS = [
+        {
+            id: 'llama2_7b',
+            label: 'Llama 2 7B',
+            hint: 'respuestas completas, lento',
+            chips: [
+                ['¿Quién eres?', '¿Quién eres y qué hardware estás usando?'],
+                ['¿Cómo funciona una NPU?', 'Explícame de forma simple cómo funciona una NPU en un celular.'],
+                ['Historia de ciencia ficción', 'Escribe una pequeña historia de ciencia ficción.'],
+                ['Consejos de batería', 'Dame 3 consejos para optimizar la batería en Android.'],
+            ],
+        },
+        {
+            id: 'stories15M',
+            label: 'Stories 15M',
+            hint: 'demo rápida, solo escribe cuentos en inglés',
+            chips: [
+                ['Once upon a time', 'Once upon a time'],
+                ['A brave little robot', 'A brave little robot'],
+                ['The sleepy dragon', 'The sleepy dragon'],
+            ],
+        },
+    ];
+    const LONG_MS = 60000; // desde aquí la velocidad es el dato principal de la tarjeta
+    const LEVEL_NAMES = { ok: 'normal', warn: 'alto', crit: 'crítico' };
+    const IDLE_STATUS = 'Listo · sin conexión';
 
-    userInput.addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') handleSend();
-    });
+    // Lo que va debajo de cada respuesta. No lleva nada escrito por el usuario
+    const CARD = `
+        <section class="tele" data-open="true" aria-label="Telemetría de la respuesta">
+            <button class="tele-head" type="button" aria-expanded="true">
+                <span class="tele-state"><i class="dot"></i><span class="tele-state-text"></span></span>
+                <span class="tele-brief"><b class="b-speed"></b><span class="b-time">0:00</span></span>
+                <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <div class="tele-body">
+                <div class="tele-main">
+                    <div class="hero">
+                        <div class="hero-tag">Más de 60 s · velocidad media</div>
+                        <div class="hero-value"><span class="speed">—</span><span class="unit">tok/s</span></div>
+                        <div class="hero-sub"><span class="tokens">0 tokens</span> · <span class="time">0:00</span></div>
+                    </div>
+                    <div class="rings">
+                        <div class="gauge cpu" role="img" aria-label="CPU sin dato">
+                            <svg viewBox="0 0 64 64" aria-hidden="true"><circle class="g-track" cx="32" cy="32" r="27"/><circle class="g-value" cx="32" cy="32" r="27" pathLength="100"/></svg>
+                            <div class="g-text" aria-hidden="true"><b>—</b><small>CPU</small></div>
+                        </div>
+                        <div class="gauge ram" role="img" aria-label="RAM sin dato">
+                            <svg viewBox="0 0 64 64" aria-hidden="true"><circle class="g-track" cx="32" cy="32" r="27"/><circle class="g-value" cx="32" cy="32" r="27" pathLength="100"/></svg>
+                            <div class="g-text" aria-hidden="true"><b>—</b><small>RAM</small></div>
+                        </div>
+                    </div>
+                </div>
+                <dl class="rows">
+                    <div><dt>APU · MDLA 5.3</dt><dd><i class="dot apu-dot"></i><span class="apu">Preparando…</span></dd></div>
+                    <div><dt>GPU · Mali-G615</dt><dd class="gpu">0 % · Reposo</dd></div>
+                    <div><dt>Memoria RAM</dt><dd class="ram-text">—</dd></div>
+                    <div><dt>Primer token</dt><dd class="ttft">—</dd></div>
+                </dl>
+                <p class="tele-foot">CPU: proceso del motor; 100 % es un núcleo completo.</p>
+            </div>
+        </section>`;
 
-    function applyPrompt(text) {
-        userInput.value = text;
-        userInput.focus();
+    const $ = id => document.getElementById(id);
+    const el = {
+        statusDot: $('statusDot'), statusText: $('statusText'), models: $('models'),
+        messages: $('messages'), welcome: $('welcome'), hint: $('modelHint'), jump: $('jump'),
+        chips: $('chips'), composer: $('composer'), prompt: $('prompt'), send: $('send'), stop: $('stop'),
+        announce: $('announce'),
+    };
+    const backend = window.AndroidBackend; // no existe al abrir la página en un navegador
+    const state = {
+        model: MODELS[0].id,
+        active: null,    // la respuesta que se está generando
+        last: null,      // la anterior
+        stopping: false,
+        stick: true,     // la lista sigue al último mensaje mientras el usuario no suba a leer
+    };
+    let stopTimer = 0;
+    let previewTimer = 0;
+
+    // ---- formato ----
+    const num = (value, digits) => value.toFixed(digits).replace('.', ',');
+    const speedText = value => value > 0 ? num(value, value < 10 ? 2 : 1) : '—';
+    const gb = value => value === undefined || value === null || value === '' ? '—' : String(value).replace('.', ',');
+    const clock = ms => {
+        const seconds = Math.max(0, Math.floor(ms / 1000));
+        return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+    };
+
+    // ---- modelo y sugerencias ----
+    function selectModel(id) {
+        const model = MODELS.find(m => m.id === id) || MODELS[0];
+        state.model = model.id;
+        try { localStorage.setItem('model', model.id); } catch (e) { /* sin almacenamiento, se pierde al cerrar */ }
+        el.models.querySelectorAll('.model').forEach(button => {
+            button.setAttribute('aria-checked', String(button.dataset.id === model.id));
+        });
+        el.hint.textContent = model.label + ': ' + model.hint + '.';
+        el.chips.textContent = '';
+        model.chips.forEach(([label, text]) => {
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'chip';
+            chip.textContent = label;
+            // rellena la caja y deja el envío al usuario: una generación del 7B no es barata
+            chip.addEventListener('click', () => { el.prompt.value = text; fitPrompt(); });
+            el.chips.appendChild(chip);
+        });
     }
 
-    function scrollToBottom() {
-        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    function renderModels() {
+        MODELS.forEach(model => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'model';
+            button.dataset.id = model.id;
+            button.setAttribute('role', 'radio');
+            button.title = model.hint;
+            button.textContent = model.label;
+            button.addEventListener('click', () => selectModel(model.id));
+            el.models.appendChild(button);
+        });
+        let saved = null;
+        try { saved = localStorage.getItem('model'); } catch (e) { /* igual que arriba */ }
+        selectModel(saved);
     }
 
-    function appendUserMessage(text) {
-        const row = document.createElement('div');
-        row.className = 'message-row user-row';
-        row.innerHTML = `
-            <div class="avatar user-avatar">👤</div>
-            <div class="bubble user-bubble">${escapeHtml(text)}</div>
-        `;
-        messagesContainer.appendChild(row);
-        scrollToBottom();
+    // ---- lista de mensajes ----
+    function follow() {
+        if (state.stick) { el.messages.scrollTop = el.messages.scrollHeight; }
     }
 
-    function prepareAiBubble() {
-        const row = document.createElement('div');
-        row.className = 'message-row ai-row';
-        row.innerHTML = `
-            <div class="avatar ai-avatar">⚡</div>
-            <div class="bubble ai-bubble"><span class="text-content"></span><span class="cursor"></span></div>
-        `;
-        messagesContainer.appendChild(row);
-        currentAiBubble = row.querySelector('.text-content');
-        currentCursor = row.querySelector('.cursor');
-        scrollToBottom();
+    function addUser(text) {
+        const row = document.createElement('article');
+        row.className = 'msg user';
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.textContent = text;
+        row.appendChild(bubble);
+        el.messages.appendChild(row);
     }
 
-    function handleSend() {
-        const text = userInput.value.trim();
-        if (!text || isGenerating) return;
+    function addAssistant() {
+        const row = document.createElement('article');
+        row.className = 'msg ai';
+        row.innerHTML = '<div class="bubble"><span class="answer"></span><span class="cursor"></span></div>' + CARD;
+        el.messages.appendChild(row);
+        const q = selector => row.querySelector(selector);
+        const m = {
+            row, bubble: q('.bubble'), answer: q('.answer'), cursor: q('.cursor'),
+            card: q('.tele'), head: q('.tele-head'),
+            ui: {
+                dot: q('.tele-state .dot'), stateText: q('.tele-state-text'),
+                briefSpeed: q('.b-speed'), briefTime: q('.b-time'),
+                speed: q('.speed'), tokens: q('.tokens'), time: q('.time'),
+                cpu: q('.gauge.cpu'), ram: q('.gauge.ram'),
+                apuDot: q('.apu-dot'), apu: q('.apu'), gpu: q('.gpu'), ramText: q('.ram-text'), ttft: q('.ttft'),
+            },
+            t0: performance.now(), elapsedMs: 0, tokens: 0, speed: 0,
+            started: false,  // ya llegó texto
+            official: false, // la velocidad la dio el propio motor
+            toggled: false,  // el usuario abrió o cerró la tarjeta a mano
+        };
+        m.head.addEventListener('click', () => { m.toggled = true; setOpen(m, m.card.dataset.open !== 'true'); });
+        return m;
+    }
 
-        appendUserMessage(text);
-        userInput.value = '';
-        setGeneratingState(true);
-        speedBadge.textContent = "APU calculando...";
+    function setOpen(m, open) {
+        m.card.dataset.open = String(open);
+        m.head.setAttribute('aria-expanded', String(open));
+        follow();
+    }
 
-        prepareAiBubble();
+    function setPhase(m, text, tone, live) {
+        m.ui.stateText.textContent = text;
+        m.ui.dot.dataset.tone = tone;
+        m.ui.dot.dataset.live = String(live);
+        if (live) { setStatus(text, tone, true); }
+    }
 
-        const selectedModel = modelChoice.value;
-        if (typeof AndroidBackend !== 'undefined' && AndroidBackend.sendWithModel) {
-            AndroidBackend.sendWithModel(text, selectedModel);
-        } else if (typeof AndroidBackend !== 'undefined') {
-            AndroidBackend.send(text);
+    function setStatus(text, tone, live) {
+        el.statusText.textContent = text;
+        el.statusDot.dataset.tone = tone;
+        el.statusDot.dataset.live = String(live);
+    }
+
+    // ---- telemetría ----
+    function setGauge(gauge, value, name) {
+        const known = Number.isFinite(value) && value >= 0;
+        // verde por debajo de 60, amarillo de 60 a 85, rojo por encima
+        const level = !known ? null : value < 60 ? 'ok' : value <= 85 ? 'warn' : 'crit';
+        const shown = known ? Math.min(100, value) : 0;
+        if (level && shown >= 0.5) { gauge.dataset.level = level; } else { delete gauge.dataset.level; }
+        gauge.querySelector('.g-value').style.strokeDashoffset = String(100 - shown);
+        gauge.querySelector('b').textContent = known ? Math.round(value) + '%' : '—';
+        gauge.setAttribute('aria-label', known ? `${name} ${Math.round(value)} %, ${LEVEL_NAMES[level]}` : `${name} sin dato`);
+    }
+
+    function render(m) {
+        const time = clock(m.elapsedMs);
+        const speed = speedText(m.speed);
+        m.ui.time.textContent = time;
+        m.ui.briefTime.textContent = time;
+        m.ui.speed.textContent = speed;
+        m.ui.briefSpeed.textContent = m.speed > 0 ? speed + ' tok/s' : '';
+        m.ui.tokens.textContent = m.tokens === 1 ? '1 token' : m.tokens + ' tokens';
+        if (m.elapsedMs >= LONG_MS && m.speed > 0) { m.card.dataset.long = 'true'; }
+    }
+
+    function applyStats(stats) {
+        const m = state.active || state.last;
+        if (!m || !stats) { return; }
+        const ms = Number(stats.elapsedMs !== undefined ? stats.elapsedMs : stats.elapsedSec * 1000);
+        if (ms > 0) {
+            m.elapsedMs = ms;
+            m.t0 = performance.now() - ms;
+        }
+        if (stats.tokenCount > 0) { m.tokens = Number(stats.tokenCount); }
+        const speed = Number(stats.tokPerSec);
+        if (speed > 0 && !m.official) { m.speed = speed; }
+        if (stats.ttftMs > 0) { m.ui.ttft.textContent = num(stats.ttftMs / 1000, 1) + ' s'; }
+        if ('cpuPercent' in stats) { setGauge(m.ui.cpu, Number(stats.cpuPercent), 'CPU'); }
+        if ('ramPercent' in stats) { setGauge(m.ui.ram, Number(stats.ramPercent), 'RAM'); }
+        if (stats.ramTotalGb) {
+            m.ui.ramText.textContent = `${gb(stats.ramUsedGb)} de ${gb(stats.ramTotalGb)} GB · ${gb(stats.ramFreeGb)} GB libres`;
+        }
+        if (stats.gpuStatus) { m.ui.gpu.textContent = stats.gpuStatus; }
+        if (stats.apuSummary) {
+            m.ui.apu.textContent = stats.apuSummary;
+            m.ui.apuDot.dataset.tone = stats.apuState === 'active' ? 'ok' : stats.apuState === 'cpu' ? 'warn' : '';
+            m.ui.apuDot.dataset.live = String(stats.apuState === 'starting');
+        }
+        render(m);
+        follow();
+    }
+
+    // el reloj avanza aunque la telemetría de la app tarde en llegar
+    setInterval(() => {
+        const m = state.active;
+        if (!m) { return; }
+        m.elapsedMs = performance.now() - m.t0;
+        render(m);
+    }, 500);
+
+    // ---- enviar, detener, terminar ----
+    function fitPrompt() {
+        el.prompt.style.height = 'auto';
+        el.prompt.style.height = Math.min(el.prompt.scrollHeight, 132) + 'px';
+        el.send.disabled = !el.prompt.value.trim();
+    }
+
+    function setBusy(busy) {
+        el.send.hidden = busy;
+        el.stop.hidden = !busy;
+        el.stop.disabled = false;
+        el.chips.hidden = busy;
+        el.models.querySelectorAll('.model').forEach(button => { button.disabled = busy; });
+        if (!busy) { setStatus(IDLE_STATUS, 'ok', false); }
+    }
+
+    function send() {
+        const text = el.prompt.value.trim();
+        if (!text || state.active) { return; }
+        el.welcome.hidden = true;
+        // solo la respuesta más reciente queda con la tarjeta desplegada
+        if (state.last && !state.last.toggled) { setOpen(state.last, false); }
+        addUser(text);
+        el.prompt.value = '';
+        fitPrompt();
+        const m = addAssistant();
+        state.active = m;
+        state.stick = true;
+        setBusy(true);
+        setPhase(m, 'Preparando modelo…', '', true);
+        render(m);
+        follow();
+        if (backend && backend.sendWithModel) {
+            backend.sendWithModel(text, state.model);
+        } else if (backend && backend.send) {
+            backend.send(text);
         } else {
-            // Modo preview navegador
-            setTimeout(() => {
-                window.onStreamChunk("Respuesta simulada: ");
-                window.onStreamChunk("La APU MediaTek está lista.");
-                window.onStreamDone();
-            }, 600);
+            preview();
         }
     }
 
-    function handleStop() {
-        if (typeof AndroidBackend !== 'undefined' && AndroidBackend.stop) {
-            AndroidBackend.stop();
+    function stop() {
+        const m = state.active;
+        if (!m || state.stopping) { return; }
+        state.stopping = true;
+        el.stop.disabled = true;
+        setPhase(m, 'Deteniendo…', '', true);
+        if (backend && backend.stop) {
+            backend.stop();
+            // la app avisa con onStreamDone cuando el motor ha muerto; esto es por si no llegara
+            stopTimer = setTimeout(() => finish('stopped'), 5000);
+        } else {
+            finish('stopped');
         }
-        window.onStreamDone();
     }
 
-    function setGeneratingState(generating) {
-        isGenerating = generating;
-        userInput.disabled = generating;
-        sendBtn.style.display = generating ? 'none' : 'flex';
-        stopBtn.style.display = generating ? 'flex' : 'none';
-        if (!generating) userInput.focus();
+    function finish(outcome, detail) {
+        const m = state.active;
+        if (!m) { return; }
+        state.active = null;
+        state.last = m;
+        state.stopping = false;
+        clearTimeout(stopTimer);
+        clearInterval(previewTimer);
+        m.cursor.remove();
+        const text = m.answer.textContent.trimEnd();
+        m.answer.textContent = text;
+        if (!text) { m.bubble.hidden = true; }
+        if (outcome === 'error' || !text) {
+            const note = document.createElement('p');
+            note.className = outcome === 'error' ? 'note error' : 'note';
+            note.textContent = outcome === 'error' ? detail : outcome === 'stopped' ? 'Generación detenida.' : 'El modelo no devolvió texto.';
+            m.row.insertBefore(note, m.card);
+        }
+        if (outcome === 'error' && !m.started) { m.card.hidden = true; } // no llegó a arrancar: no hay nada que medir
+        if (outcome === 'done') { setPhase(m, 'Completado', 'ok', false); }
+        else if (outcome === 'stopped') { setPhase(m, 'Detenido', '', false); }
+        else { setPhase(m, 'Error', 'crit', false); }
+        render(m);
+        setBusy(false);
+        el.announce.textContent = outcome === 'error' ? 'Error: ' + detail : 'Respuesta: ' + text;
+        follow();
     }
 
-    // Callbacks llamados desde MainActivity en streaming
-    window.onStreamChunk = function(chunk) {
-        if (currentAiBubble) {
-            currentAiBubble.textContent += chunk;
-            scrollToBottom();
+    // ---- lo que llama MainActivity ----
+    window.onStreamChunk = chunk => {
+        const m = state.active;
+        if (!m) { return; }
+        let piece = String(chunk);
+        if (!m.started) {
+            piece = piece.replace(/^\s+/, ''); // el modelo suele empezar con un espacio
+            if (!piece) { return; }
+            m.started = true;
+            if (!state.stopping) { setPhase(m, 'Generando…', 'ok', true); }
         }
+        m.answer.textContent += piece;
+        m.tokens++;
+        follow();
     };
 
-    window.onSpeedReport = function(speed) {
-        speedBadge.textContent = `⚡ ${speed} tok/s`;
+    window.onTelemetryUpdate = applyStats;
+
+    // la velocidad que mide el propio motor, cuando la da, manda sobre la que estima la app
+    window.onFinalSpeedReport = speed => {
+        const m = state.active || state.last;
+        const value = Number(speed);
+        if (!m || !(value > 0)) { return; }
+        m.speed = value;
+        m.official = true;
+        render(m);
     };
 
-    window.onStreamDone = function() {
-        if (currentCursor) {
-            currentCursor.remove();
-            currentCursor = null;
-        }
-        setGeneratingState(false);
-        if (speedBadge.textContent.includes("calculando")) {
-            speedBadge.textContent = "Completado";
-        }
-    };
+    window.onStreamDone = () => finish(state.stopping ? 'stopped' : 'done');
 
-    window.onStreamError = function(errorMsg) {
-        if (currentAiBubble) {
-            currentAiBubble.textContent += "\n[Error: " + errorMsg + "]";
-        }
-        window.onStreamDone();
-    };
+    window.onStreamError = message => finish('error', String(message || 'Error desconocido'));
 
-    function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+    // ---- vista previa en un navegador, sin el motor: texto y telemetría de muestra ----
+    function preview() {
+        const words = 'Vista previa sin el motor. Este texto y los datos de la tarjeta son de muestra para ver el diseño.'.split(' ');
+        const offset = location.search.includes('long') ? 58000 : 0; // ?long enseña la regla de los 60 s
+        const start = performance.now();
+        const firstAt = 1200;
+        let sent = 0;
+        previewTimer = setInterval(() => {
+            const elapsedMs = performance.now() - start + offset;
+            const since = elapsedMs - offset - firstAt;
+            if (since > 0 && sent < words.length) { window.onStreamChunk((sent ? ' ' : '') + words[sent++]); }
+            window.onTelemetryUpdate({
+                elapsedMs, tokenCount: sent, ttftMs: sent ? firstAt : -1,
+                tokPerSec: sent > 1 ? ((sent - 1) * 1000 / since).toFixed(2) : '0.00',
+                cpuPercent: Math.round(45 + 50 * Math.abs(Math.sin(elapsedMs / 1500))),
+                ramPercent: 64, ramUsedGb: '7.1', ramTotalGb: '11.1', ramFreeGb: '4.0',
+                gpuStatus: '0 % · Reposo',
+                apuState: sent ? 'active' : 'starting', apuSummary: sent ? 'Activa · vista previa' : 'Preparando…',
+            });
+            if (sent >= words.length) { window.onStreamDone(); }
+        }, 200);
     }
+
+    // ---- eventos ----
+    el.composer.addEventListener('submit', event => { event.preventDefault(); send(); });
+    el.prompt.addEventListener('input', fitPrompt);
+    el.prompt.addEventListener('keydown', event => {
+        if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); }
+    });
+    el.stop.addEventListener('click', stop);
+    el.jump.addEventListener('click', () => { state.stick = true; follow(); });
+    el.messages.addEventListener('scroll', () => {
+        const fromBottom = el.messages.scrollHeight - el.messages.scrollTop - el.messages.clientHeight;
+        state.stick = fromBottom < 80;
+        el.jump.hidden = state.stick;
+    }, { passive: true });
+    window.addEventListener('resize', follow); // al abrirse el teclado la página encoge
+
+    renderModels();
+    fitPrompt();
+    setStatus(IDLE_STATUS, 'ok', false);
+})();
 </script>
 
 </body>

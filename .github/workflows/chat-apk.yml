@@ -3,7 +3,7 @@ name: Build Chat APK
 on:
   push:
     branches: [main]
-    paths: ["chat_apk/**", ".github/workflows/chat-apk.yml"]
+    paths: ["chat_apk/**", "npu-probe/**", ".github/workflows/chat-apk.yml"]
   workflow_dispatch:
 
 jobs:

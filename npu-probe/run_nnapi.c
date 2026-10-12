@@ -1801,7 +1801,10 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
             token = next;
         }
         // EOS (=2) token ends the Assistant turn
-        if (token == 2) { user_turn = 1; }
+        if (token == 2) {
+            user_turn = 1;
+            if (cli_user_prompt != NULL) { break; }
+        }
 
         // forward the transformer to get logits for the next token
         float* logits = forward(transformer, token, pos);
@@ -1814,7 +1817,10 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
             safe_printf(piece); // same as printf("%s", piece), but skips "unsafe" bytes
             fflush(stdout);
         }
-        if (next == 2) { printf("\n"); }
+        if (next == 2) {
+            printf("\n");
+            if (cli_user_prompt != NULL) { break; }
+        }
     }
     printf("\n");
     free(prompt_tokens);
