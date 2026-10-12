@@ -1923,8 +1923,8 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
             // otherwise use the next token sampled from previous turn
             token = next;
         }
-        // EOS token ends the Assistant turn
-        if (token == eos_token) {
+        // EOS token ends the Assistant turn (only after prompt tokens are evaluated)
+        if (user_idx >= num_prompt_tokens && token == eos_token) {
             user_turn = 1;
             if (cli_user_prompt != NULL) { break; }
         }
@@ -1934,15 +1934,16 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
         next = sample(sampler, logits);
         pos++;
 
-        if (user_idx >= num_prompt_tokens && next != eos_token) {
-            // the Assistant is responding, so print its output
-            char* piece = decode(tokenizer, token, next);
-            safe_printf(piece); // same as printf("%s", piece), but skips "unsafe" bytes
-            fflush(stdout);
-        }
-        if (next == eos_token) {
-            printf("\n");
-            if (cli_user_prompt != NULL) { break; }
+        if (user_idx >= num_prompt_tokens) {
+            if (next == eos_token) {
+                printf("\n");
+                if (cli_user_prompt != NULL) { break; }
+            } else {
+                // the Assistant is responding, so print its output
+                char* piece = decode(tokenizer, token, next);
+                safe_printf(piece); // same as printf("%s", piece), but skips "unsafe" bytes
+                fflush(stdout);
+            }
         }
     }
     printf("\n");
