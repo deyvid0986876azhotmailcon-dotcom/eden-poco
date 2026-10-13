@@ -27,6 +27,9 @@ jobs:
         run: |
           mkdir -p chat_apk/app/src/main/jniLibs/arm64-v8a
           $ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang -O3 npu-probe/run_nnapi.c -o chat_apk/app/src/main/jniLibs/arm64-v8a/librun_nnapi.so -lm -ldl -llog
+          # The Neuron API probe, run by typing "/sonda" in the chat: it tells whether a process
+          # started by the app can use MediaTek's library, which the loader denies to the app itself.
+          $ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang -O2 npu-probe/neuron_quant_probe.c -o chat_apk/app/src/main/jniLibs/arm64-v8a/libneuron_probe.so -lm -ldl -llog || true
 
       # The llama.cpp engine is built by llama-android.yml: take it from its latest successful run.
       # It is an executable, but only files named lib*.so are unpacked next to the app.

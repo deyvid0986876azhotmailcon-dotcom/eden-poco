@@ -650,12 +650,53 @@ public class MainActivity extends Activity {
             callPage("onStreamChunk", JSONObject.quote(text));
         }
 
+        /**
+         * "/sonda [formato [sin|con]]" en la caja del chat: corre la sonda de la API Neuron
+         * (npu-probe/neuron_quant_probe.c, empaquetada como libneuron_probe.so) como proceso de la
+         * app y escribe lo que diga. La pregunta que contesta: el cargador le niega a la app la
+         * biblioteca de MediaTek, pero ¿se la niega también a un ejecutable que la app lanza? De
+         * eso depende que la APU pueda usarse con pesos de 4 bits desde la app.
+         */
+        private void runProbe(String command) {
+            String[] parts = command.split("\\s+");
+            List<String> cmd = new ArrayList<>();
+            cmd.add(MainActivity.this.nativeLibDir + "/libneuron_probe.so");
+            for (int i = 1; i < parts.length && i < 3; i++) {
+                cmd.add(parts[i]);
+            }
+            try {
+                ProcessBuilder pb = new ProcessBuilder(cmd);
+                pb.redirectErrorStream(true);
+                pb.directory(MainActivity.this.getFilesDir());
+                Process process = pb.start();
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                        process.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        Log.d(TAG, "[SONDA] " + line);
+                        callPage("onStreamChunk", JSONObject.quote(line + "\n\n"));
+                    }
+                }
+                int exit = process.waitFor();
+                Log.d(TAG, "[SONDA] código de salida " + exit);
+                callPage("onStreamChunk", JSONObject.quote("(la sonda terminó con código " + exit + ")"));
+            } catch (Exception e) {
+                Log.e(TAG, "[SONDA] no arrancó", e);
+                callPage("onStreamChunk", JSONObject.quote("No se pudo lanzar la sonda: " + e.getMessage()));
+            }
+            callPage("onStreamDone", "");
+        }
+
         private void runInference(final String prompt, final String modelChoice, final String hardwareChoice) {
             Run run = null;
             Thread telemetry = null;
             String error = null;
             boolean done = false;
             try {
+                if (prompt != null && prompt.trim().startsWith("/sonda")) {
+                    runProbe(prompt.trim()); // diagnóstico: no pasa por ningún modelo
+                    return;
+                }
                 File files = MainActivity.this.getFilesDir();
                 File cache = new File(files, "nnapi_cache");
                 cache.mkdirs();
