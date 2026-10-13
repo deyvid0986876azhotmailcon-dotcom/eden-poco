@@ -277,6 +277,9 @@ public class MainActivity extends Activity {
         if ("qwen15".equals(modelChoice)) {
             return "qwen15-q4km.gguf";
         }
+        if ("llama32_1b".equals(modelChoice)) {
+            return "llama32-1b-q4km.gguf";
+        }
         if ("llama32_3b".equals(modelChoice)) {
             return "llama32-3b-q4km.gguf";
         }
@@ -569,8 +572,13 @@ public class MainActivity extends Activity {
                 String gguf = ggufFor(modelChoice);
                 boolean useLlama = !"stories15M".equalsIgnoreCase(modelChoice);
 
-                // Si existe el modelo convertido para la APU, corre 100% en la APU con run_nnapi
-                if ("qwen15".equals(modelChoice)) {
+                // Primero la GPU: si el GGUF del modelo está, lo corre llama.cpp con sus capas en la
+                // Mali-G615 por Vulkan. Solo si falta se prueba el modelo convertido para la APU,
+                // que corre run_nnapi
+                boolean ggufPresent = gguf != null && new File(GGUF_DIR, gguf).exists();
+                if (ggufPresent) {
+                    // nada que buscar: más abajo se toma el GGUF
+                } else if ("qwen15".equals(modelChoice)) {
                     File qwenBin = new File("/data/local/tmp/llm/qwen2.5_1.5b.bin");
                     if (qwenBin.exists()) {
                         model = qwenBin;

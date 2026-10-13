@@ -730,16 +730,24 @@
         ['Consejos de batería', 'Dame 3 consejos para optimizar la batería en Android.'],
     ];
     const MODELS = [
+        // Los tres primeros son GGUF: llama.cpp los corre con sus capas en la GPU. Si a Qwen o a
+        // Llama 3B les falta el GGUF, la app prueba el modelo convertido para la APU
         {
             id: 'qwen15',
-            label: 'Qwen 1.5B',
-            hint: 'el más ligero, en español. GGUF con llama.cpp, que usa la GPU Mali-G615 (Vulkan) si puede; o la APU si está el modelo convertido',
+            label: 'Qwen 1.5B · GPU',
+            hint: 'en español, el intermedio (GPU Mali-G615 Vulkan)',
+            chips: CHAT_CHIPS,
+        },
+        {
+            id: 'llama32_1b',
+            label: 'Llama 1B · GPU',
+            hint: 'el más ligero (GPU Mali-G615 Vulkan)',
             chips: CHAT_CHIPS,
         },
         {
             id: 'llama32_3b',
-            label: 'Llama 3B',
-            hint: 'más grande y más lento, en español. GGUF con llama.cpp, que usa la GPU Mali-G615 (Vulkan) si puede; o la APU si está el modelo convertido',
+            label: 'Llama 3B · GPU',
+            hint: 'el más grande y más lento de los tres (GPU Mali-G615 Vulkan)',
             chips: CHAT_CHIPS,
         },
         {
