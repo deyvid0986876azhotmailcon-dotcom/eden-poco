@@ -7,6 +7,10 @@
 // the compiled network keeps, how long an execution takes and how far the result is from the same
 // sum done here in C. One line per format, the last line is FIN.
 //
+// The formats whose name starts with "f" take and give floats and keep the integers inside, between
+// a QUANTIZE and a DEQUANTIZE: what an engine needs to move one layer at a time to small weights
+// while the rest of the model stays in half precision.
+//
 // Run from adb shell:
 //   ./neuron_quant_probe            every format, each attempt in its own process
 //   ./neuron_quant_probe a16w4      only that one; add "sin" or "con" for one pass (without or with
@@ -60,7 +64,7 @@ enum {
     NEURON_TENSOR_QUANT8_ASYMM_SIGNED = 14,
     NEURON_EXT_TENSOR_QUANT4_SYMM = 9005,
 };
-enum { NEURON_FULLY_CONNECTED = 9 };
+enum { NEURON_DEQUANTIZE = 6, NEURON_FULLY_CONNECTED = 9, NEURON_QUANTIZE = 72 };
 
 static int (*Neuron_getVersion)(NeuronRuntimeVersion*);
 static int (*Neuron_getDeviceCount)(uint32_t*);
@@ -167,6 +171,10 @@ typedef struct {
     int wt_bits;      // 0 = float
     int wt_zero;      // zero point of the weights
     bool wt_packed;   // 4-bit weights, two in a byte
+    // The graph takes and gives floats, and only the layer works in integers, between a QUANTIZE
+    // and a DEQUANTIZE. It is how an engine that keeps the rest of the model in half precision
+    // would use these weights
+    bool island;
 } Format;
 
 static const Format FORMATS[] = {
@@ -186,6 +194,14 @@ static const Format FORMATS[] = {
      NEURON_TENSOR_QUANT8_SYMM, 8, 0, NEURON_EXT_TENSOR_QUANT4_SYMM, 4, 0, false},
     {"a8w4p", "activaciones de 8 bits simetricas, pesos de 4 bits (dos valores por byte)",
      NEURON_TENSOR_QUANT8_SYMM, 8, 0, NEURON_EXT_TENSOR_QUANT4_SYMM, 4, 0, true},
+    {"f8w8n", "entrada y salida en coma flotante, la capa en 8 bits sin signo (expresable por NNAPI)",
+     NEURON_TENSOR_QUANT8_ASYMM, 8, 128, NEURON_TENSOR_QUANT8_ASYMM, 8, 128, false, true},
+    {"f16w8", "entrada y salida en coma flotante, la capa en 16 bits con pesos de 8",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_TENSOR_QUANT8_SYMM, 8, 0, false, true},
+    {"f16w4", "entrada y salida en coma flotante, la capa en 16 bits con pesos de 4 (uno por byte)",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_EXT_TENSOR_QUANT4_SYMM, 4, 0, false, true},
+    {"f16w4p", "entrada y salida en coma flotante, la capa en 16 bits con pesos de 4 (dos por byte)",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_EXT_TENSOR_QUANT4_SYMM, 4, 0, true, true},
 };
 #define FORMAT_COUNT (sizeof FORMATS / sizeof FORMATS[0])
 
@@ -299,7 +315,22 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
         next++;                                                                                    \
     } while (0)
 
-    ADD(f->act_type, 2, in_dims, in_scale, f->act_zero); // operand 0: the input
+    const bool ext_float = f->act_bits == 0 || f->island;
+    uint32_t fc_in = 0; // what the layers read: the input, or the input turned into integers
+    if (f->island) {
+        ADD(NEURON_TENSOR_FLOAT32, 2, in_dims, 0.0f, 0); // operand 0: the input
+        fc_in = next;
+        ADD(f->act_type, 2, in_dims, in_scale, f->act_zero);
+        const uint32_t q_in = 0;
+        if (!e) {
+            e = NeuronModel_addOperation(m, NEURON_QUANTIZE, 1, &q_in, 1, &fc_in);
+            if (e) {
+                step = "addOperation QUANTIZE";
+            }
+        }
+    } else {
+        ADD(f->act_type, 2, in_dims, in_scale, f->act_zero); // operand 0: the input
+    }
     uint32_t outs[16];
     for (uint32_t l = 0; l < L; l++) {
         const uint32_t wi = next;
@@ -330,12 +361,23 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
         const uint32_t oi = next;
         ADD(f->act_type, 2, out_dims, out_scale, f->act_zero);
         outs[l] = oi;
-        const uint32_t op_in[] = {0, wi, bi, ai};
+        const uint32_t op_in[] = {fc_in, wi, bi, ai};
         if (!e) {
             e = NeuronModel_addOperation(m, NEURON_FULLY_CONNECTED, 4, op_in, 1, &oi);
             if (e) {
                 step = "addOperation FULLY_CONNECTED";
             }
+        }
+        if (f->island) {
+            const uint32_t fi = next;
+            ADD(NEURON_TENSOR_FLOAT32, 2, out_dims, 0.0f, 0);
+            if (!e) {
+                e = NeuronModel_addOperation(m, NEURON_DEQUANTIZE, 1, &oi, 1, &fi);
+                if (e) {
+                    step = "addOperation DEQUANTIZE";
+                }
+            }
+            outs[l] = fi;
         }
     }
 #undef ADD
@@ -346,7 +388,7 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
             step = "identifyInputsAndOutputs";
         }
     }
-    if (!e && f->act_bits == 0) {
+    if (!e && ext_float) {
         e = NeuronModel_relaxComputationFloat32toFloat16(m, true);
     }
     if (!e) {
@@ -361,12 +403,14 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
         return 1;
     }
 
-    bool supported[16] = {false};
+    // One answer per operation: the layers, and around them a QUANTIZE and their DEQUANTIZE
+    const uint32_t ops = f->island ? 1 + 2 * L : L;
+    bool supported[40] = {false};
     uint32_t yes = 0;
     const NeuronDevice* const devs[1] = {dev};
     if (dev) {
         const int se = NeuronModel_getSupportedOperationsForDevices(m, devs, 1, supported);
-        for (uint32_t l = 0; !se && l < L; l++) {
+        for (uint32_t l = 0; !se && l < ops; l++) {
             yes += supported[l];
         }
     }
@@ -386,7 +430,7 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
     const double compile_ms = now_ms() - t0;
     if (e || !c) {
         out("%s | modelo aceptado, MDLA soporta %u/%u | NO compila: %s devuelve %d tras %.0f ms",
-            head, yes, L, step, e, compile_ms);
+            head, yes, ops, step, e, compile_ms);
         if (c) {
             NeuronCompilation_free(c);
         }
@@ -397,14 +441,19 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
     const int de = NeuronCompilation_getCompiledNetworkSize(c, &dla);
 
     // Inputs and outputs in the layout of the activation type
-    const size_t ab = act_bytes(f);
+    const size_t ab = ext_float ? sizeof(float) : act_bytes(f);
     void* in = calloc(C, ab);
     void* got = calloc((size_t)R * L, ab);
     float* x_real = calloc(C, sizeof(float));
     g_seed = 4242;
     for (uint32_t i = 0; i < C; i++) {
         const float x = (float)(rnd() % 20001) / 10000.0f - 1.0f;
-        if (f->act_bits == 16) {
+        if (f->island) {
+            // the value the QUANTIZE of the graph will see, so the comparison counts the layer only
+            const float xq = (float)lrintf(x / in_scale) * in_scale;
+            ((float*)in)[i] = xq;
+            x_real[i] = xq;
+        } else if (f->act_bits == 16) {
             const int16_t v = (int16_t)lrintf(x / in_scale);
             ((int16_t*)in)[i] = v;
             x_real[i] = v * in_scale;
@@ -454,7 +503,9 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
         }
         const double ref = acc * ws;
         double y;
-        if (f->act_bits == 16) {
+        if (ext_float) {
+            y = ((float*)got)[r];
+        } else if (f->act_bits == 16) {
             y = ((int16_t*)got)[r] * (double)out_scale;
         } else if (f->act_bits == 8) {
             y = ((int)((uint8_t*)got)[r] - f->act_zero) * (double)out_scale;
@@ -469,12 +520,12 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
     }
     const double total = (double)per_layer * L;
     if (e) {
-        out("%s | MDLA soporta %u/%u | compila en %.0f ms | la ejecucion FALLA (%d)", head, yes, L,
+        out("%s | MDLA soporta %u/%u | compila en %.0f ms | la ejecucion FALLA (%d)", head, yes, ops,
             compile_ms, e);
     } else {
         out("%s | MDLA soporta %u/%u | compila en %.0f ms | red compilada %.1f MB = %.2f bytes por peso "
             "(codigo %d) | %.3f ms por ejecucion de %.0f M de pesos | error relativo %.4f",
-            head, yes, L, compile_ms, dla / 1048576.0, dla / total, de, runs ? sum_ms / runs : 0.0,
+            head, yes, ops, compile_ms, dla / 1048576.0, dla / total, de, runs ? sum_ms / runs : 0.0,
             total / 1e6, ref2 > 0.0 ? sqrt(err2 / ref2) : -1.0);
     }
     free(in);
