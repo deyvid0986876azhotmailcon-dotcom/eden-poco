@@ -11,8 +11,11 @@
 // a QUANTIZE and a DEQUANTIZE: what an engine needs to move one layer at a time to small weights
 // while the rest of the model stays in half precision. The ones with a "c" before the bits write
 // the layer as a convolution of 1 x 1, as MediaTek's LLM flow does, and the ones that end in "c"
-// give the weights a scale per output row. The ones that start with "h" give integer weights to a
-// layer whose activations are floats, which NNAPI does not allow.
+// give the weights a scale per output row ("cb": and the bias its own). The ones that start with
+// "h" give integer weights to a layer whose activations are floats, which NNAPI does not allow.
+//
+// Google's LiteRT builds its graphs for this same compiler with these types, and hands 4-bit
+// weights over as one value per byte: the formats with two per byte are here to confirm they fail.
 //
 // Run from adb shell:
 //   ./neuron_quant_probe            every format, each attempt in its own process
@@ -68,6 +71,7 @@ enum {
     NEURON_TENSOR_QUANT8_ASYMM_SIGNED = 14,
     NEURON_EXT_TENSOR_QUANT4_SYMM = 9005,
     NEURON_EXT_TENSOR_QUANT4_SYMM_PER_CHANNEL = 9011,
+    NEURON_EXT_TENSOR_INT32_SYMM_PER_CHANNEL = 9014,
 };
 enum {
     NEURON_CONV_2D = 3,
@@ -197,6 +201,7 @@ typedef struct {
     bool island;
     bool conv;        // the layer is a CONV_2D of 1 x 1 and not a FULLY_CONNECTED
     bool per_channel; // the weights have a scale per output row
+    bool bias_rows;   // and the bias declares its own, as LiteRT does, and not the zero of NNAPI
 } Format;
 
 static const Format FORMATS[] = {
@@ -256,6 +261,16 @@ static const Format FORMATS[] = {
                "(expresable por NNAPI)",
      NEURON_TENSOR_QUANT8_ASYMM_SIGNED, 8, 0, NEURON_TENSOR_QUANT8_SYMM_PER_CHANNEL, 8, 0, false,
      true, true, true},
+    {"c16w8cb", "convolucion, 16 bits, pesos de 8 por fila y sesgo con escala por fila",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_TENSOR_QUANT8_SYMM_PER_CHANNEL, 8, 0, false, false,
+     true, true, true},
+    {"c16w4cb", "convolucion, 16 bits, pesos de 4 por fila (uno por byte) y sesgo con escala por fila",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_EXT_TENSOR_QUANT4_SYMM_PER_CHANNEL, 4, 0, false,
+     false, true, true, true},
+    {"fc16w4cb", "entrada y salida en coma flotante, convolucion en 16 bits con pesos de 4 por fila "
+                 "y sesgo con escala por fila",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_EXT_TENSOR_QUANT4_SYMM_PER_CHANNEL, 4, 0, false,
+     true, true, true, true},
     {"hw8", "activaciones en coma flotante con pesos de 8 bits, sin pasar por enteros",
      NEURON_TENSOR_FLOAT32, 0, 0, NEURON_TENSOR_QUANT8_SYMM, 8, 0, false, false, false, false},
     {"hcw8c", "convolucion con activaciones en coma flotante y pesos de 8 bits por fila",
@@ -267,11 +282,10 @@ static const Format FORMATS[] = {
 };
 #define FORMAT_COUNT (sizeof FORMATS / sizeof FORMATS[0])
 
-// The options the library itself lists for LLMs, without the ones that only print or debug
-static const char* const LLM_OPTIONS =
-    "--opt=3 --opt-footprint --opt-aggressive --stable-linearize --split-16a4w-conv-oc "
-    "--gno=LTS,Inception --gno-exp --gno-non-4d-tiling --fc-to-conv --mdla-conv-exp "
-    "--intval-color-legacy --mdla-int16-lut --mlo";
+// The library of the phone carries named sets of options, and this one is its own for the
+// generation graph of an LLM (fc-to-conv, split-16a4w-conv-oc, mdla-conv-exp among them). Google's
+// LiteRT passes its sets to the same compiler in this way
+static const char* const LLM_OPTIONS = "--option-bundle=llm_gen_accuracy";
 
 // Real values of the tensors: inputs in [-1, 1], weights with a deviation near 0.02, outputs
 // within [-OUT_MAX, OUT_MAX]
@@ -350,13 +364,15 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
     void* w = q ? pack_weights(f, q, per_layer * L, &w_size) : NULL;
     void* bias = calloc(R, 4);
     float* scales = malloc(R * sizeof(float));
-    if (!q || !w || !bias || !scales) {
+    float* bias_scales = malloc(R * sizeof(float));
+    if (!q || !w || !bias || !scales || !bias_scales) {
         out("%s | sin memoria para %zu pesos", head, per_layer * L);
         return 1;
     }
     // Every row gets the same scale: the numbers are the ones of the format without rows
     for (uint32_t r = 0; r < R; r++) {
         scales[r] = w_scale;
+        bias_scales[r] = in_scale * w_scale;
     }
     const size_t w_layer = w_size / L;
 
@@ -424,7 +440,16 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
             }
         }
         const uint32_t bi = next;
-        if (f->wt_bits && f->act_bits) {
+        if (f->wt_bits && f->act_bits && f->bias_rows) {
+            ADD(NEURON_EXT_TENSOR_INT32_SYMM_PER_CHANNEL, 1, b_dims, 0.0f, 0);
+            if (!e) {
+                const NeuronSymmPerChannelQuantParams rows = {0, R, bias_scales};
+                e = NeuronModel_setOperandSymmPerChannelQuantParams(m, (int32_t)bi, &rows);
+                if (e) {
+                    step = "setOperandSymmPerChannelQuantParams del sesgo";
+                }
+            }
+        } else if (f->wt_bits && f->act_bits) {
             // with a scale per row the bias takes its scales from the weights and declares none
             ADD(NEURON_TENSOR_INT32, 1, b_dims, f->per_channel ? 0.0f : in_scale * w_scale, 0);
         } else {
@@ -636,6 +661,7 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
     free(q);
     free(bias);
     free(scales);
+    free(bias_scales);
     return e ? 1 : 0;
 }
 
