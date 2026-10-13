@@ -1,5 +1,5 @@
 // ----------------------------------------------------------------------------
-// NNAPI backend for whole transformer layers
+// NNAPI / Neuron backend for whole transformer layers
 // Included by run_nnapi.c after its backend for single matmuls, which this one builds on.
 //
 // One graph per matmul is 7 graphs per layer. With Qwen 2.5 1.5B that is 197, and the driver of
@@ -8,11 +8,12 @@
 // of the positions before, wo, residual, rmsnorm, SwiGLU, w2, residual. npu_block_probe.c showed
 // that a graph of this shape compiles and runs on mtk-mdla_shim. What it did not have is real
 // weights, a real RoPE or the keys and values going from one token to the next.
-// THIS FILE HAS NOT RUN ON THE PHONE YET: NNAPI_VERIFY=1 says how far it is from the plain C path.
+// NNAPI_VERIFY=1 says how far each backend is from the plain C path.
 //
 // - Weights: the same 8-bit ones of the single matmuls (prepare_weights_8bit: one file per matrix
 //   with NNAPI_WEIGHTS_FILE), turned into fp32 inside the graph with DEQUANTIZE. Every row keeps
 //   its own scale, put back after the FULLY_CONNECTED.
+//   Neuron uses signed QUANT8_SYMM weights directly in FULLY_CONNECTED, with the same row correction.
 // - Keys and values: a graph has no memory. Every execution gets the ones of T positions as
 //   inputs and gives back the ones of this position, which are kept here. The position being
 //   computed goes in one more slot at the end, so the graph is the same for every token, and a
@@ -27,6 +28,8 @@
 //   rescales: if the residual grows a lot from one layer to the next, use fewer per graph.
 //
 // NNAPI_BLOCKS=<n>        layers per graph, 0 = off. default: 4 with a checkpoint of gguf2bin.c
+// NNAPI_BACKEND=neuron   use Neuron for blocks, CPU elsewhere; default NNAPI
+// NNAPI_NEURON_OPTS      optional compiler string; no compilation cache on Neuron
 // NNAPI_BLOCK_T=<n>       positions kept, default 256
 // NNAPI_BLOCK_LAYERS=<n>  only the first n layers go in graphs
 // NNAPI_BLOCK_NORM=<f>    length of the residual at the input of a graph, default 64
@@ -34,6 +37,7 @@
 //                         text is then the one of the CPU
 
 enum { ANEURALNETWORKS_FLOAT32 = 0, ANEURALNETWORKS_BOOL = 6 };
+// Neuron shares these NNAPI codes; device support is checked before compilation.
 enum {
     ANEURALNETWORKS_ADD = 0, ANEURALNETWORKS_CONCATENATION = 2, ANEURALNETWORKS_LOGISTIC = 14,
     ANEURALNETWORKS_MUL = 18, ANEURALNETWORKS_RESHAPE = 22, ANEURALNETWORKS_SOFTMAX = 25,
@@ -51,9 +55,10 @@ typedef struct {
     int state; // 0 = not built yet, 1 = ready, -1 = the device didn't take it: these layers run on the CPU
     ANeuralNetworksModel* model; // has to outlive the compilation
     ANeuralNetworksCompilation* compilation;
-    float** owned; // constants made for this graph: they have to outlive the model
+    void** owned; // constants made for this graph: they have to outlive the model
     int n_owned;
     long runs;
+    double run_ms;
     // NNAPI_VERIFY
     double rel_sum; // of the relative error of each execution
     double rel_max;
@@ -93,15 +98,25 @@ static BlockState blk;
 
 typedef struct {
     ANeuralNetworksModel* model;
+    BlockGraph* owner; // Neuron references even small constants supplied on the stack
     uint32_t next; // index the next operand gets
-    int e; // the first error of NNAPI, 0 = none so far
+    int e; // the first backend error, 0 = none so far
     uint32_t n_ops;
     uint8_t ops[BLOCK_MAX_OPS]; // which operation each one is, to name the ones a device rejects
 } BlockBuilder;
 
+static void* block_keep_bytes(BlockGraph* bg, size_t size) {
+    void* data = malloc(size);
+    void** owned = realloc(bg->owned, (bg->n_owned + 1) * sizeof(void*));
+    if (!data || !owned) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
+    bg->owned = owned;
+    bg->owned[bg->n_owned++] = data;
+    return data;
+}
+
 static uint32_t bb_operand(BlockBuilder* b, int32_t type, uint32_t rank, const uint32_t* dims, float scale, int32_t zero) {
     ANeuralNetworksOperandType t = {type, rank, dims, scale, zero};
-    int e = ANeuralNetworksModel_addOperand(b->model, &t);
+    int e = block_api.Model_addOperand(b->model, &t);
     if (!b->e) { b->e = e; }
     return b->next++;
 }
@@ -111,8 +126,13 @@ static uint32_t bb_tensor(BlockBuilder* b, uint32_t rank, const uint32_t* dims) 
 }
 
 static uint32_t bb_value(BlockBuilder* b, uint32_t operand, const void* data, size_t size) {
-    // up to 128 bytes are copied. more than that is referenced: data has to outlive the model
-    int e = ANeuralNetworksModel_setOperandValue(b->model, (int32_t)operand, data, size);
+    // NNAPI copies small constants; Neuron may reference all of them until compilation.
+    if (nn.neuron) {
+        void* kept = block_keep_bytes(b->owner, size);
+        memcpy(kept, data, size);
+        data = kept;
+    }
+    int e = block_api.Model_setOperandValue(b->model, (int32_t)operand, data, size);
     if (!b->e) { b->e = e; }
     return operand;
 }
@@ -139,7 +159,7 @@ static uint32_t bb_const(BlockBuilder* b, uint32_t rank, const uint32_t* dims, c
 }
 
 static uint32_t bb_op(BlockBuilder* b, int32_t type, uint32_t n_in, const uint32_t* in, uint32_t out) {
-    int e = ANeuralNetworksModel_addOperation(b->model, type, n_in, in, 1, &out);
+    int e = block_api.Model_addOperation(b->model, type, n_in, in, 1, &out);
     if (!b->e) { b->e = e; }
     if (b->n_ops < BLOCK_MAX_OPS) { b->ops[b->n_ops] = (uint8_t)type; }
     b->n_ops++;
@@ -188,11 +208,7 @@ static const char* block_op_name(int op) {
 
 static float* block_keep(BlockGraph* bg, size_t count) {
     // room for a constant of this graph, freed with it
-    float* data = malloc(count * sizeof(float));
-    bg->owned = realloc(bg->owned, (bg->n_owned + 1) * sizeof(float*));
-    if (!data || !bg->owned) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
-    bg->owned[bg->n_owned++] = data;
-    return data;
+    return block_keep_bytes(bg, count * sizeof(float));
 }
 
 // ---- the pieces of a layer
@@ -214,8 +230,8 @@ static uint32_t bb_rmsnorm(BlockBuilder* b, uint32_t x, const float* weight, uin
 
 static uint32_t bb_linear(BlockBuilder* b, BlockGraph* bg, uint32_t x, MatmulGraph* g, float scale, const float* bias) {
     // (W @ x + bias) * scale, with x of shape (1,n) and the result (1,d).
-    // W comes as the 8-bit weights of prepare_weights_8bit: row i is m[i] * q, with q in
-    // [-127,127] stored as q + 128, and g->row_scale[i] is 127 * m[i]. The tensor takes the
+    // W comes as the 8-bit weights of prepare_weights_8bit: row i is m[i] * q, stored as
+    // q + 128 on NNAPI or signed q on Neuron, and g->row_scale[i] is 127 * m[i]. The tensor takes the
     // largest m as its scale, so no output of the FULLY_CONNECTED is smaller than the real one
     // (small numbers are what fp16 loses), and what each row is short of is put back after it
     uint32_t d = (uint32_t)g->d, n = (uint32_t)g->n;
@@ -230,11 +246,14 @@ static uint32_t bb_linear(BlockBuilder* b, BlockGraph* bg, uint32_t x, MatmulGra
         rows[i] = g->row_scale[i] / 127.0f / tensor_scale * scale;
     }
 
-    uint32_t w8 = bb_operand(b, ANEURALNETWORKS_TENSOR_QUANT8_ASYMM, 2, wd, tensor_scale, Q8_ZERO);
-    int e = g->memory ? ANeuralNetworksModel_setOperandValueFromMemory(b->model, (int32_t)w8, g->memory, 0, (size_t)d * n)
-                      : ANeuralNetworksModel_setOperandValue(b->model, (int32_t)w8, g->w8, (size_t)d * n);
+    uint32_t w8 = bb_operand(b, nn.neuron ? NEURON_TENSOR_QUANT8_SYMM : ANEURALNETWORKS_TENSOR_QUANT8_ASYMM,
+                             2, wd, tensor_scale, nn.neuron ? 0 : Q8_ZERO);
+    // g->w8 already has signed bytes on Neuron and outlives every block graph.
+    int e = !nn.neuron && g->memory
+          ? ANeuralNetworksModel_setOperandValueFromMemory(b->model, (int32_t)w8, g->memory, 0, (size_t)d * n)
+          : block_api.Model_setOperandValue(b->model, (int32_t)w8, g->w8, (size_t)d * n);
     if (!b->e) { b->e = e; }
-    uint32_t w = bb_op(b, ANEURALNETWORKS_DEQUANTIZE, 1, &w8, bb_tensor(b, 2, wd));
+    uint32_t w = nn.neuron ? w8 : bb_op(b, ANEURALNETWORKS_DEQUANTIZE, 1, &w8, bb_tensor(b, 2, wd));
     uint32_t fc_in[] = {x, w, bb_const(b, 1, bd, blk.zeros, d), bb_int(b, 0)};
     uint32_t out = bb_op(b, ANEURALNETWORKS_FULLY_CONNECTED, 4, fc_in, bb_tensor(b, 2, od));
     out = bb_mul(b, out, bb_const(b, 2, od, rows, d), 2, od);
@@ -320,7 +339,8 @@ static int blocks_build(Transformer* t, BlockGraph* bg, BlockBuilder* b) {
     uint32_t n_in = 0, n_out = 0;
 
     memset(b, 0, sizeof *b);
-    int e = ANeuralNetworksModel_create(&b->model);
+    b->owner = bg;
+    int e = block_api.Model_create(&b->model);
     if (e || !b->model) { return e ? e : -1; }
     uint32_t x = bb_tensor(b, 2, xd);
     uint32_t alpha = bb_tensor(b, 1, &single);
@@ -345,11 +365,11 @@ static int blocks_build(Transformer* t, BlockGraph* bg, BlockBuilder* b) {
         out[n_out++] = v[i];
     }
     e = b->e;
-    if (!e) { e = ANeuralNetworksModel_identifyInputsAndOutputs(b->model, n_in, in, n_out, out); }
-    if (!e) { e = ANeuralNetworksModel_relaxComputationFloat32toFloat16(b->model, true); }
-    if (!e) { e = ANeuralNetworksModel_finish(b->model); }
+    if (!e) { e = block_api.Model_identifyInputsAndOutputs(b->model, n_in, in, n_out, out); }
+    if (!e) { e = block_api.Model_relaxComputationFloat32toFloat16(b->model, true); }
+    if (!e) { e = block_api.Model_finish(b->model); }
     if (e) {
-        ANeuralNetworksModel_free(b->model);
+        block_api.Model_free(b->model);
         return e;
     }
     bg->model = b->model;
@@ -358,11 +378,15 @@ static int blocks_build(Transformer* t, BlockGraph* bg, BlockBuilder* b) {
 
 static int blocks_finish(BlockGraph* bg, const uint8_t* token) {
     const ANeuralNetworksDevice* const one[1] = {nn.device};
-    int e = ANeuralNetworksCompilation_createForDevices(bg->model, one, 1, &bg->compilation);
-    if (!e && token) { e = ANeuralNetworksCompilation_setCaching(bg->compilation, nn.cache_dir, token); }
-    if (!e) { e = ANeuralNetworksCompilation_finish(bg->compilation); }
+    int e = block_api.Compilation_createForDevices(bg->model, one, 1, &bg->compilation);
+    if (!e && nn.neuron) {
+        const char* opts = getenv("NNAPI_NEURON_OPTS");
+        if (opts && *opts) { e = block_api.Compilation_setOptimizationString(bg->compilation, opts); }
+    }
+    if (!e && !nn.neuron && token) { e = ANeuralNetworksCompilation_setCaching(bg->compilation, nn.cache_dir, token); }
+    if (!e) { e = block_api.Compilation_finish(bg->compilation); }
     if (e && bg->compilation) {
-        ANeuralNetworksCompilation_free(bg->compilation);
+        block_api.Compilation_free(bg->compilation);
         bg->compilation = NULL;
     }
     return e;
@@ -375,11 +399,11 @@ static void blocks_compile(Transformer* t, BlockGraph* bg) {
     bg->state = -1;
     int e = blocks_build(t, bg, &b);
     if (!e && b.n_ops <= BLOCK_MAX_OPS) {
-        // restricted to one device NNAPI has no CPU to fall back to: one operation the
+        // restricted to one device the backend has no CPU to fall back to: one operation the
         // accelerator doesn't take and the whole graph fails. this says which
         const ANeuralNetworksDevice* const one[1] = {nn.device};
         int rejected = 0;
-        if (ANeuralNetworksModel_getSupportedOperationsForDevices(bg->model, one, 1, takes) == 0) {
+        if (block_api.Model_getSupportedOperationsForDevices(bg->model, one, 1, takes) == 0) {
             for (uint32_t i = 0; i < b.n_ops; i++) {
                 if (takes[i]) { continue; }
                 if (rejected++ < 8) {
@@ -393,7 +417,7 @@ static void blocks_compile(Transformer* t, BlockGraph* bg) {
     if (!e) {
         // the token of the compilation cache: the weights in the graph, the layers and the positions kept
         uint8_t token[CACHE_TOKEN_SIZE];
-        bool cached = nn.cache_dir[0] != '\0';
+        bool cached = !nn.neuron && nn.cache_dir[0] != '\0';
         uint64_t hash = 0xcbf29ce484222325ULL;
         for (int i = 0; i < BLOCK_MATRICES * bg->count; i++) {
             hash = (hash ^ nn.graphs[blk.first_matrix + BLOCK_MATRICES * bg->first + i].hash) * 0x100000001b3ULL;
@@ -419,6 +443,16 @@ static void blocks_compile(Transformer* t, BlockGraph* bg) {
     bg->state = 1;
     fprintf(stderr, "nnapi: blocks: layers %d to %d compiled for %s, %u operations, %.0f ms\n",
             bg->first, bg->first + bg->count - 1, nn.device_name, b.n_ops, now_ms() - start);
+    if (nn.neuron) {
+        size_t bytes = 0;
+        if (block_api.Compilation_getCompiledNetworkSize
+            && !block_api.Compilation_getCompiledNetworkSize(bg->compilation, &bytes)) {
+            fprintf(stderr, "nnapi: blocks: neuron layers %d to %d compiled network: %zu bytes\n",
+                    bg->first, bg->first + bg->count - 1, bytes);
+        } else {
+            fprintf(stderr, "nnapi: blocks: neuron compiled network size unavailable\n");
+        }
+    }
 }
 
 static void blocks_setup(Transformer* t) {
@@ -432,6 +466,7 @@ static void blocks_setup(Transformer* t) {
     if (per_graph <= 0) { return; }
     if (nn.state == 0) { nnapi_setup(); }
     if (nn.state < 0) { return; }
+    if (!nn.neuron) { fprintf(stderr, "nnapi: blocks: backend NNAPI\n"); }
     if (p->dim % p->n_heads != 0 || p->n_heads % p->n_kv_heads != 0 || (p->dim / p->n_heads) % 2 != 0) {
         fprintf(stderr, "nnapi: blocks: not for a model with these heads, off\n");
         return;
@@ -452,8 +487,8 @@ static void blocks_setup(Transformer* t) {
     if (!(blk.norm > 0.0f)) { blk.norm = 64.0f; }
     blk.rot_pos = -1;
 
-    // the graphs take 8-bit weights and turn them into fp32 themselves, and so does from now on
-    // the one of any matmul left out of them (the classifier)
+    // Both backends use row scales in fp32 units. Only NNAPI dequantizes weights in the graph
+    // and builds single-matmul graphs for matrices outside the blocks.
     if (nn.q8 == Q8_OFF) {
         nn.q8 = Q8_DEQUANT;
         weights_files_setup();
@@ -461,6 +496,9 @@ static void blocks_setup(Transformer* t) {
     nn.q8 = Q8_DEQUANT;
     if (nn.weights_path[0] == '\0') {
         fprintf(stderr, "nnapi: blocks: without NNAPI_WEIGHTS_FILE the 8-bit weights of every layer stay in RAM\n");
+    }
+    if (nn.neuron) {
+        fprintf(stderr, "nnapi: blocks: neuron keeps signed 8-bit weights in RAM, weight files remain unsigned\n");
     }
 
     // the 8-bit weights of every matrix that goes in a graph. they get their place among the
@@ -484,6 +522,13 @@ static void blocks_setup(Transformer* t) {
             if (prepare_weights_8bit(g) != 0) {
                 fprintf(stderr, "nnapi: blocks: no 8-bit weights for a matrix of layer %d, off\n", l);
                 return;
+            }
+            if (nn.neuron) {
+                // q + 128 becomes q without requantization; preserve scales and the on-disk bytes.
+                int8_t* signed_weights = (int8_t*)g->w8;
+                for (size_t j = 0; j < (size_t)g->n * g->d; j++) {
+                    signed_weights[j] = (int8_t)((int)g->w8[j] - Q8_ZERO);
+                }
             }
         }
     }
@@ -561,23 +606,23 @@ static int blocks_run(Transformer* t, BlockGraph* bg, float alpha) {
     size_t kv_dim = kvh * head_size;
     size_t cache = kvh * blk.T * head_size; // of one layer
     ANeuralNetworksExecution* execution = NULL;
-    int e = ANeuralNetworksExecution_create(bg->compilation, &execution);
-    if (!e) { e = ANeuralNetworksExecution_setInput(execution, 0, NULL, blk.x, dim * sizeof(float)); }
-    if (!e) { e = ANeuralNetworksExecution_setInput(execution, 1, NULL, &alpha, sizeof alpha); }
-    if (!e) { e = ANeuralNetworksExecution_setInput(execution, 2, NULL, blk.rot, kvh * head_size * head_size * sizeof(float)); }
-    if (!e) { e = ANeuralNetworksExecution_setInput(execution, 3, NULL, blk.mask, ((size_t)blk.T + 1) * sizeof(float)); }
+    int e = block_api.Execution_create(bg->compilation, &execution);
+    if (!e) { e = block_api.Execution_setInput(execution, 0, NULL, blk.x, dim * sizeof(float)); }
+    if (!e) { e = block_api.Execution_setInput(execution, 1, NULL, &alpha, sizeof alpha); }
+    if (!e) { e = block_api.Execution_setInput(execution, 2, NULL, blk.rot, kvh * head_size * head_size * sizeof(float)); }
+    if (!e) { e = block_api.Execution_setInput(execution, 3, NULL, blk.mask, ((size_t)blk.T + 1) * sizeof(float)); }
     for (int i = 0; i < bg->count && !e; i++) {
         size_t at = (size_t)(bg->first + i) * cache;
-        e = ANeuralNetworksExecution_setInput(execution, 4 + 2 * i, NULL, blk.kc + at, cache * sizeof(float));
-        if (!e) { e = ANeuralNetworksExecution_setInput(execution, 5 + 2 * i, NULL, blk.vc + at, cache * sizeof(float)); }
+        e = block_api.Execution_setInput(execution, 4 + 2 * i, NULL, blk.kc + at, cache * sizeof(float));
+        if (!e) { e = block_api.Execution_setInput(execution, 5 + 2 * i, NULL, blk.vc + at, cache * sizeof(float)); }
     }
-    if (!e) { e = ANeuralNetworksExecution_setOutput(execution, 0, NULL, blk.y, dim * sizeof(float)); }
+    if (!e) { e = block_api.Execution_setOutput(execution, 0, NULL, blk.y, dim * sizeof(float)); }
     for (int i = 0; i < bg->count && !e; i++) {
-        e = ANeuralNetworksExecution_setOutput(execution, 1 + 2 * i, NULL, blk.k + i * kv_dim, kv_dim * sizeof(float));
-        if (!e) { e = ANeuralNetworksExecution_setOutput(execution, 2 + 2 * i, NULL, blk.v + i * kv_dim, kv_dim * sizeof(float)); }
+        e = block_api.Execution_setOutput(execution, 1 + 2 * i, NULL, blk.k + i * kv_dim, kv_dim * sizeof(float));
+        if (!e) { e = block_api.Execution_setOutput(execution, 2 + 2 * i, NULL, blk.v + i * kv_dim, kv_dim * sizeof(float)); }
     }
-    if (!e) { e = ANeuralNetworksExecution_compute(execution); }
-    if (execution) { ANeuralNetworksExecution_free(execution); }
+    if (!e) { e = block_api.Execution_compute(execution); }
+    if (execution) { block_api.Execution_free(execution); }
     return e;
 }
 
@@ -650,13 +695,14 @@ static int blocks_forward(Transformer* t, unsigned long long* layer, int pos) {
                     bg->first, bg->first + bg->count - 1, pos, length);
             blk.not_finite++;
         }
-        ANeuralNetworksCompilation_free(bg->compilation);
+        block_api.Compilation_free(bg->compilation);
         bg->compilation = NULL;
         bg->state = -1;
         return 0;
     }
     double elapsed = now_ms() - start;
     blk.run_ms += elapsed;
+    bg->run_ms += elapsed;
     bg->runs++;
 
     for (int i = 0; i < bg->count; i++) {
@@ -712,13 +758,17 @@ static void blocks_report(void) {
         if (blk.groups[i].state == 1) { ready++; }
         runs += blk.groups[i].runs;
     }
-    fprintf(stderr, "nnapi: blocks: %d of %d graphs of %d layers on %s, %ld executions at %.3f ms each\n",
-            ready, blk.n_groups, blk.per_graph, nn.device_name, runs, runs ? blk.run_ms / runs : 0.0);
+    fprintf(stderr, "nnapi: blocks: %d of %d graphs of %d layers on %s, %ld executions at %.3f ms each (backend %s)\n",
+            ready, blk.n_groups, blk.per_graph, nn.device_name, runs, runs ? blk.run_ms / runs : 0.0,
+            nn.neuron ? "neuron" : "NNAPI");
     if (blk.not_finite) {
         fprintf(stderr, "nnapi: blocks: %ld graphs dropped because their outputs were not finite\n", blk.not_finite);
     }
-    for (int i = 0; i < blk.n_groups && nn.verify; i++) {
+    for (int i = 0; i < blk.n_groups; i++) {
         BlockGraph* bg = &blk.groups[i];
+        fprintf(stderr, "nnapi: blocks: layers %d to %d: %ld executions at %.3f ms each\n",
+                bg->first, bg->first + bg->count - 1, bg->runs, bg->runs ? bg->run_ms / bg->runs : 0.0);
+        if (!nn.verify) { continue; }
         fprintf(stderr, "nnapi: blocks: verify: layers %d to %d: relative error %.2f%% on average, %.2f%% at worst, %ld executions\n",
                 bg->first, bg->first + bg->count - 1,
                 bg->verified ? 100.0 * bg->rel_sum / bg->verified : 0.0, 100.0 * bg->rel_max, bg->verified);
@@ -729,8 +779,8 @@ static void blocks_free(void) {
     // before free_matmul: the models point at the weights it frees
     for (int i = 0; i < blk.n_groups; i++) {
         BlockGraph* bg = &blk.groups[i];
-        if (bg->compilation) { ANeuralNetworksCompilation_free(bg->compilation); }
-        if (bg->model) { ANeuralNetworksModel_free(bg->model); }
+        if (bg->compilation) { block_api.Compilation_free(bg->compilation); }
+        if (bg->model) { block_api.Model_free(bg->model); }
         for (int j = 0; j < bg->n_owned; j++) { free(bg->owned[j]); }
         free(bg->owned);
     }

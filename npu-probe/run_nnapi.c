@@ -573,6 +573,7 @@ typedef struct {
 
 typedef struct {
     int state; // 0 = not set up yet, 1 = ready, -1 = unavailable
+    bool neuron; // only block graphs use Neuron; other matrices stay on the CPU
     const ANeuralNetworksDevice* device;
     const char* device_name;
     char cache_dir[PATH_MAX]; // "" = no compilation caching
@@ -641,6 +642,8 @@ static bool nnapi_load(void) {
     return missing == 0;
 }
 
+#include "neuron_api.h"
+
 static bool pread_all(int fd, void* buffer, size_t size, off_t offset) {
     char* p = buffer;
     while (size > 0) {
@@ -697,8 +700,24 @@ static void nnapi_setup(void) {
     const char* const* names = want ? &want : mtk_devices;
     int best = want ? 1 : 2; // index in names of the best device found so far
     nn.state = -1;
+    const char* backend = getenv("NNAPI_BACKEND");
+    nn.neuron = backend && strcmp(backend, "neuron") == 0;
     if (want && strcmp(want, "off") == 0) { return; }
+    if (nn.neuron) {
+        fprintf(stderr, "nnapi: blocks: backend neuron, compiling each startup (no compilation cache)\n");
+        if (!blocks_api_neuron()) { return; }
+        nn.q8 = Q8_DEQUANT;
+        weights_files_setup();
+        const char* verify = getenv("NNAPI_VERIFY");
+        nn.verify = verify && atoi(verify) != 0;
+        nn.state = 1;
+        const char* opts = getenv("NNAPI_NEURON_OPTS");
+        fprintf(stderr, "nnapi: blocks: neuron options: %s; matrices outside blocks use CPU\n",
+                opts && *opts ? opts : "none");
+        return;
+    }
     if (!nnapi_load()) { return; }
+    blocks_api_nnapi();
 
     uint32_t count = 0;
     if (ANeuralNetworks_getDeviceCount(&count) != 0) { count = 0; }
@@ -873,6 +892,14 @@ static int prepare_weights_8bit(MatmulGraph* g) {
         }
     }
     scale_rows(g);
+    if (nn.neuron) {
+        // Keep the existing unsigned file format; signed conversion happens only in RAM.
+        g->w8 = malloc(size);
+        if (!g->w8) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
+        bool read_ok = pread_all(fd, g->w8, size, 0);
+        close(fd);
+        return read_ok ? 0 : -1;
+    }
     // the memory starts at the first byte of the file. NNAPI duplicates the fd
     int e = ANeuralNetworksMemory_createFromFd(size, PROT_READ, fd, 0, &g->memory);
     close(fd);
@@ -1151,7 +1178,7 @@ void matmul(float* xout, float* x, Matrix* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
     if (nn.state == 0) { nnapi_setup(); }
-    MatmulGraph* g = nn.state > 0 ? matmul_graph(w, n, d) : NULL;
+    MatmulGraph* g = nn.state > 0 && !nn.neuron ? matmul_graph(w, n, d) : NULL;
     if (g && g->compilation) {
         double start = now_ms();
         int e = nn.q8 == Q8_IO ? run_matmul_8bit(g, xout, x)
@@ -1222,6 +1249,7 @@ void free_matmul() {
         free(g->out);
     }
     free(nn.graphs);
+    if (neuron_lib) { dlclose(neuron_lib); neuron_lib = NULL; }
 }
 
 float* forward(Transformer* transformer, int token, int pos) {
@@ -1977,6 +2005,8 @@ void error_usage() {
     fprintf(stderr, "  -m <string> mode: generate|chat, default: generate\n");
     fprintf(stderr, "  -y <string> (optional) system prompt in chat mode\n");
     fprintf(stderr, "Environment:\n");
+    fprintf(stderr, "  NNAPI_BACKEND    neuron = block graphs on mtk-mdla, other matrices on CPU; default NNAPI\n");
+    fprintf(stderr, "  NNAPI_NEURON_OPTS  Neuron compiler options, default none; Neuron compiles each startup\n");
     fprintf(stderr, "  NNAPI_DEVICE     NNAPI device for the matmuls, default mtk-mdla_shim, then mtk-neuron_shim.\n");
     fprintf(stderr, "                   off = no NNAPI, the plain C matmul\n");
     fprintf(stderr, "  NNAPI_CACHE_DIR  compilation cache directory, default ./nnapi_cache. empty = no cache\n");
