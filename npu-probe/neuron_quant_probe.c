@@ -348,8 +348,10 @@ static int wt_max(const Format* f) {
 }
 
 static float wt_scale(const Format* f) {
-    // uniform integers in [-m, m] have a deviation of about m / 1.73
-    return g_w_std * 1.73f / (float)wt_max(f);
+    // uniform integers in [-m, m] have a deviation of sqrt(m (m + 1) / 3). With m / 1.73, right
+    // only for large m, the 4-bit weights of a chain made the values grow from layer to layer
+    const float m = (float)wt_max(f);
+    return g_w_std / sqrtf(m * (m + 1.0f) / 3.0f);
 }
 
 // Weights as small integers, the same for every format with that many values
@@ -815,9 +817,8 @@ static uint32_t env_u32(const char* name, uint32_t fallback) {
 int main(int argc, char** argv) {
     // A process that tries one format ends by itself if anything in it hangs, the loading of the
     // library included: whoever waits for it, the survey or the app, must not wait for ever
-    if (argc > 1) {
-        alarm(env_u32("NQ_TIMEOUT", 300));
-    }
+    // The survey gets a short one for the loading alone, taken off before its first attempt
+    alarm(argc > 1 ? env_u32("NQ_TIMEOUT", 300) : 60);
     g_rows = env_u32("NQ_ROWS", g_rows);
     g_cols = env_u32("NQ_COLS", g_cols);
     g_chain = env_u32("NQ_CHAIN", 0) != 0;
@@ -926,6 +927,7 @@ int main(int argc, char** argv) {
 
     // Without one, every attempt runs in a process of its own started from scratch: a crash
     // inside the vendor compiler must not end the survey, and the library is not fork-safe
+    alarm(0);
     setenv("NQ_CHILD", "1", 1);
     const char* pass_only = getenv("NQ_PASS"); // "sin" or "con": that pass alone for every format
     for (size_t i = 0; i < FORMAT_COUNT; i++) {
