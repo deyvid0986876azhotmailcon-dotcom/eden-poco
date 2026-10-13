@@ -147,9 +147,18 @@
             text-overflow: ellipsis;
         }
 
-        /* Con cuatro modelos la fila no cabe en pantallas estrechas: se encoge y se desliza */
+        /* Qué modelo y con qué hardware: dos filas bajo la cabecera */
+        .picker {
+            flex: none;
+            display: grid;
+            gap: 8px;
+            padding: 0 14px 8px;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        /* Con varios modelos la fila no cabe en pantallas estrechas: se desliza */
         .models {
-            flex: 0 1 auto;
             min-width: 0;
             overflow-x: auto;
             scrollbar-width: none;
@@ -164,8 +173,65 @@
             display: none;
         }
 
+        .hardware {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 6px;
+        }
+
+        .hw {
+            min-height: 48px;
+            padding: 6px 4px;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 1px;
+            background: var(--surface);
+            color: var(--text-2);
+            line-height: 1.2;
+        }
+
+        .hw b {
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        .hw small {
+            font-size: 10.5px;
+            color: var(--text-3);
+        }
+
+        .hw[aria-checked="true"] {
+            border-color: rgba(124, 156, 255, 0.7);
+            background: var(--surface-2);
+            color: var(--text);
+        }
+
+        /* no es disabled: así el toque llega y la nota de abajo explica por qué no se puede */
+        .hw[aria-disabled="true"] {
+            opacity: 0.4;
+        }
+
+        .hw:disabled {
+            opacity: 0.5;
+        }
+
+        .pick-note {
+            margin: 0;
+            min-height: 1.4em;
+            font-size: 12px;
+            color: var(--text-3);
+        }
+
+        .pick-note[data-alert="true"] {
+            color: var(--text);
+        }
+
         .model {
-            flex: none;
+            flex: 1 0 auto;
             height: 34px;
             padding: 0 11px;
             border: 0;
@@ -687,14 +753,19 @@
                 <p class="status"><i class="dot" id="statusDot"></i><span id="statusText"></span></p>
             </div>
         </div>
-        <div class="models" id="models" role="radiogroup" aria-label="Modelo"></div>
     </header>
+
+    <section class="picker" aria-label="Modelo y hardware">
+        <div class="models" id="models" role="radiogroup" aria-label="Modelo"></div>
+        <div class="hardware" id="hardware" role="radiogroup" aria-label="Hardware"></div>
+        <p class="pick-note" id="pickNote" aria-live="polite"></p>
+    </section>
 
     <div class="stage">
         <main class="messages" id="messages" role="log" aria-live="off">
             <section class="welcome" id="welcome">
                 <h2>IA local en tu Poco X6 Pro</h2>
-                <p>Todo se calcula en el teléfono, sin conexión. Los modelos GGUF van con llama.cpp, que pone sus capas en la GPU Mali-G615 (Vulkan) si puede; los convertidos para la APU 780, en la APU. Lo que un acelerador no admite va por CPU: la tarjeta de cada respuesta dice dónde corrió.</p>
+                <p>Todo se calcula en el teléfono, sin conexión. Arriba eliges el modelo y con qué lo corre: la GPU Mali-G615, la APU 780 o la CPU. La elección se guarda para cada modelo, y la tarjeta de cada respuesta dice dónde corrió de verdad.</p>
                 <p class="welcome-hint" id="modelHint"></p>
             </section>
         </main>
@@ -729,31 +800,46 @@
         ['Historia de ciencia ficción', 'Escribe una pequeña historia de ciencia ficción.'],
         ['Consejos de batería', 'Dame 3 consejos para optimizar la batería en Android.'],
     ];
+    // gguf y bin: qué versiones tiene cada modelo. Con qué hardware puede correr de verdad lo dice
+    // la app, que ve los archivos del teléfono; esto solo sirve para la vista previa en un navegador
     const MODELS = [
-        // Los tres primeros son GGUF: llama.cpp los corre con sus capas en la GPU. Si a Qwen o a
-        // Llama 3B les falta el GGUF, la app prueba el modelo convertido para la APU
         {
             id: 'qwen15',
-            label: 'Qwen 1.5B · GPU',
-            hint: 'en español, el intermedio (GPU Mali-G615 Vulkan)',
+            label: 'Qwen 1.5B',
+            hint: 'en español, el intermedio',
+            gguf: true, bin: true,
             chips: CHAT_CHIPS,
         },
         {
             id: 'llama32_1b',
-            label: 'Llama 1B · GPU',
-            hint: 'el más ligero (GPU Mali-G615 Vulkan)',
+            label: 'Llama 1B',
+            hint: 'el más ligero',
+            gguf: true, bin: false,
             chips: CHAT_CHIPS,
         },
         {
             id: 'llama32_3b',
-            label: 'Llama 3B · GPU',
-            hint: 'el más grande y más lento de los tres (GPU Mali-G615 Vulkan)',
+            label: 'Llama 3B',
+            hint: 'el más grande y más lento de los tres',
+            gguf: true, bin: true,
             chips: CHAT_CHIPS,
+        },
+        {
+            id: 'stories15M',
+            label: 'Stories 15M',
+            hint: 'demo rápida, solo escribe cuentos en inglés',
+            gguf: false, bin: true,
+            chips: [
+                ['Once upon a time', 'Once upon a time'],
+                ['A brave little robot', 'A brave little robot'],
+                ['The sleepy dragon', 'The sleepy dragon'],
+            ],
         },
         {
             id: 'llama2_7b',
             label: 'Llama 2 7B',
             hint: 'respuestas completas, lento',
+            gguf: false, bin: true,
             chips: [
                 ['¿Quién eres?', '¿Quién eres y qué hardware estás usando?'],
                 ['¿Cómo funciona una NPU?', 'Explícame de forma simple cómo funciona una NPU en un celular.'],
@@ -761,16 +847,12 @@
                 ['Consejos de batería', 'Dame 3 consejos para optimizar la batería en Android.'],
             ],
         },
-        {
-            id: 'stories15M',
-            label: 'Stories 15M',
-            hint: 'demo rápida, solo escribe cuentos en inglés',
-            chips: [
-                ['Once upon a time', 'Once upon a time'],
-                ['A brave little robot', 'A brave little robot'],
-                ['The sleepy dragon', 'The sleepy dragon'],
-            ],
-        },
+    ];
+    // El hardware entre el que elige el usuario, en el orden en que se prueba cuando no hay nada guardado
+    const HARDWARE = [
+        { id: 'gpu', icon: '⚡', label: 'GPU', detail: 'Mali-G615', how: 'llama.cpp con todas las capas en la GPU Mali-G615, por Vulkan' },
+        { id: 'apu', icon: '🧠', label: 'APU', detail: 'NPU 780', how: 'run_nnapi sobre la APU 780 (NNAPI)' },
+        { id: 'cpu', icon: '💻', label: 'CPU', detail: '4 núcleos', how: 'en CPU, sin acelerador' },
     ];
     const LONG_MS = 60000; // desde aquí la velocidad es el dato principal de la tarjeta
     const LEVEL_NAMES = { ok: 'normal', warn: 'alto', crit: 'crítico' };
@@ -803,8 +885,9 @@
                     </div>
                 </div>
                 <dl class="rows">
-                    <div><dt>APU · MDLA 5.3</dt><dd><i class="dot apu-dot"></i><span class="apu">Preparando…</span></dd></div>
-                    <div><dt>GPU · Mali-G615</dt><dd><i class="dot gpu-dot"></i><span class="gpu">0 % · Reposo</span></dd></div>
+                    <div><dt>GPU · Mali-G615</dt><dd><i class="dot gpu-dot"></i><span class="gpu">—</span></dd></div>
+                    <div><dt>APU · MDLA 5.3</dt><dd><i class="dot apu-dot"></i><span class="apu">—</span></dd></div>
+                    <div><dt>CPU</dt><dd><i class="dot cpu-dot"></i><span class="cpu-text">—</span></dd></div>
                     <div><dt>Memoria RAM</dt><dd class="ram-text">—</dd></div>
                     <div><dt>Primer token</dt><dd class="ttft">—</dd></div>
                 </dl>
@@ -815,6 +898,7 @@
     const $ = id => document.getElementById(id);
     const el = {
         statusDot: $('statusDot'), statusText: $('statusText'), models: $('models'),
+        hardware: $('hardware'), note: $('pickNote'),
         messages: $('messages'), welcome: $('welcome'), hint: $('modelHint'), jump: $('jump'),
         chips: $('chips'), composer: $('composer'), prompt: $('prompt'), send: $('send'), stop: $('stop'),
         announce: $('announce'),
@@ -822,6 +906,8 @@
     const backend = window.AndroidBackend; // no existe al abrir la página en un navegador
     const state = {
         model: MODELS[0].id,
+        hardware: HARDWARE[0].id, // con qué corre ese modelo: lo elige el usuario
+        available: {},   // por hardware: si el modelo elegido puede correr en él, cómo, o por qué no
         active: null,    // la respuesta que se está generando
         last: null,      // la anterior
         stopping: false,
@@ -839,7 +925,65 @@
         return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
     };
 
-    // ---- modelo y sugerencias ----
+    // ---- modelo, hardware y sugerencias ----
+    function availability(model) {
+        // con qué hardware puede correr el modelo ahora mismo. lo sabe la app, que ve qué archivos
+        // hay en el teléfono; en un navegador, lo que dice la tabla de arriba
+        if (backend && backend.getHardware) {
+            try {
+                const info = JSON.parse(backend.getHardware(model.id));
+                if (info && info.gpu && info.apu && info.cpu) { return info; }
+            } catch (e) { /* una app anterior a este selector: vale lo de abajo */ }
+        }
+        return {
+            gpu: { ok: model.gguf, how: HARDWARE[0].how, why: 'Este modelo no tiene versión GGUF, que es la que usa la GPU.' },
+            apu: { ok: model.bin, how: HARDWARE[1].how, why: 'Este modelo no tiene archivo .bin compilado para la APU.' },
+            cpu: { ok: true, how: HARDWARE[2].how, why: '' },
+        };
+    }
+
+    function note(text, alert) {
+        el.note.textContent = text;
+        el.note.dataset.alert = String(Boolean(alert));
+    }
+
+    function selectHardware(id, byUser) {
+        const info = state.available[id];
+        if (!info || !info.ok) {
+            // no se cambia de hardware por su cuenta: se dice por qué ese no puede con este modelo
+            if (byUser && info) { note(info.why, true); }
+            return false;
+        }
+        const model = MODELS.find(m => m.id === state.model);
+        state.hardware = id;
+        // se guarda lo que elige el usuario, para cada modelo; no lo que se le puso por defecto
+        if (byUser) {
+            try { localStorage.setItem('hardware:' + state.model, id); } catch (e) { /* se pierde al cerrar */ }
+        }
+        el.hardware.querySelectorAll('.hw').forEach(button => {
+            button.setAttribute('aria-checked', String(button.dataset.id === id));
+        });
+        note(model.label + ' · ' + info.how, false);
+        return true;
+    }
+
+    function renderHardware() {
+        HARDWARE.forEach(hardware => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'hw';
+            button.dataset.id = hardware.id;
+            button.setAttribute('role', 'radio');
+            const name = document.createElement('b');
+            name.textContent = hardware.icon + ' ' + hardware.label;
+            const detail = document.createElement('small');
+            detail.textContent = hardware.detail;
+            button.append(name, detail);
+            button.addEventListener('click', () => selectHardware(hardware.id, true));
+            el.hardware.appendChild(button);
+        });
+    }
+
     function selectModel(id) {
         const model = MODELS.find(m => m.id === id) || MODELS[0];
         state.model = model.id;
@@ -847,6 +991,22 @@
         el.models.querySelectorAll('.model').forEach(button => {
             button.setAttribute('aria-checked', String(button.dataset.id === model.id));
         });
+        // el hardware de este modelo: el que el usuario dejó elegido para él, si sigue pudiendo;
+        // si no, el primero que pueda
+        state.available = availability(model);
+        el.hardware.querySelectorAll('.hw').forEach(button => {
+            const info = state.available[button.dataset.id];
+            button.setAttribute('aria-disabled', String(!info.ok));
+            button.setAttribute('aria-checked', 'false');
+            button.title = info.ok ? info.how : info.why;
+        });
+        let saved = null;
+        try { saved = localStorage.getItem('hardware:' + model.id); } catch (e) { /* igual que arriba */ }
+        const order = [saved].concat(HARDWARE.map(h => h.id));
+        if (!order.some(hardware => hardware && selectHardware(hardware, false))) {
+            state.hardware = HARDWARE[0].id;
+            note('Faltan en el teléfono los archivos de ' + model.label + '.', true);
+        }
         el.hint.textContent = model.label + ': ' + model.hint + '.';
         el.chips.textContent = '';
         model.chips.forEach(([label, text]) => {
@@ -907,6 +1067,7 @@
                 speed: q('.speed'), tokens: q('.tokens'), time: q('.time'),
                 cpu: q('.gauge.cpu'), ram: q('.gauge.ram'),
                 apuDot: q('.apu-dot'), apu: q('.apu'), gpuDot: q('.gpu-dot'), gpu: q('.gpu'),
+                cpuDot: q('.cpu-dot'), cpuText: q('.cpu-text'),
                 ramText: q('.ram-text'), ttft: q('.ttft'),
             },
             t0: performance.now(), elapsedMs: 0, tokens: 0, speed: 0,
@@ -960,6 +1121,13 @@
         if (m.elapsedMs >= LONG_MS && m.speed > 0) { m.card.dataset.long = 'true'; }
     }
 
+    function setRow(dot, text, rowState, status) {
+        // verde si está trabajando, amarillo si se eligió y no pudo, parpadeo mientras se prepara
+        text.textContent = status;
+        dot.dataset.tone = rowState === 'active' ? 'ok' : rowState === 'warn' || rowState === 'cpu' ? 'warn' : '';
+        dot.dataset.live = String(rowState === 'starting');
+    }
+
     function applyStats(stats) {
         const m = state.active || state.last;
         if (!m || !stats) { return; }
@@ -977,17 +1145,11 @@
         if (stats.ramTotalGb) {
             m.ui.ramText.textContent = `${gb(stats.ramUsedGb)} de ${gb(stats.ramTotalGb)} GB · ${gb(stats.ramFreeGb)} GB libres`;
         }
-        if (stats.gpuStatus) {
-            // lo que el motor dice al cargar: capas del modelo que puso en la GPU. no es una medida de carga
-            m.ui.gpu.textContent = stats.gpuStatus;
-            m.ui.gpuDot.dataset.tone = stats.gpuState === 'active' ? 'ok' : '';
-            m.ui.gpuDot.dataset.live = String(stats.gpuState === 'starting');
-        }
-        if (stats.apuSummary) {
-            m.ui.apu.textContent = stats.apuSummary;
-            m.ui.apuDot.dataset.tone = stats.apuState === 'active' ? 'ok' : stats.apuState === 'cpu' ? 'warn' : '';
-            m.ui.apuDot.dataset.live = String(stats.apuState === 'starting');
-        }
+        // GPU, APU y CPU: cuál eligió el usuario y qué dice el motor de él. Para la GPU y la APU es lo
+        // que el motor declara (capas en la GPU, matmul en la APU), no una medida de carga
+        if (stats.gpuStatus) { setRow(m.ui.gpuDot, m.ui.gpu, stats.gpuState, stats.gpuStatus); }
+        if (stats.apuSummary) { setRow(m.ui.apuDot, m.ui.apu, stats.apuState, stats.apuSummary); }
+        if (stats.cpuStatus) { setRow(m.ui.cpuDot, m.ui.cpuText, stats.cpuState, stats.cpuStatus); }
         render(m);
         follow();
     }
@@ -1013,6 +1175,7 @@
         el.stop.disabled = false;
         el.chips.hidden = busy;
         el.models.querySelectorAll('.model').forEach(button => { button.disabled = busy; });
+        el.hardware.querySelectorAll('.hw').forEach(button => { button.disabled = busy; });
         if (!busy) { setStatus(IDLE_STATUS, 'ok', false); }
     }
 
@@ -1032,7 +1195,9 @@
         setPhase(m, 'Preparando modelo…', '', true);
         render(m);
         follow();
-        if (backend && backend.sendWithModel) {
+        if (backend && backend.sendMessage) {
+            backend.sendMessage(text, state.model, state.hardware);
+        } else if (backend && backend.sendWithModel) {
             backend.sendWithModel(text, state.model);
         } else if (backend && backend.send) {
             backend.send(text);
@@ -1132,8 +1297,13 @@
                 tokPerSec: sent > 1 ? ((sent - 1) * 1000 / since).toFixed(2) : '0.00',
                 cpuPercent: Math.round(45 + 50 * Math.abs(Math.sin(elapsedMs / 1500))),
                 ramPercent: 64, ramUsedGb: '7.1', ramTotalGb: '11.1', ramFreeGb: '4.0',
-                gpuState: sent ? 'active' : 'starting', gpuStatus: sent ? 'Activa · vista previa' : 'Preparando…',
-                apuState: sent ? 'active' : 'starting', apuSummary: sent ? 'Activa · vista previa' : 'Preparando…',
+                ...['gpu', 'apu', 'cpu'].reduce((rows, hardware) => {
+                    const chosen = hardware === state.hardware;
+                    rows[hardware + 'State'] = !chosen ? 'idle' : sent ? 'active' : 'starting';
+                    rows[hardware === 'apu' ? 'apuSummary' : hardware + 'Status'] =
+                        !chosen ? 'En reposo · vista previa' : sent ? 'Activa · vista previa' : 'Preparando…';
+                    return rows;
+                }, {}),
             });
             if (sent >= words.length) { window.onStreamDone(); }
         }, 200);
@@ -1154,6 +1324,7 @@
     }, { passive: true });
     window.addEventListener('resize', follow); // al abrirse el teclado la página encoge
 
+    renderHardware();
     renderModels();
     fitPrompt();
     setStatus(IDLE_STATUS, 'ok', false);

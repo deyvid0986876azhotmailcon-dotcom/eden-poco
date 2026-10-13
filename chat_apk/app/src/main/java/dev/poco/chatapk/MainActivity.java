@@ -63,6 +63,8 @@ public class MainActivity extends Activity {
     // Modelos GGUF: los corre llama.cpp (libllama_completion.so), con las capas en la GPU por Vulkan
     // si el APK trae esa compilación. Los archivos se bajan aparte
     private static final String GGUF_DIR = "/data/local/tmp/lc/";
+    // Modelos convertidos para run_nnapi (la APU), su tokenizador y sus archivos de pesos
+    private static final String LLM_DIR = "/data/local/tmp/llm/";
     // Lo que llama.cpp dice al cargar el modelo: "ggml_vulkan: 0 = Mali-G615 MC6 (...) | uma: 1 | ..."
     // y "load_tensors: offloaded 29/29 layers to GPU" (0 de N si no hay GPU que usar)
     private static final Pattern VULKAN_DEVICE = Pattern.compile("ggml_vulkan: \\d+ = (.+?) \\(");
@@ -81,8 +83,6 @@ public class MainActivity extends Activity {
     private WebView webView;
     private volatile Run current = null;
     private volatile boolean destroyed = false;
-    // El motor con la GPU murió sin responder: hasta que se cierre la app, llama.cpp va sin ella
-    private volatile boolean gpuFailed = false;
 
     /** Una generación: el proceso del motor y lo que se va sabiendo de él. */
     private static final class Run {
@@ -103,7 +103,7 @@ public class MainActivity extends Activity {
         volatile long cpuRuns = -1;
         // llama.cpp: cierra la respuesta de otra forma que run_nnapi, y con Vulkan pone capas en la GPU
         volatile boolean llamaCpp;
-        volatile boolean gpuWanted; // se le pidió que usara la GPU
+        volatile String hardware = "apu"; // el que eligió el usuario para esta respuesta: gpu, apu o cpu
         volatile String gpuDevice;  // la que encontró por Vulkan
         volatile int gpuLayers = -1; // capas que le dio, de gpuLayersTotal. -1 = todavía no lo ha dicho
         volatile int gpuLayersTotal = -1;
@@ -289,6 +289,47 @@ public class MainActivity extends Activity {
         return null;
     }
 
+    /** Los archivos de un modelo en el teléfono: de cuáles haya depende con qué hardware puede correr. */
+    private static final class ModelFiles {
+        File gguf;            // para llama.cpp: GPU, o CPU. null = el modelo no tiene esa versión
+        File bin;             // convertido para run_nnapi: APU, o CPU sin acelerador. null = no tiene
+        File tokenizer;       // el de ese .bin
+        String weightsPrefix; // de los archivos de pesos de 8 bits que run_nnapi deja para la APU
+        int steps = 64;       // tokens que run_nnapi procesa, contando los de la pregunta
+    }
+
+    private ModelFiles filesOf(String modelChoice) {
+        File files = getFilesDir();
+        ModelFiles m = new ModelFiles();
+        String gguf = ggufFor(modelChoice);
+        if (gguf != null) {
+            m.gguf = new File(GGUF_DIR, gguf);
+        }
+        File tmpTok = new File(LLM_DIR + "tokenizer.bin");
+        m.tokenizer = tmpTok.exists() ? tmpTok : new File(files, "tokenizer.bin");
+        if ("qwen15".equals(modelChoice)) {
+            m.bin = new File(LLM_DIR + "qwen2.5_1.5b.bin");
+            m.weightsPrefix = LLM_DIR + "wf_qwen/q15";
+            File own = new File(LLM_DIR + "qwen2.5_1.5b.bin.tokenizer");
+            if (own.exists()) { m.tokenizer = own; }
+        } else if ("llama32_3b".equals(modelChoice)) {
+            m.bin = new File(LLM_DIR + "llama3_2_3b.bin");
+            m.weightsPrefix = LLM_DIR + "wf_l3/l3";
+            File own = new File(LLM_DIR + "llama3_2_3b.bin.tokenizer");
+            if (own.exists()) { m.tokenizer = own; }
+        } else if ("llama2_7b".equals(modelChoice)) {
+            File tmp = new File(LLM_DIR + "llama2_7b.bin");
+            m.bin = tmp.exists() ? tmp : new File(files, "llama2_7b.bin");
+            m.weightsPrefix = LLM_DIR + "wf7/l2";
+        } else if ("stories15M".equalsIgnoreCase(modelChoice)) {
+            File tmp = new File(LLM_DIR + "stories15M.bin");
+            m.bin = tmp.exists() ? tmp : new File(files, "stories15M.bin");
+            m.weightsPrefix = LLM_DIR + "wf/s15";
+            m.steps = 128;
+        }
+        return m;
+    }
+
     private static String clampPrompt(String prompt) {
         String text = prompt == null ? "" : prompt;
         while (text.getBytes(StandardCharsets.UTF_8).length > MAX_PROMPT_BYTES) {
@@ -306,7 +347,40 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void sendWithModel(final String prompt, final String modelChoice) {
-            new Thread(() -> runInference(prompt, modelChoice)).start();
+            sendMessage(prompt, modelChoice, "auto");
+        }
+
+        /** hardwareChoice: "gpu", "apu" o "cpu", lo que el usuario eligió en la página para este modelo. */
+        @JavascriptInterface
+        public void sendMessage(final String prompt, final String modelChoice, final String hardwareChoice) {
+            new Thread(() -> runInference(prompt, modelChoice, hardwareChoice)).start();
+        }
+
+        /**
+         * Con qué hardware puede correr un modelo ahora mismo, según los archivos que hay en el
+         * teléfono: {"gpu": {"ok": true, "how": "..."}, "apu": {"ok": false, "why": "..."}, "cpu": ...}
+         */
+        @JavascriptInterface
+        public String getHardware(final String modelChoice) {
+            JSONObject info = new JSONObject();
+            try {
+                ModelFiles mf = filesOf(modelChoice);
+                boolean hasGguf = mf.gguf != null && mf.gguf.exists();
+                boolean hasBin = mf.bin != null && mf.bin.exists();
+                info.put("gpu", new JSONObject().put("ok", hasGguf)
+                        .put("how", "llama.cpp con todas las capas en la GPU Mali-G615, por Vulkan")
+                        .put("why", mf.gguf == null ? "Este modelo no tiene versión GGUF, que es la que usa la GPU."
+                                : "Falta en el teléfono " + mf.gguf.getAbsolutePath()));
+                info.put("apu", new JSONObject().put("ok", hasBin)
+                        .put("how", "run_nnapi sobre la APU 780 (NNAPI, mtk-mdla_shim)")
+                        .put("why", mf.bin == null ? "Este modelo no tiene archivo .bin compilado para la APU."
+                                : "Falta en el teléfono " + mf.bin.getAbsolutePath()));
+                info.put("cpu", new JSONObject().put("ok", hasGguf || hasBin)
+                        .put("how", hasGguf ? "llama.cpp en los 4 núcleos grandes, sin GPU"
+                                : "run_nnapi sin acelerador, en 1 núcleo")
+                        .put("why", "Falta en el teléfono el archivo de este modelo."));
+            } catch (Exception ignored) {}
+            return info.toString();
         }
 
         @JavascriptInterface
@@ -346,8 +420,12 @@ public class MainActivity extends Activity {
                 // 2. CPU del motor. -1 = sin dato
                 stats.put("cpuPercent", run == null ? -1 : engineCpuPercent(run, finished));
 
-                // 3. GPU
+                // 3. GPU, y el papel de la CPU
                 describeGpu(run, stats);
+                describeCpu(run, stats);
+                if (run != null) {
+                    stats.put("hardware", run.hardware);
+                }
 
                 if (run != null) {
                     // 4. Tokens, tiempo y velocidad. La velocidad se cuenta desde el primer token,
@@ -393,14 +471,17 @@ public class MainActivity extends Activity {
             // dice al cargar el modelo: qué GPU encontró por Vulkan y cuántas capas le dio. No es
             // una medida de uso. run_nnapi no usa la GPU
             String state = "idle";
-            String status = "0 % · Reposo";
-            if (run != null && run.llamaCpp) {
-                if (!run.gpuWanted) {
-                    status = "Sin usar · falló antes, el motor va en CPU";
-                } else if (run.gpuLayers > 0) {
+            String status = "En reposo";
+            if (run != null && !"gpu".equals(run.hardware)) {
+                status = "En reposo · seleccionada " + run.hardware.toUpperCase(Locale.US);
+            } else if (run != null) {
+                if (run.gpuLayers > 0) {
                     state = "active";
-                    status = "Activa · " + run.gpuLayers + "/" + run.gpuLayersTotal + " capas por Vulkan";
+                    status = "Activa · " + (run.gpuDevice != null ? run.gpuDevice : "Mali-G615")
+                            + " (Vulkan · " + run.gpuLayers + " capas)";
                 } else if (run.gpuLayers == 0) {
+                    // se eligió la GPU y el motor dice que no le dio ninguna capa: corre en CPU
+                    state = "warn";
                     status = "Sin usar · el motor no le dio capas";
                 } else {
                     state = "starting";
@@ -411,15 +492,29 @@ public class MainActivity extends Activity {
             stats.put("gpuStatus", status);
         }
 
+        private void describeCpu(Run run, JSONObject stats) throws JSONException {
+            // La carga está en el medidor de CPU (cpuPercent). Esto dice qué papel hace: con la GPU
+            // o la APU elegidas sigue trabajando, porque prepara lo que el acelerador calcula
+            String state = "idle";
+            String status = "En reposo";
+            if (run != null && "cpu".equals(run.hardware)) {
+                state = "active";
+                status = run.llamaCpp ? "Activa · llama.cpp en los 4 núcleos grandes"
+                        : "Activa · run_nnapi en 1 núcleo, sin acelerador";
+            } else if (run != null) {
+                status = "De apoyo · seleccionada " + run.hardware.toUpperCase(Locale.US);
+            }
+            stats.put("cpuState", state);
+            stats.put("cpuStatus", status);
+        }
+
         private void describeApu(Run run, JSONObject stats) throws JSONException {
             // No hay forma de leer la carga de la APU desde una app. Lo que se muestra es lo que el
             // motor dice de sí mismo: si está usando el acelerador y, al terminar, qué parte de los
             // matmul corrió en él
-            if (run.llamaCpp) {
-                boolean onGpu = run.gpuLayers > 0;
-                stats.put("apuState", onGpu ? "off" : "cpu");
-                stats.put("apuSummary", onGpu ? "Sin usar · el modelo va por la GPU (Vulkan)"
-                        : "Sin usar · llama.cpp en 4 núcleos de CPU");
+            if (!"apu".equals(run.hardware)) {
+                stats.put("apuState", "off");
+                stats.put("apuSummary", "En reposo · seleccionada " + run.hardware.toUpperCase(Locale.US));
                 stats.put("apuPercent", -1);
                 return;
             }
@@ -555,7 +650,7 @@ public class MainActivity extends Activity {
             callPage("onStreamChunk", JSONObject.quote(text));
         }
 
-        private void runInference(final String prompt, final String modelChoice) {
+        private void runInference(final String prompt, final String modelChoice, final String hardwareChoice) {
             Run run = null;
             Thread telemetry = null;
             String error = null;
@@ -565,74 +660,53 @@ public class MainActivity extends Activity {
                 File cache = new File(files, "nnapi_cache");
                 cache.mkdirs();
 
-                File model = null;
-                File tokenizer = null;
-                String weightsPrefix = null;
-
-                String gguf = ggufFor(modelChoice);
-                boolean useLlama = !"stories15M".equalsIgnoreCase(modelChoice);
-
-                // Primero la GPU: si el GGUF del modelo está, lo corre llama.cpp con sus capas en la
-                // Mali-G615 por Vulkan. Solo si falta se prueba el modelo convertido para la APU,
-                // que corre run_nnapi
-                boolean ggufPresent = gguf != null && new File(GGUF_DIR, gguf).exists();
-                if (ggufPresent) {
-                    // nada que buscar: más abajo se toma el GGUF
-                } else if ("qwen15".equals(modelChoice)) {
-                    File qwenBin = new File("/data/local/tmp/llm/qwen2.5_1.5b.bin");
-                    if (qwenBin.exists()) {
-                        model = qwenBin;
-                        weightsPrefix = "/data/local/tmp/llm/wf_qwen/q15";
-                        File qwenTok = new File("/data/local/tmp/llm/qwen2.5_1.5b.bin.tokenizer");
-                        tokenizer = qwenTok.exists() ? qwenTok : new File("/data/local/tmp/llm/tokenizer.bin");
-                        gguf = null;
+                // El hardware lo elige el usuario, y de él sale el motor:
+                //   gpu: llama.cpp con todas las capas del GGUF en la Mali-G615, por Vulkan
+                //   apu: run_nnapi con el modelo convertido (.bin), sobre NNAPI
+                //   cpu: llama.cpp sin GPU o, si el modelo no tiene GGUF, run_nnapi sin acelerador
+                // Si el modelo no tiene el archivo que ese hardware pide, se dice y no se cambia a otro
+                ModelFiles mf = filesOf(modelChoice);
+                boolean hasGguf = mf.gguf != null && mf.gguf.exists();
+                boolean hasBin = mf.bin != null && mf.bin.exists();
+                String wanted = hardwareChoice == null ? "" : hardwareChoice.toLowerCase(Locale.US);
+                if (!"gpu".equals(wanted) && !"apu".equals(wanted) && !"cpu".equals(wanted)) {
+                    // sin elección (sendWithModel): la GPU si el modelo tiene GGUF, y si no la APU
+                    wanted = hasGguf || mf.bin == null ? "gpu" : "apu";
+                }
+                final String hardware = wanted;
+                final boolean llamaCpp;
+                if ("gpu".equals(hardware)) {
+                    if (!hasGguf) {
+                        error = mf.gguf == null ? "Este modelo no tiene versión GGUF: no puede ir por la GPU."
+                                : "Falta el modelo para la GPU: " + mf.gguf.getAbsolutePath();
+                        return;
                     }
-                } else if ("llama32_3b".equals(modelChoice)) {
-                    File llama3Bin = new File("/data/local/tmp/llm/llama3_2_3b.bin");
-                    if (llama3Bin.exists()) {
-                        model = llama3Bin;
-                        weightsPrefix = "/data/local/tmp/llm/wf_l3/l3";
-                        File llama3Tok = new File("/data/local/tmp/llm/llama3_2_3b.bin.tokenizer");
-                        tokenizer = llama3Tok.exists() ? llama3Tok : new File("/data/local/tmp/llm/tokenizer.bin");
-                        gguf = null;
+                    llamaCpp = true;
+                } else if ("apu".equals(hardware)) {
+                    if (!hasBin) {
+                        error = mf.bin == null ? "Este modelo no tiene archivo .bin compilado para la APU."
+                                : "Falta el modelo para la APU: " + mf.bin.getAbsolutePath();
+                        return;
                     }
-                }
-
-                if (gguf != null) {
-                    model = new File(GGUF_DIR, gguf);
-                } else if (model == null) {
-                    if (useLlama) {
-                        File tmp7b = new File("/data/local/tmp/llm/llama2_7b.bin");
-                        File internal7b = new File(files, "llama2_7b.bin");
-                        model = tmp7b.exists() ? tmp7b : internal7b;
-                        weightsPrefix = "/data/local/tmp/llm/wf7/l2";
-                    } else {
-                        File tmp15m = new File("/data/local/tmp/llm/stories15M.bin");
-                        File internal15m = new File(files, "stories15M.bin");
-                        model = tmp15m.exists() ? tmp15m : internal15m;
-                        weightsPrefix = "/data/local/tmp/llm/wf/s15";
+                    llamaCpp = false;
+                } else {
+                    if (!hasGguf && !hasBin) {
+                        error = "Falta en el teléfono el archivo de este modelo.";
+                        return;
                     }
+                    llamaCpp = hasGguf;
                 }
+                final boolean gpu = "gpu".equals(hardware);
+                final boolean apu = "apu".equals(hardware);
+                File model = llamaCpp ? mf.gguf : mf.bin;
+                File tokenizer = mf.tokenizer;
+                String weightsPrefix = mf.weightsPrefix;
 
-                if (tokenizer == null) {
-                    File tmpTok = new File("/data/local/tmp/llm/tokenizer.bin");
-                    File internalTok = new File(files, "tokenizer.bin");
-                    tokenizer = tmpTok.exists() ? tmpTok : internalTok;
-                }
-
-                if (!model.exists()) {
-                    error = "Modelo no encontrado: " + model.getAbsolutePath();
-                    return;
-                }
-
-                // llama.cpp va con todas las capas del modelo en la GPU (Mali-G615, por Vulkan), salvo
-                // que en esta sesión ya haya muerto así sin responder: entonces va la compilación de
-                // solo CPU, si el APK la trae
-                final boolean gpu = gguf != null && !gpuFailed;
                 List<String> cmd = new ArrayList<>();
-                if (gguf != null) {
-                    // llama.cpp: una sola pregunta con la plantilla de chat del modelo. Lo que no vaya
-                    // a la GPU corre en los 4 núcleos grandes
+                if (llamaCpp) {
+                    // llama.cpp: una sola pregunta con la plantilla de chat del modelo. Con la GPU va la
+                    // compilación con Vulkan; sin ella, la de solo CPU si el APK la trae. Los hilos, a
+                    // los 4 núcleos grandes
                     File cpuBuild = new File(MainActivity.this.nativeLibDir, "libllama_completion_cpu.so");
                     cmd.add(gpu || !cpuBuild.exists()
                             ? MainActivity.this.nativeLibDir + "/libllama_completion.so" : cpuBuild.getAbsolutePath());
@@ -668,20 +742,23 @@ public class MainActivity extends Activity {
                     cmd.add("-y");
                     cmd.add("");
                     cmd.add("-n");
-                    cmd.add(useLlama ? "64" : "128");
+                    cmd.add(String.valueOf(mf.steps));
                     cmd.add("-i");
                     cmd.add(clampPrompt(prompt));
                 }
 
                 ProcessBuilder pb = new ProcessBuilder(cmd);
                 Map<String, String> env = pb.environment();
-                if (gguf == null) {
+                if (!llamaCpp && apu) {
                     env.put("NNAPI_DEVICE", "mtk-mdla_shim");
                     env.put("NNAPI_Q8", "2");
                     env.put("NNAPI_CACHE_DIR", cache.getAbsolutePath());
                     if (weightsPrefix != null) {
                         env.put("NNAPI_WEIGHTS_FILE", weightsPrefix);
                     }
+                } else if (!llamaCpp) {
+                    // CPU con un modelo que solo existe convertido: run_nnapi sin NNAPI, en C plano
+                    env.put("NNAPI_DEVICE", "off");
                 }
                 pb.directory(files);
                 pb.redirectErrorStream(false);
@@ -692,8 +769,8 @@ public class MainActivity extends Activity {
                         return;
                     }
                     run = new Run(pb.start());
-                    run.llamaCpp = gguf != null;
-                    run.gpuWanted = gpu;
+                    run.llamaCpp = llamaCpp;
+                    run.hardware = hardware;
                     current = run;
                 }
                 final Run active = run;
@@ -728,11 +805,10 @@ public class MainActivity extends Activity {
                 telemetry.join(1500);
                 engineLog.join(1000); // el reparto entre APU y CPU es lo último que escribe el motor
                 if (active.llamaCpp && active.tokens == 0 && exit != 0 && !active.stopped) {
-                    // llama.cpp murió sin escribir nada. Si iba con la GPU, lo siguiente se intenta sin ella
+                    // llama.cpp murió sin escribir nada. El hardware lo eligió el usuario: no se cambia solo
                     error = "El motor terminó sin responder (código " + exit + ").";
-                    if (active.gpuWanted) {
-                        gpuFailed = true;
-                        error += " Iba con la GPU: los próximos mensajes se intentan sin ella.";
+                    if ("gpu".equals(active.hardware)) {
+                        error += " Iba con la GPU: puedes probar el mismo modelo con CPU.";
                     }
                 } else {
                     done = true;
