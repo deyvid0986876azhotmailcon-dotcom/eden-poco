@@ -11,7 +11,8 @@
 // a QUANTIZE and a DEQUANTIZE: what an engine needs to move one layer at a time to small weights
 // while the rest of the model stays in half precision. The ones with a "c" before the bits write
 // the layer as a convolution of 1 x 1, as MediaTek's LLM flow does, and the ones that end in "c"
-// give the weights a scale per output row.
+// give the weights a scale per output row. The ones that start with "h" give integer weights to a
+// layer whose activations are floats, which NNAPI does not allow.
 //
 // Run from adb shell:
 //   ./neuron_quant_probe            every format, each attempt in its own process
@@ -251,6 +252,18 @@ static const Format FORMATS[] = {
     {"fc16w4c", "entrada y salida en coma flotante, convolucion en 16 bits con pesos de 4 por fila",
      NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_EXT_TENSOR_QUANT4_SYMM_PER_CHANNEL, 4, 0, false,
      true, true, true},
+    {"fc8w8c", "entrada y salida en coma flotante, convolucion en 8 bits con pesos de 8 por fila "
+               "(expresable por NNAPI)",
+     NEURON_TENSOR_QUANT8_ASYMM_SIGNED, 8, 0, NEURON_TENSOR_QUANT8_SYMM_PER_CHANNEL, 8, 0, false,
+     true, true, true},
+    {"hw8", "activaciones en coma flotante con pesos de 8 bits, sin pasar por enteros",
+     NEURON_TENSOR_FLOAT32, 0, 0, NEURON_TENSOR_QUANT8_SYMM, 8, 0, false, false, false, false},
+    {"hcw8c", "convolucion con activaciones en coma flotante y pesos de 8 bits por fila",
+     NEURON_TENSOR_FLOAT32, 0, 0, NEURON_TENSOR_QUANT8_SYMM_PER_CHANNEL, 8, 0, false, false, true,
+     true},
+    {"hcw4c", "convolucion con activaciones en coma flotante y pesos de 4 bits por fila",
+     NEURON_TENSOR_FLOAT32, 0, 0, NEURON_EXT_TENSOR_QUANT4_SYMM_PER_CHANNEL, 4, 0, false, false,
+     true, true},
 };
 #define FORMAT_COUNT (sizeof FORMATS / sizeof FORMATS[0])
 
@@ -411,7 +424,7 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
             }
         }
         const uint32_t bi = next;
-        if (f->wt_bits) {
+        if (f->wt_bits && f->act_bits) {
             // with a scale per row the bias takes its scales from the weights and declares none
             ADD(NEURON_TENSOR_INT32, 1, b_dims, f->per_channel ? 0.0f : in_scale * w_scale, 0);
         } else {
