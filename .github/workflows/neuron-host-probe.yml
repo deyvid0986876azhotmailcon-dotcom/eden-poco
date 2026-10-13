@@ -1,0 +1,69 @@
+name: Neuron host probe
+
+# Compiles the graphs of npu-probe/neuron_quant_probe.c with the compiler for PCs of MediaTek's
+# NeuroPilot Express SDK, for the chip of the phone (MT6897), and says which weight formats it takes
+# and how big the compiled network is. It needs no phone.
+#
+# It downloads the SDK from MediaTek, and using it means accepting its license (the PDF inside the
+# archive). So it never runs by itself: only by hand, or when .github/host_probe_run.txt changes.
+on:
+  push:
+    branches: [main]
+    paths: [".github/host_probe_run.txt"]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build the probe for the runner
+        run: |
+          mkdir -p out
+          gcc -O2 -Wall -o out/neuron_quant_probe_host npu-probe/neuron_quant_probe.c -ldl -lm
+
+      # The address is the one Google's LiteRT gives in third_party/neuro_pilot/workspace.bzl. The
+      # SDK stays in the runner: nothing of it goes into the repository or into the artifact.
+      - name: Fetch the NeuroPilot Express SDK
+        run: |
+          set -euo pipefail
+          curl -L -s --retry 4 --retry-delay 5 -o "$RUNNER_TEMP/neuro_pilot.tar.gz" \
+            "https://s3.ap-southeast-1.amazonaws.com/mediatek.neuropilot.com/66f2c33a-2005-4f0b-afef-2053c8654e4f.gz"
+          echo "f69434d45856964627c750e716b835988a1f07511b6196d7f070fdde26027994  $RUNNER_TEMP/neuro_pilot.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/sdk"
+          tar -xzf "$RUNNER_TEMP/neuro_pilot.tar.gz" -C "$RUNNER_TEMP/sdk"
+          ls -la "$RUNNER_TEMP/sdk/neuro_pilot/v8_0_10/host/lib"
+
+      - name: Compile every format for the MT6897
+        run: |
+          set -uo pipefail
+          HOST="$RUNNER_TEMP/sdk/neuro_pilot/v8_0_10/host/lib"
+          export LD_LIBRARY_PATH="$HOST"
+          export NQ_LIB="$HOST/libneuron_adapter.so"
+          export MTKNN_ADAPTER_DLA_PLATFORM=mt6897
+          export MTKNN_ADAPTER_DLA_DIR="$RUNNER_TEMP/dla"
+          mkdir -p "$MTKNN_ADAPTER_DLA_DIR"
+          {
+            echo "=== 4 capas de 8960 x 1536, sin opciones y con --option-bundle=llm_gen_accuracy"
+            ./out/neuron_quant_probe_host
+            echo "=== 4 capas de 8960 x 1536 con las opciones de LiteRT"
+            NQ_PASS=con NQ_OPTS="--opt-accuracy --opt 3" ./out/neuron_quant_probe_host
+            echo "=== 1 capa de 1536 x 8960, sin opciones"
+            NQ_ROWS=1536 NQ_COLS=8960 NQ_LAYERS=1 NQ_OPTS=none ./out/neuron_quant_probe_host
+            echo "=== lo que el compilador dejo en su carpeta"
+            ls -la "$MTKNN_ADAPTER_DLA_DIR" | head -60
+          } 2>&1 | tee out/host_probe.txt
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neuron-host-probe-${{ github.run_number }}
+          path: out/host_probe.txt
+          if-no-files-found: warn
+          retention-days: 14

@@ -23,10 +23,17 @@
 //                                   compiler options)
 // Environment: NQ_ROWS and NQ_COLS (default 8960 x 1536, the up projection of Qwen 2.5 1.5B),
 // NQ_LAYERS (default 4 layers side by side in one graph), NQ_OPTS (compiler options for the second
-// pass, "none" to skip it).
+// pass, "none" to skip it), NQ_PASS ("sin" or "con" for one pass of the whole survey), NQ_TIMEOUT
+// (seconds an attempt may take, default 300).
 //
 // Type codes and prototypes are the ones of NeuronAdapter.h, NeuroPilot 8.
+//
+// Built for a PC it only compiles: with NQ_LIB pointing at the libneuron_adapter.so of MediaTek's
+// SDK and MTKNN_ADAPTER_DLA_PLATFORM naming the chip (mt6897), it tells which formats that compiler
+// takes and how big the compiled network is, with no phone. It is how LiteRT compiles ahead of time.
+#ifdef __ANDROID__
 #include <android/log.h>
+#endif
 #include <dlfcn.h>
 #include <math.h>
 #include <stdarg.h>
@@ -107,6 +114,7 @@ static int (*NeuronModel_getSupportedOperationsForDevices)(const NeuronModel*,
                                                            const NeuronDevice* const*, uint32_t,
                                                            bool*);
 static int (*NeuronCompilation_create)(NeuronModel*, NeuronCompilation**);
+static int (*NeuronCompilation_createWithOptions)(NeuronModel*, NeuronCompilation**, const char*);
 static int (*NeuronCompilation_createForDevices)(NeuronModel*, const NeuronDevice* const*,
                                                  uint32_t, NeuronCompilation**);
 static void (*NeuronCompilation_free)(NeuronCompilation*);
@@ -122,6 +130,8 @@ static int (*NeuronExecution_setOutput)(NeuronExecution*, int32_t, const NeuronO
 static int (*NeuronExecution_compute)(NeuronExecution*);
 
 static void* g_lib;
+// On a PC there is no accelerator: the graphs are compiled for the chip and nothing is executed
+static bool g_host;
 
 // Every line is flushed so a crash inside the vendor library still shows the last step reached
 static void out(const char* fmt, ...) {
@@ -130,7 +140,9 @@ static void out(const char* fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(line, sizeof line, fmt, ap);
     va_end(ap);
+#ifdef __ANDROID__
     __android_log_print(ANDROID_LOG_INFO, TAG, "%s", line);
+#endif
     printf("%s\n", line);
     fflush(stdout);
 }
@@ -142,10 +154,17 @@ static int load_symbols(void) {
         out("falta el simbolo %s", #name);                                                         \
         missing++;                                                                                 \
     }
+// The ones that need an accelerator: the compiler for a PC may not have them and does not use them
+#define LOAD_DEVICE(name)                                                                          \
+    if (!(name = dlsym(g_lib, #name)) && !g_host) {                                                \
+        out("falta el simbolo %s", #name);                                                         \
+        missing++;                                                                                 \
+    }
+    NeuronCompilation_createWithOptions = dlsym(g_lib, "NeuronCompilation_createWithOptions");
     LOAD(Neuron_getVersion)
-    LOAD(Neuron_getDeviceCount)
-    LOAD(Neuron_getDevice)
-    LOAD(NeuronDevice_getName)
+    LOAD_DEVICE(Neuron_getDeviceCount)
+    LOAD_DEVICE(Neuron_getDevice)
+    LOAD_DEVICE(NeuronDevice_getName)
     LOAD(NeuronModel_create)
     LOAD(NeuronModel_free)
     LOAD(NeuronModel_addOperand)
@@ -155,19 +174,20 @@ static int load_symbols(void) {
     LOAD(NeuronModel_identifyInputsAndOutputs)
     LOAD(NeuronModel_relaxComputationFloat32toFloat16)
     LOAD(NeuronModel_finish)
-    LOAD(NeuronModel_getSupportedOperationsForDevices)
+    LOAD_DEVICE(NeuronModel_getSupportedOperationsForDevices)
     LOAD(NeuronCompilation_create)
-    LOAD(NeuronCompilation_createForDevices)
+    LOAD_DEVICE(NeuronCompilation_createForDevices)
     LOAD(NeuronCompilation_free)
     LOAD(NeuronCompilation_finish)
     LOAD(NeuronCompilation_getCompiledNetworkSize)
     LOAD(NeuronCompilation_setOptimizationString)
-    LOAD(NeuronExecution_create)
-    LOAD(NeuronExecution_free)
-    LOAD(NeuronExecution_setInput)
-    LOAD(NeuronExecution_setOutput)
-    LOAD(NeuronExecution_compute)
+    LOAD_DEVICE(NeuronExecution_create)
+    LOAD_DEVICE(NeuronExecution_free)
+    LOAD_DEVICE(NeuronExecution_setInput)
+    LOAD_DEVICE(NeuronExecution_setOutput)
+    LOAD_DEVICE(NeuronExecution_compute)
 #undef LOAD
+#undef LOAD_DEVICE
     return missing;
 }
 
@@ -541,7 +561,13 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
 
     NeuronCompilation* c = NULL;
     double t0 = now_ms();
-    e = dev ? NeuronCompilation_createForDevices(m, devs, 1, &c) : NeuronCompilation_create(m, &c);
+    if (g_host && NeuronCompilation_createWithOptions) {
+        // ahead of time the options go in with the creation: it is what MediaTek asks of LiteRT
+        e = NeuronCompilation_createWithOptions(m, &c, options ? options : "");
+    } else {
+        e = dev ? NeuronCompilation_createForDevices(m, devs, 1, &c)
+                : NeuronCompilation_create(m, &c);
+    }
     step = "crear la compilacion";
     if (!e && options) {
         e = NeuronCompilation_setOptimizationString(c, options);
@@ -563,6 +589,19 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
     }
     size_t dla = 0;
     const int de = NeuronCompilation_getCompiledNetworkSize(c, &dla);
+    if (g_host) {
+        out("%s | compila en %.0f ms | red compilada %.1f MB = %.2f bytes por peso (codigo %d) | "
+            "sin ejecutar: compilador de PC",
+            head, compile_ms, dla / 1048576.0, dla / ((double)per_layer * L), de);
+        NeuronCompilation_free(c);
+        NeuronModel_free(m);
+        free(w);
+        free(q);
+        free(bias);
+        free(scales);
+        free(bias_scales);
+        return 0;
+    }
 
     // Inputs and outputs in the layout of the activation type
     const size_t ab = ext_float ? sizeof(float) : act_bytes(f);
@@ -684,9 +723,17 @@ int main(int argc, char** argv) {
     const bool second_pass = strcmp(opts, "none") != 0;
     const char* only = argc > 1 ? argv[1] : NULL;
 
-    g_lib = dlopen("libneuronusdk_adapter.mtk.so", RTLD_NOW);
-    if (!g_lib) {
-        g_lib = dlopen("/system_ext/lib64/libneuronusdk_adapter.mtk.so", RTLD_NOW);
+#ifndef __ANDROID__
+    g_host = true;
+#endif
+    const char* lib = getenv("NQ_LIB");
+    if (lib && *lib) {
+        g_lib = dlopen(lib, RTLD_NOW);
+    } else {
+        g_lib = dlopen("libneuronusdk_adapter.mtk.so", RTLD_NOW);
+        if (!g_lib) {
+            g_lib = dlopen("/system_ext/lib64/libneuronusdk_adapter.mtk.so", RTLD_NOW);
+        }
     }
     if (!g_lib) {
         out("dlopen FALLO: %s", dlerror());
@@ -700,7 +747,9 @@ int main(int argc, char** argv) {
     NeuronRuntimeVersion version = {0, 0, 0};
     Neuron_getVersion(&version);
     uint32_t count = 0;
-    Neuron_getDeviceCount(&count);
+    if (!g_host) {
+        Neuron_getDeviceCount(&count);
+    }
     NeuronDevice* mdla = NULL;
     char names[256] = "";
     for (uint32_t i = 0; i < count; i++) {
@@ -716,10 +765,17 @@ int main(int argc, char** argv) {
             mdla = d;
         }
     }
-    if (!only) {
+    if (!only && g_host) {
+        const char* platform = getenv("MTKNN_ADAPTER_DLA_PLATFORM");
+        out("Neuron %u.%u.%u | compilador de PC para %s | capa %u x %u, %u por grafo", version.major,
+            version.minor, version.patch, platform ? platform : "(sin MTKNN_ADAPTER_DLA_PLATFORM)",
+            g_rows, g_cols, g_layers);
+    } else if (!only) {
         out("Neuron %u.%u.%u | dispositivos: %s| capa %u x %u, %u por grafo | MDLA %s", version.major,
             version.minor, version.patch, names, g_rows, g_cols, g_layers,
             mdla ? "encontrado" : "NO encontrado: se compila sin forzar dispositivo");
+    }
+    if (!only) {
         if (second_pass) {
             out("opciones del segundo pase: %s", opts);
         }
@@ -728,6 +784,8 @@ int main(int argc, char** argv) {
     // With a format name this process tries it, without options, with them, or both
     const char* which = argc > 2 ? argv[2] : NULL;
     if (only) {
+        // A compiler that hangs must not hold the rest of the survey: the attempt ends by itself
+        alarm(env_u32("NQ_TIMEOUT", 300));
         for (size_t i = 0; i < FORMAT_COUNT; i++) {
             const Format* f = &FORMATS[i];
             if (strcmp(only, f->name) != 0) {
@@ -749,10 +807,14 @@ int main(int argc, char** argv) {
     // Without one, every attempt runs in a process of its own started from scratch: a crash
     // inside the vendor compiler must not end the survey, and the library is not fork-safe
     setenv("NQ_CHILD", "1", 1);
+    const char* pass_only = getenv("NQ_PASS"); // "sin" or "con": that pass alone for every format
     for (size_t i = 0; i < FORMAT_COUNT; i++) {
         const Format* f = &FORMATS[i];
         out("--- %s: %s", f->name, f->what);
         for (int pass = 0; pass < (second_pass ? 2 : 1); pass++) {
+            if (pass_only && *pass_only && strcmp(pass_only, pass ? "con" : "sin") != 0) {
+                continue;
+            }
             fflush(stdout);
             const pid_t child = fork();
             if (child == 0) {

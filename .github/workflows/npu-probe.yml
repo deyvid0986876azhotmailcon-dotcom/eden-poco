@@ -35,6 +35,10 @@ jobs:
           # says goes into the artifact, where it can be read without a GitHub login.
           "$CC" -O2 -Wall -o out/neuron_quant_probe neuron_quant_probe.c -llog -ldl -lm \
             2> out/neuron_quant_probe.build.txt || true
+          # The same probe for a PC, where it only compiles the graphs: here it is built to see
+          # that it builds. neuron-host-probe.yml is the one that runs it, with MediaTek's SDK.
+          gcc -O2 -Wall -o out/neuron_quant_probe_host neuron_quant_probe.c -ldl -lm \
+            2> out/neuron_quant_probe_host.build.txt || true
           "$CC" -O2 -Wall -shared -fPIC -o lib/arm64-v8a/libnpuprobe.so npu_probe.c -landroid -llog -ldl -lm
 
           "$BT/aapt2" link -o unaligned.apk --manifest AndroidManifest.xml -I "$JAR"
