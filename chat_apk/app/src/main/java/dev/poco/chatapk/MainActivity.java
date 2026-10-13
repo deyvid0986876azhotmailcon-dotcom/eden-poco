@@ -317,6 +317,11 @@ public class MainActivity extends Activity {
             m.weightsPrefix = LLM_DIR + "wf_qwen/q15";
             File own = new File(LLM_DIR + "qwen2.5_1.5b.bin.tokenizer");
             if (own.exists()) { m.tokenizer = own; }
+        } else if ("llama32_1b".equals(modelChoice)) {
+            m.bin = new File(LLM_DIR + "llama3_2_1b.bin");
+            m.weightsPrefix = LLM_DIR + "wf_l1/l1";
+            File own = new File(LLM_DIR + "llama3_2_1b.bin.tokenizer");
+            if (own.exists()) { m.tokenizer = own; }
         } else if ("llama32_3b".equals(modelChoice)) {
             m.bin = new File(LLM_DIR + "llama3_2_3b.bin");
             m.weightsPrefix = LLM_DIR + "wf_l3/l3";

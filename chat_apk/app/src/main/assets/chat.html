@@ -814,7 +814,7 @@
             id: 'llama32_1b',
             label: 'Llama 1B',
             hint: 'el más ligero',
-            gguf: true, bin: false,
+            gguf: true, bin: true,
             chips: CHAT_CHIPS,
         },
         {
@@ -850,8 +850,9 @@
     ];
     // El hardware entre el que elige el usuario, en el orden en que se prueba cuando no hay nada guardado
     const HARDWARE = [
-        { id: 'gpu', icon: '⚡', label: 'GPU', detail: 'Mali-G615', how: 'llama.cpp con todas las capas en la GPU Mali-G615, por Vulkan' },
+        // el primero es el que se elige si el usuario no eligió otro para ese modelo: la APU
         { id: 'apu', icon: '🧠', label: 'APU', detail: 'NPU 780', how: 'run_nnapi sobre la APU 780 (NNAPI)' },
+        { id: 'gpu', icon: '⚡', label: 'GPU', detail: 'Mali-G615', how: 'llama.cpp con todas las capas en la GPU Mali-G615, por Vulkan' },
         { id: 'cpu', icon: '💻', label: 'CPU', detail: '4 núcleos', how: 'en CPU, sin acelerador' },
     ];
     const LONG_MS = 60000; // desde aquí la velocidad es el dato principal de la tarjeta
