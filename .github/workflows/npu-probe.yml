@@ -31,6 +31,10 @@ jobs:
           "$CC" -O2 -Wall -o out/gguf2bin gguf2bin.c -lm
           gcc -O2 -Wall -o out/gguf2bin_host gguf2bin.c -lm
           "$CC" -O2 -Wall -o out/npu_block_probe npu_block_probe.c -llog -ldl -lm
+          # A probe that has never been compiled must not break the others: what the compiler
+          # says goes into the artifact, where it can be read without a GitHub login.
+          "$CC" -O2 -Wall -o out/neuron_quant_probe neuron_quant_probe.c -llog -ldl -lm \
+            2> out/neuron_quant_probe.build.txt || true
           "$CC" -O2 -Wall -shared -fPIC -o lib/arm64-v8a/libnpuprobe.so npu_probe.c -landroid -llog -ldl -lm
 
           "$BT/aapt2" link -o unaligned.apk --manifest AndroidManifest.xml -I "$JAR"
