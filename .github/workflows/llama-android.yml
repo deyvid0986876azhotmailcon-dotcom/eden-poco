@@ -1,6 +1,7 @@
 name: Build llama.cpp for Android
 
-# CPU reference engine for the on-device LLM work: command-line tools only, run from adb shell.
+# llama.cpp for the on-device LLM work, built twice: for the CPU and with the Vulkan backend for
+# the GPU. Command-line tools, run from adb shell or packaged in the chat app by chat-apk.yml.
 # It does not touch the Eden build.
 on:
   push:
@@ -50,13 +51,30 @@ jobs:
           echo "$TAG" > out/VERSION.txt
           ls -la out
 
-      # A second build with the Vulkan backend, to try the Mali-G615 (-ngl 99 puts the layers on
-      # the GPU). Its tools get a -vulkan suffix. The CPU ones above stay as they are, because
-      # chat-apk.yml packages those: a failure here does not fail the job.
+      # A second build with the Vulkan backend, for the Mali-G615 (-ngl 99 puts the layers on the
+      # GPU). Its tools get a -vulkan suffix and chat-apk.yml packages llama-completion-vulkan when
+      # it is there. A failure here does not fail the job: the CPU tools above are uploaded anyway,
+      # and the summary of the run says whether the Vulkan ones were built.
+      - name: Vulkan tools
+        continue-on-error: true
+        run: |
+          # glslc compiles the shaders, here on the runner. The NDK of this runner has none.
+          sudo apt-get update
+          sudo apt-get install -y glslc libvulkan-dev
+          glslc --version
+
       - name: Configure with Vulkan
         continue-on-error: true
         run: |
-          # glslc (the shader compiler) comes with the NDK; the Vulkan headers and library, from its sysroot.
+          SYSROOT="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          # The library the tools link to is the one of the phone, from the NDK. llama.cpp includes
+          # the C++ headers (vulkan.hpp): if this NDK only has the C ones, all of them come from
+          # Khronos, because the two sets have to be of the same version.
+          HEADERS=""
+          if [ ! -f "$SYSROOT/usr/include/vulkan/vulkan.hpp" ]; then
+            git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git
+            HEADERS="-DVulkan_INCLUDE_DIR=$PWD/Vulkan-Headers/include"
+          fi
           cmake -S llama.cpp -B build-vulkan \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 \
@@ -65,7 +83,9 @@ jobs:
             -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+i8mm+fp16 \
             -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
             -DGGML_VULKAN=ON -DVK_USE_PLATFORM_ANDROID_KHR=ON \
-            -DVulkan_GLSLC_EXECUTABLE="$ANDROID_NDK_LATEST_HOME/shader-tools/linux-x86_64/glslc"
+            -DVulkan_GLSLC_EXECUTABLE=/usr/bin/glslc \
+            -DVulkan_LIBRARY="$SYSROOT/usr/lib/aarch64-linux-android/28/libvulkan.so" \
+            $HEADERS
 
       - name: Build with Vulkan
         continue-on-error: true
@@ -79,6 +99,12 @@ jobs:
             fi
           done
           ls -la out
+          if [ -f out/llama-completion-vulkan ] && [ -f out/llama-bench-vulkan ]; then
+            echo "Vulkan build: OK (llama-completion-vulkan and llama-bench-vulkan are in the artifact)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=No Vulkan engine::the artifact has only the CPU tools"
+            echo "Vulkan build: FAILED, the artifact has only the CPU tools" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload
         uses: actions/upload-artifact@v4

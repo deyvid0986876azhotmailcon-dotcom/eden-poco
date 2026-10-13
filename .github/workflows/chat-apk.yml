@@ -9,7 +9,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 75 # it may have to wait for a build of llama.cpp
     permissions:
       contents: read
       actions: read
@@ -34,10 +34,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A build of the engine that the same push started is still running: wait for it, to
+          # package what it makes and not what the one before made.
+          LATEST=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow llama-android.yml --limit 1 --json databaseId,status -q '.[0] | "\(.databaseId) \(.status)"')
+          if [ "${LATEST#* }" != "completed" ]; then
+            echo "waiting for llama-android run ${LATEST%% *}"
+            gh run watch "${LATEST%% *}" --repo "$GITHUB_REPOSITORY" --interval 30 > /dev/null || true
+          fi
           RUN=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow llama-android.yml --status success --limit 1 --json databaseId -q '.[0].databaseId')
           echo "llama-android run: $RUN"
           gh run download "$RUN" --repo "$GITHUB_REPOSITORY" -n llama-android -D llama_bin
-          cp llama_bin/llama-completion chat_apk/app/src/main/jniLibs/arm64-v8a/libllama_completion.so
+          # The engine of the app is the Vulkan build when there is one: with -ngl it puts the
+          # layers of the model on the GPU. The CPU build goes next to it, for the app to use if
+          # the other one dies on the phone.
+          LIBS=chat_apk/app/src/main/jniLibs/arm64-v8a
+          if [ -f llama_bin/llama-completion-vulkan ]; then
+            cp llama_bin/llama-completion-vulkan "$LIBS/libllama_completion.so"
+            cp llama_bin/llama-completion "$LIBS/libllama_completion_cpu.so"
+            echo "Engine: llama-completion with Vulkan, and the CPU build as libllama_completion_cpu.so" >> "$GITHUB_STEP_SUMMARY"
+          else
+            cp llama_bin/llama-completion "$LIBS/libllama_completion.so"
+            echo "::warning title=No Vulkan engine::packaging the CPU build of llama-completion"
+            echo "Engine: llama-completion for the CPU only, the artifact has no Vulkan build" >> "$GITHUB_STEP_SUMMARY"
+          fi
           # The server, for the assistant to keep one model loaded. Not every llama.cpp release builds it.
           if [ -f llama_bin/llama-server ]; then
             cp llama_bin/llama-server chat_apk/app/src/main/jniLibs/arm64-v8a/libllama_server.so

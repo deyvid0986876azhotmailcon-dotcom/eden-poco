@@ -60,8 +60,13 @@ public class MainActivity extends Activity {
     private static final Pattern APU_RUNS = Pattern.compile("nnapi: (\\d+) matmuls on \\S+ at \\S+ ms each, (\\d+) on the CPU");
     private static final Pattern CPU_ONLY = Pattern.compile("nnapi: not used, (\\d+) matmuls on the CPU");
 
-    // Modelos GGUF: los corre llama.cpp en CPU (libllama_completion.so). Los archivos se bajan aparte
+    // Modelos GGUF: los corre llama.cpp (libllama_completion.so), con las capas en la GPU por Vulkan
+    // si el APK trae esa compilación. Los archivos se bajan aparte
     private static final String GGUF_DIR = "/data/local/tmp/lc/";
+    // Lo que llama.cpp dice al cargar el modelo: "ggml_vulkan: 0 = Mali-G615 MC6 (...) | uma: 1 | ..."
+    // y "load_tensors: offloaded 29/29 layers to GPU" (0 de N si no hay GPU que usar)
+    private static final Pattern VULKAN_DEVICE = Pattern.compile("ggml_vulkan: \\d+ = (.+?) \\(");
+    private static final Pattern GPU_LAYERS = Pattern.compile("offloaded (\\d+)/(\\d+) layers to GPU");
     private static final String SYSTEM_PROMPT =
             "Eres un asistente útil. Responde siempre en español, de forma clara y breve.";
     // Con lo que llama.cpp cierra la respuesta en su salida
@@ -76,6 +81,8 @@ public class MainActivity extends Activity {
     private WebView webView;
     private volatile Run current = null;
     private volatile boolean destroyed = false;
+    // El motor con la GPU murió sin responder: hasta que se cierre la app, llama.cpp va sin ella
+    private volatile boolean gpuFailed = false;
 
     /** Una generación: el proceso del motor y lo que se va sabiendo de él. */
     private static final class Run {
@@ -94,8 +101,13 @@ public class MainActivity extends Activity {
         volatile int graphsTotal = -1;
         volatile long apuRuns = -1;
         volatile long cpuRuns = -1;
-        // llama.cpp: todo en CPU, y cierra la respuesta de otra forma que run_nnapi
-        volatile boolean cpuEngine;
+        // llama.cpp: cierra la respuesta de otra forma que run_nnapi, y con Vulkan pone capas en la GPU
+        volatile boolean llamaCpp;
+        volatile boolean gpuWanted; // se le pidió que usara la GPU
+        volatile String gpuDevice;  // la que encontró por Vulkan
+        volatile int gpuLayers = -1; // capas que le dio, de gpuLayersTotal. -1 = todavía no lo ha dicho
+        volatile int gpuLayersTotal = -1;
+        volatile boolean stopped;   // lo paró el usuario
         // última lectura del tiempo de CPU del motor
         long cpuTicks;
         long cpuTicksAtMs;
@@ -298,6 +310,7 @@ public class MainActivity extends Activity {
         public void stop() {
             Run run = current;
             if (run != null) {
+                run.stopped = true;
                 try {
                     run.process.destroy();
                 } catch (Exception ignored) {}
@@ -330,9 +343,8 @@ public class MainActivity extends Activity {
                 // 2. CPU del motor. -1 = sin dato
                 stats.put("cpuPercent", run == null ? -1 : engineCpuPercent(run, finished));
 
-                // 3. GPU: el motor no la usa y Android no da a las apps un contador de su carga.
-                // Es un rótulo fijo, no una medida
-                stats.put("gpuStatus", "0 % · Reposo");
+                // 3. GPU
+                describeGpu(run, stats);
 
                 if (run != null) {
                     // 4. Tokens, tiempo y velocidad. La velocidad se cuenta desde el primer token,
@@ -373,13 +385,38 @@ public class MainActivity extends Activity {
             }
         }
 
+        private void describeGpu(Run run, JSONObject stats) throws JSONException {
+            // Android no da a las apps la carga de la GPU. Lo que se muestra es lo que llama.cpp
+            // dice al cargar el modelo: qué GPU encontró por Vulkan y cuántas capas le dio. No es
+            // una medida de uso. run_nnapi no usa la GPU
+            String state = "idle";
+            String status = "0 % · Reposo";
+            if (run != null && run.llamaCpp) {
+                if (!run.gpuWanted) {
+                    status = "Sin usar · falló antes, el motor va en CPU";
+                } else if (run.gpuLayers > 0) {
+                    state = "active";
+                    status = "Activa · " + run.gpuLayers + "/" + run.gpuLayersTotal + " capas por Vulkan";
+                } else if (run.gpuLayers == 0) {
+                    status = "Sin usar · el motor no le dio capas";
+                } else {
+                    state = "starting";
+                    status = run.gpuDevice != null ? "Preparando · Vulkan" : "Preparando…";
+                }
+            }
+            stats.put("gpuState", state);
+            stats.put("gpuStatus", status);
+        }
+
         private void describeApu(Run run, JSONObject stats) throws JSONException {
             // No hay forma de leer la carga de la APU desde una app. Lo que se muestra es lo que el
             // motor dice de sí mismo: si está usando el acelerador y, al terminar, qué parte de los
             // matmul corrió en él
-            if (run.cpuEngine) {
-                stats.put("apuState", "cpu");
-                stats.put("apuSummary", "Sin usar · llama.cpp en 4 núcleos de CPU");
+            if (run.llamaCpp) {
+                boolean onGpu = run.gpuLayers > 0;
+                stats.put("apuState", onGpu ? "off" : "cpu");
+                stats.put("apuSummary", onGpu ? "Sin usar · el modelo va por la GPU (Vulkan)"
+                        : "Sin usar · llama.cpp en 4 núcleos de CPU");
                 stats.put("apuPercent", -1);
                 return;
             }
@@ -435,7 +472,12 @@ public class MainActivity extends Activity {
                     } else if (line.contains("matmul runs on the CPU") || line.contains("nnapi: dlopen failed")
                             || line.contains("nnapi: missing symbol")) {
                         run.apuMissing = true;
-                    } else if (run.cpuEngine && (matcher = LLAMA_EVAL.matcher(line)).find()) {
+                    } else if (run.llamaCpp && (matcher = VULKAN_DEVICE.matcher(line)).find()) {
+                        run.gpuDevice = matcher.group(1).trim();
+                    } else if (run.llamaCpp && (matcher = GPU_LAYERS.matcher(line)).find()) {
+                        run.gpuLayers = Integer.parseInt(matcher.group(1));
+                        run.gpuLayersTotal = Integer.parseInt(matcher.group(2));
+                    } else if (run.llamaCpp && (matcher = LLAMA_EVAL.matcher(line)).find()) {
                         // llama.cpp: los tokens que generó y su velocidad, medidos por el propio motor
                         run.tokens = Integer.parseInt(matcher.group(1));
                         callPage("onFinalSpeedReport", JSONObject.quote(matcher.group(2)));
@@ -457,8 +499,8 @@ public class MainActivity extends Activity {
             // los bytes de un carácter UTF-8 que llegue partido entre dos lecturas
             // run_nnapi antepone "Assistant: " y avisa del turno siguiente; llama.cpp no antepone nada y
             // cierra con "[end of text]"
-            final String prefix = run.cpuEngine ? "" : ANSWER_PREFIX;
-            final String end = run.cpuEngine ? END_OF_TEXT : NEXT_TURN;
+            final String prefix = run.llamaCpp ? "" : ANSWER_PREFIX;
+            final String end = run.llamaCpp ? END_OF_TEXT : NEXT_TURN;
             try (Reader reader = new InputStreamReader(run.process.getInputStream(), StandardCharsets.UTF_8)) {
                 char[] buffer = new char[256];
                 StringBuilder pending = new StringBuilder(); // recibido y todavía sin enviar a la página
@@ -487,7 +529,7 @@ public class MainActivity extends Activity {
                         pending.delete(0, cut);
                     }
                 }
-                if (ended && run.cpuEngine) {
+                if (ended && run.llamaCpp) {
                     // llama.cpp escribe su velocidad al salir: se le deja terminar, sin cortarle la salida
                     while (reader.read(buffer) != -1) { /* nada: ya no es parte de la respuesta */ }
                 } else if (ended) {
@@ -575,12 +617,21 @@ public class MainActivity extends Activity {
                     return;
                 }
 
+                // llama.cpp va con todas las capas del modelo en la GPU (Mali-G615, por Vulkan), salvo
+                // que en esta sesión ya haya muerto así sin responder: entonces va la compilación de
+                // solo CPU, si el APK la trae
+                final boolean gpu = gguf != null && !gpuFailed;
                 List<String> cmd = new ArrayList<>();
                 if (gguf != null) {
-                    // llama.cpp: una sola pregunta con la plantilla de chat del modelo, en los 4 núcleos grandes
-                    cmd.add(MainActivity.this.nativeLibDir + "/libllama_completion.so");
+                    // llama.cpp: una sola pregunta con la plantilla de chat del modelo. Lo que no vaya
+                    // a la GPU corre en los 4 núcleos grandes
+                    File cpuBuild = new File(MainActivity.this.nativeLibDir, "libllama_completion_cpu.so");
+                    cmd.add(gpu || !cpuBuild.exists()
+                            ? MainActivity.this.nativeLibDir + "/libllama_completion.so" : cpuBuild.getAbsolutePath());
                     cmd.add("-m");
                     cmd.add(model.getAbsolutePath());
+                    cmd.add("-ngl");
+                    cmd.add(gpu ? "99" : "0");
                     cmd.add("-t");
                     cmd.add("4");
                     cmd.add("-C");
@@ -633,7 +684,8 @@ public class MainActivity extends Activity {
                         return;
                     }
                     run = new Run(pb.start());
-                    run.cpuEngine = gguf != null;
+                    run.llamaCpp = gguf != null;
+                    run.gpuWanted = gpu;
                     current = run;
                 }
                 final Run active = run;
@@ -663,11 +715,20 @@ public class MainActivity extends Activity {
                 streamAnswer(active);
                 active.endMs = SystemClock.elapsedRealtime();
 
-                active.process.waitFor();
+                int exit = active.process.waitFor();
                 telemetry.interrupt();
                 telemetry.join(1500);
                 engineLog.join(1000); // el reparto entre APU y CPU es lo último que escribe el motor
-                done = true;
+                if (active.llamaCpp && active.tokens == 0 && exit != 0 && !active.stopped) {
+                    // llama.cpp murió sin escribir nada. Si iba con la GPU, lo siguiente se intenta sin ella
+                    error = "El motor terminó sin responder (código " + exit + ").";
+                    if (active.gpuWanted) {
+                        gpuFailed = true;
+                        error += " Iba con la GPU: los próximos mensajes se intentan sin ella.";
+                    }
+                } else {
+                    done = true;
+                }
 
             } catch (Exception e) {
                 Log.e(TAG, "Error in inference", e);

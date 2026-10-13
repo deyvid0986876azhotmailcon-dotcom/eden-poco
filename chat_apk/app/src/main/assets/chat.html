@@ -694,7 +694,7 @@
         <main class="messages" id="messages" role="log" aria-live="off">
             <section class="welcome" id="welcome">
                 <h2>IA local en tu Poco X6 Pro</h2>
-                <p>Todo se calcula en el teléfono, sin conexión. El modelo corre en la APU 780 (MDLA 5.3) cuando el acelerador lo admite y el resto va por CPU.</p>
+                <p>Todo se calcula en el teléfono, sin conexión. Los modelos GGUF van con llama.cpp, que pone sus capas en la GPU Mali-G615 (Vulkan) si puede; los convertidos para la APU 780, en la APU. Lo que un acelerador no admite va por CPU: la tarjeta de cada respuesta dice dónde corrió.</p>
                 <p class="welcome-hint" id="modelHint"></p>
             </section>
         </main>
@@ -733,13 +733,13 @@
         {
             id: 'qwen15',
             label: 'Qwen 1.5B',
-            hint: 'APU Dimensity 8300 (20-30 tok/s), ultra rápido, español nativo',
+            hint: 'el más ligero, en español. GGUF con llama.cpp, que usa la GPU Mali-G615 (Vulkan) si puede; o la APU si está el modelo convertido',
             chips: CHAT_CHIPS,
         },
         {
             id: 'llama32_3b',
             label: 'Llama 3B',
-            hint: 'APU Dimensity 8300 (15-25 tok/s), razonamiento avanzado en español',
+            hint: 'más grande y más lento, en español. GGUF con llama.cpp, que usa la GPU Mali-G615 (Vulkan) si puede; o la APU si está el modelo convertido',
             chips: CHAT_CHIPS,
         },
         {
@@ -796,7 +796,7 @@
                 </div>
                 <dl class="rows">
                     <div><dt>APU · MDLA 5.3</dt><dd><i class="dot apu-dot"></i><span class="apu">Preparando…</span></dd></div>
-                    <div><dt>GPU · Mali-G615</dt><dd class="gpu">0 % · Reposo</dd></div>
+                    <div><dt>GPU · Mali-G615</dt><dd><i class="dot gpu-dot"></i><span class="gpu">0 % · Reposo</span></dd></div>
                     <div><dt>Memoria RAM</dt><dd class="ram-text">—</dd></div>
                     <div><dt>Primer token</dt><dd class="ttft">—</dd></div>
                 </dl>
@@ -898,7 +898,8 @@
                 briefSpeed: q('.b-speed'), briefTime: q('.b-time'),
                 speed: q('.speed'), tokens: q('.tokens'), time: q('.time'),
                 cpu: q('.gauge.cpu'), ram: q('.gauge.ram'),
-                apuDot: q('.apu-dot'), apu: q('.apu'), gpu: q('.gpu'), ramText: q('.ram-text'), ttft: q('.ttft'),
+                apuDot: q('.apu-dot'), apu: q('.apu'), gpuDot: q('.gpu-dot'), gpu: q('.gpu'),
+                ramText: q('.ram-text'), ttft: q('.ttft'),
             },
             t0: performance.now(), elapsedMs: 0, tokens: 0, speed: 0,
             started: false,  // ya llegó texto
@@ -968,7 +969,12 @@
         if (stats.ramTotalGb) {
             m.ui.ramText.textContent = `${gb(stats.ramUsedGb)} de ${gb(stats.ramTotalGb)} GB · ${gb(stats.ramFreeGb)} GB libres`;
         }
-        if (stats.gpuStatus) { m.ui.gpu.textContent = stats.gpuStatus; }
+        if (stats.gpuStatus) {
+            // lo que el motor dice al cargar: capas del modelo que puso en la GPU. no es una medida de carga
+            m.ui.gpu.textContent = stats.gpuStatus;
+            m.ui.gpuDot.dataset.tone = stats.gpuState === 'active' ? 'ok' : '';
+            m.ui.gpuDot.dataset.live = String(stats.gpuState === 'starting');
+        }
         if (stats.apuSummary) {
             m.ui.apu.textContent = stats.apuSummary;
             m.ui.apuDot.dataset.tone = stats.apuState === 'active' ? 'ok' : stats.apuState === 'cpu' ? 'warn' : '';
@@ -1118,7 +1124,7 @@
                 tokPerSec: sent > 1 ? ((sent - 1) * 1000 / since).toFixed(2) : '0.00',
                 cpuPercent: Math.round(45 + 50 * Math.abs(Math.sin(elapsedMs / 1500))),
                 ramPercent: 64, ramUsedGb: '7.1', ramTotalGb: '11.1', ramFreeGb: '4.0',
-                gpuStatus: '0 % · Reposo',
+                gpuState: sent ? 'active' : 'starting', gpuStatus: sent ? 'Activa · vista previa' : 'Preparando…',
                 apuState: sent ? 'active' : 'starting', apuSummary: sent ? 'Activa · vista previa' : 'Preparando…',
             });
             if (sent >= words.length) { window.onStreamDone(); }
