@@ -155,8 +155,13 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        destroyed = true;
-        Run run = current;
+        // Con el mismo candado con que arranca un motor: o el motor ya está en current y se corta
+        // aquí, o al ir a arrancar ve destroyed y no arranca. Sin él podía nacer justo después
+        Run run;
+        synchronized (this) {
+            destroyed = true;
+            run = current;
+        }
         if (run != null) {
             run.process.destroy(); // sin esto el motor seguiría generando sin pantalla
         }
@@ -672,6 +677,9 @@ public class MainActivity extends Activity {
                 // La sonda ocupa el sitio de una generación: no corre junto a un modelo, y
                 // "Detener" y el cierre de la app la cortan igual que a un motor
                 synchronized (MainActivity.this) {
+                    if (destroyed) {
+                        return; // la app se está cerrando: no hay a quién contestar
+                    }
                     if (current != null) {
                         callPage("onStreamError", JSONObject.quote("Ya hay una generación en curso."));
                         return;
@@ -825,6 +833,9 @@ public class MainActivity extends Activity {
                 pb.redirectErrorStream(false);
 
                 synchronized (MainActivity.this) {
+                    if (destroyed) {
+                        return; // la app se está cerrando: no hay a quién contestar
+                    }
                     if (current != null) {
                         error = "Ya hay una generación en curso.";
                         return;

@@ -24,7 +24,8 @@
 // Environment: NQ_ROWS and NQ_COLS (default 8960 x 1536, the up projection of Qwen 2.5 1.5B),
 // NQ_LAYERS (default 4 layers side by side in one graph), NQ_OPTS (compiler options for the second
 // pass, "none" to skip it), NQ_PASS ("sin" or "con" for one pass of the whole survey), NQ_TIMEOUT
-// (seconds an attempt may take, default 300), NQ_RUNS (timed executions of every graph, default 40).
+// (seconds an attempt may take, default 300), NQ_RUNS (timed executions of every graph, default 40),
+// NQ_CHAIN=1 (square layers, each one reading what the one before gives, in place of side by side).
 //
 // Type codes and prototypes are the ones of NeuronAdapter.h, NeuroPilot 8.
 //
@@ -225,6 +226,7 @@ typedef struct {
     bool conv;        // the layer is a CONV_2D of 1 x 1 and not a FULLY_CONNECTED
     bool per_channel; // the weights have a scale per output row
     bool bias_rows;   // and the bias declares its own, as LiteRT does, and not the zero of NNAPI
+    bool narrow;      // 8-bit weights that only take the values of 4-bit ones, with their scale
 } Format;
 
 static const Format FORMATS[] = {
@@ -294,6 +296,9 @@ static const Format FORMATS[] = {
                  "y sesgo con escala por fila",
      NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_EXT_TENSOR_QUANT4_SYMM_PER_CHANNEL, 4, 0, false,
      true, true, true, true},
+    {"a16w8v4", "control: pesos de 8 bits que solo toman los valores y la escala de los de 4",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_TENSOR_QUANT8_SYMM, 8, 0, false, false, false, false,
+     false, true},
     {"hw8", "activaciones en coma flotante con pesos de 8 bits, sin pasar por enteros",
      NEURON_TENSOR_FLOAT32, 0, 0, NEURON_TENSOR_QUANT8_SYMM, 8, 0, false, false, false, false},
     {"hcw8c", "convolucion con activaciones en coma flotante y pesos de 8 bits por fila",
@@ -315,6 +320,11 @@ static const char* const LLM_OPTIONS = "--option-bundle=llm_gen_accuracy";
 #define OUT_MAX 4.0f
 
 static uint32_t g_rows = 8960, g_cols = 1536, g_layers = 4;
+// With NQ_CHAIN the layers are square and each one reads what the one before gives, as the layers
+// of a model do: side by side a compiler may merge them into one wide layer. The weights then get
+// the deviation that keeps the size of the values from layer to layer, 1 / sqrt(columns)
+static bool g_chain;
+static float g_w_std = 0.02f;
 
 #define MAX_RUNS 4000
 static uint32_t g_runs = 40; // timed executions of every graph
@@ -332,18 +342,23 @@ static float act_scale(const Format* f, float max_real) {
     return f->act_bits == 16 ? max_real / 32767.0f : max_real / 127.0f;
 }
 
-static float wt_scale(const Format* f) {
-    // uniform integers in [-m, m] have a deviation of about m / 1.73
-    return f->wt_bits == 4 ? 0.02f * 1.73f / 7.0f : 0.02f * 1.73f / 127.0f;
+// The largest integer a weight takes
+static int wt_max(const Format* f) {
+    return f->wt_bits == 4 || f->narrow ? 7 : 127;
 }
 
-// Weights as small integers, the same for every format with that many bits
+static float wt_scale(const Format* f) {
+    // uniform integers in [-m, m] have a deviation of about m / 1.73
+    return g_w_std * 1.73f / (float)wt_max(f);
+}
+
+// Weights as small integers, the same for every format with that many values
 static int8_t* make_weights(const Format* f, size_t count) {
     int8_t* q = malloc(count);
     if (!q) {
         return NULL;
     }
-    const int m = f->wt_bits == 4 ? 7 : 127;
+    const int m = wt_max(f);
     g_seed = 777;
     for (size_t i = 0; i < count; i++) {
         q[i] = (int8_t)((int)(rnd() % (uint32_t)(2 * m + 1)) - m);
@@ -378,16 +393,33 @@ static void* pack_weights(const Format* f, const int8_t* q, size_t count, size_t
     return w;
 }
 
+// The real value of an output, read in the layout of its type
+static double out_real(const Format* f, bool ext_float, const void* got, size_t i, float scale) {
+    if (ext_float) {
+        return ((const float*)got)[i];
+    }
+    if (f->act_bits == 16) {
+        return ((const int16_t*)got)[i] * (double)scale;
+    }
+    if (f->act_type == NEURON_TENSOR_QUANT8_ASYMM) {
+        return ((int)((const uint8_t*)got)[i] - f->act_zero) * (double)scale;
+    }
+    return ((const int8_t*)got)[i] * (double)scale;
+}
+
 static int run_format(const Format* f, const NeuronDevice* dev, const char* options) {
     const uint32_t R = g_rows, C = g_cols, L = g_layers;
     const size_t per_layer = (size_t)R * C;
     const char* pass = options ? "con opciones" : "sin opciones";
     char head[160];
-    snprintf(head, sizeof head, "%s %s", f->name, pass);
+    snprintf(head, sizeof head, "%s %s%s", f->name, pass, g_chain ? ", cadena" : "");
 
-    const float in_scale = f->act_bits ? act_scale(f, 1.0f) : 0.0f;
+    // In a chain what a layer gives is what the next one takes: one scale for every activation
+    const float in_scale = f->act_bits ? act_scale(f, g_chain ? OUT_MAX : 1.0f) : 0.0f;
     const float out_scale = f->act_bits ? act_scale(f, OUT_MAX) : 0.0f;
     const float w_scale = f->wt_bits ? wt_scale(f) : 0.0f;
+    // What the graph gives back: every layer when they are side by side, the last one of a chain
+    const uint32_t n_out = g_chain ? 1 : L;
 
     // Constant operands are referenced, not copied: they live until the compilation is finished
     int8_t* q = make_weights(f, per_layer * L);
@@ -454,6 +486,7 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
         ADD(f->act_type, rank, in_dims, in_scale, f->act_zero); // operand 0: the input
     }
     uint32_t outs[16];
+    uint32_t layer_in = fc_in;
     for (uint32_t l = 0; l < L; l++) {
         const uint32_t wi = next;
         ADD(f->wt_type, rank, w_dims, f->per_channel ? 0.0f : w_scale, f->wt_zero);
@@ -499,8 +532,7 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
         }
         const uint32_t oi = next;
         ADD(f->act_type, rank, out_dims, out_scale, f->act_zero);
-        outs[l] = oi;
-        uint32_t op_in[7] = {fc_in, wi, bi, ai};
+        uint32_t op_in[7] = {layer_in, wi, bi, ai};
         uint32_t op_in_count = 4;
         if (f->conv) {
             // input, filter, bias, padding scheme, stride in x, stride in y, activation
@@ -523,22 +555,31 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
                 step = f->conv ? "addOperation CONV_2D" : "addOperation FULLY_CONNECTED";
             }
         }
-        if (f->island) {
-            const uint32_t fi = next;
+        // A layer in the middle of a chain hands its integers to the next one. Every other
+        // output leaves the graph, as floats when the integers stay inside
+        const bool leaves = !g_chain || l == L - 1;
+        uint32_t result = oi;
+        if (f->island && leaves) {
+            result = next;
             ADD(NEURON_TENSOR_FLOAT32, rank, out_dims, 0.0f, 0);
             if (!e) {
-                e = NeuronModel_addOperation(m, NEURON_DEQUANTIZE, 1, &oi, 1, &fi);
+                e = NeuronModel_addOperation(m, NEURON_DEQUANTIZE, 1, &oi, 1, &result);
                 if (e) {
                     step = "addOperation DEQUANTIZE";
                 }
             }
-            outs[l] = fi;
+        }
+        if (leaves) {
+            outs[g_chain ? 0 : l] = result;
+        }
+        if (g_chain) {
+            layer_in = oi;
         }
     }
 #undef ADD
     const uint32_t input0 = 0;
     if (!e) {
-        e = NeuronModel_identifyInputsAndOutputs(m, 1, &input0, L, outs);
+        e = NeuronModel_identifyInputsAndOutputs(m, 1, &input0, n_out, outs);
         if (e) {
             step = "identifyInputsAndOutputs";
         }
@@ -559,14 +600,21 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
     }
 
     // One answer per operation: the layers, and around them a QUANTIZE and their DEQUANTIZE
-    const uint32_t ops = f->island ? 1 + 2 * L : L;
+    const uint32_t ops = f->island ? 1 + L + n_out : L;
     bool supported[40] = {false};
     uint32_t yes = 0;
     const NeuronDevice* const devs[1] = {dev};
+    char mdla[64] = "sin MDLA";
     if (dev) {
         const int se = NeuronModel_getSupportedOperationsForDevices(m, devs, 1, supported);
         for (uint32_t l = 0; !se && l < ops; l++) {
             yes += supported[l];
+        }
+        // a query that fails is not an accelerator that takes nothing
+        if (se) {
+            snprintf(mdla, sizeof mdla, "consulta de soporte: error %d", se);
+        } else {
+            snprintf(mdla, sizeof mdla, "MDLA soporta %u/%u", yes, ops);
         }
     }
 
@@ -590,20 +638,27 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
     }
     const double compile_ms = now_ms() - t0;
     if (e || !c) {
-        out("%s | modelo aceptado, MDLA soporta %u/%u | NO compila: %s devuelve %d tras %.0f ms",
-            head, yes, ops, step, e, compile_ms);
+        out("%s | modelo aceptado, %s | NO compila: %s devuelve %d tras %.0f ms", head, mdla, step,
+            e, compile_ms);
         if (c) {
             NeuronCompilation_free(c);
         }
         NeuronModel_free(m);
         return 1;
     }
+    const double total = (double)per_layer * L;
     size_t dla = 0;
     const int de = NeuronCompilation_getCompiledNetworkSize(c, &dla);
+    char size[96];
+    if (de) {
+        // without a size there are no bytes per weight to tell: zero would read as a result
+        snprintf(size, sizeof size, "tamano de la red no informado (error %d)", de);
+    } else {
+        snprintf(size, sizeof size, "red compilada %.1f MB = %.2f bytes por peso", dla / 1048576.0,
+                 dla / total);
+    }
     if (g_host) {
-        out("%s | compila en %.0f ms | red compilada %.1f MB = %.2f bytes por peso (codigo %d) | "
-            "sin ejecutar: compilador de PC",
-            head, compile_ms, dla / 1048576.0, dla / ((double)per_layer * L), de);
+        out("%s | compila en %.0f ms | %s | sin ejecutar: compilador de PC", head, compile_ms, size);
         NeuronCompilation_free(c);
         NeuronModel_free(m);
         free(w);
@@ -617,8 +672,14 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
     // Inputs and outputs in the layout of the activation type
     const size_t ab = ext_float ? sizeof(float) : act_bytes(f);
     void* in = calloc(C, ab);
-    void* got = calloc((size_t)R * L, ab);
+    void* got = malloc((size_t)R * n_out * ab);
     float* x_real = calloc(C, sizeof(float));
+    if (!in || !got || !x_real) {
+        out("%s | sin memoria para las entradas y salidas", head);
+        return 1;
+    }
+    // An output the accelerator does not write keeps this, which is far from any right value
+    memset(got, 0x5a, (size_t)R * n_out * ab);
     g_seed = 4242;
     for (uint32_t i = 0; i < C; i++) {
         const float x = (float)(rnd() % 20001) / 10000.0f - 1.0f;
@@ -652,7 +713,7 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
         if (!e) {
             e = NeuronExecution_setInput(x, 0, NULL, in, (size_t)C * ab);
         }
-        for (uint32_t l = 0; !e && l < L; l++) {
+        for (uint32_t l = 0; !e && l < n_out; l++) {
             e = NeuronExecution_setOutput(x, (int32_t)l, NULL, (uint8_t*)got + (size_t)l * R * ab,
                                           (size_t)R * ab);
         }
@@ -668,43 +729,70 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
         }
     }
 
-    // The same sum in C over the first layer, with the values the integers stand for
+    // The same sums in C, with the values the integers stand for
     double err2 = 0.0, ref2 = 0.0;
     const float ws = f->wt_bits ? w_scale : wt_scale(f);
-    for (uint32_t r = 0; !e && r < R; r++) {
-        double acc = 0.0;
-        const int8_t* row = q + (size_t)r * C;
-        for (uint32_t i = 0; i < C; i++) {
-            acc += (double)row[i] * x_real[i];
+    uint32_t checked = 0;
+    if (!e && g_chain) {
+        // through every layer, and what the last one gives against what the graph gave: one
+        // layer that the accelerator got wrong shows here. The rounding between layers is not
+        // imitated, so the error also counts it
+        double* v = malloc(C * sizeof(double));
+        double* next_v = malloc(R * sizeof(double));
+        for (uint32_t i = 0; v && i < C; i++) {
+            v[i] = x_real[i];
         }
-        const double ref = acc * ws;
-        double y;
-        if (ext_float) {
-            y = ((float*)got)[r];
-        } else if (f->act_bits == 16) {
-            y = ((int16_t*)got)[r] * (double)out_scale;
-        } else if (f->act_bits == 8) {
-            y = ((int)((uint8_t*)got)[r] - f->act_zero) * (double)out_scale;
-            if (f->act_type != NEURON_TENSOR_QUANT8_ASYMM) {
-                y = ((int8_t*)got)[r] * (double)out_scale;
+        for (uint32_t l = 0; v && next_v && l < L; l++) {
+            const int8_t* layer = q + (size_t)l * per_layer;
+            for (uint32_t r = 0; r < R; r++) {
+                double acc = 0.0;
+                const int8_t* row = layer + (size_t)r * C;
+                for (uint32_t i = 0; i < C; i++) {
+                    acc += (double)row[i] * v[i];
+                }
+                next_v[r] = acc * ws;
             }
-        } else {
-            y = ((float*)got)[r];
+            double* swap = v;
+            v = next_v;
+            next_v = swap;
         }
-        err2 += (y - ref) * (y - ref);
-        ref2 += ref * ref;
+        for (uint32_t r = 0; v && next_v && r < R; r++) {
+            const double y = out_real(f, ext_float, got, r, out_scale);
+            err2 += (y - v[r]) * (y - v[r]);
+            ref2 += v[r] * v[r];
+            checked++;
+        }
+        free(v);
+        free(next_v);
+    } else if (!e) {
+        // side by side: some rows of every layer, so that none can be wrong or missing unseen
+        const uint32_t every = R > 512 ? R / 512 : 1;
+        for (uint32_t l = 0; l < L; l++) {
+            for (uint32_t r = 0; r < R; r += every) {
+                double acc = 0.0;
+                const int8_t* row = q + (size_t)l * per_layer + (size_t)r * C;
+                for (uint32_t i = 0; i < C; i++) {
+                    acc += (double)row[i] * x_real[i];
+                }
+                const double ref = acc * ws;
+                const double y = out_real(f, ext_float, got, (size_t)l * R + r, out_scale);
+                err2 += (y - ref) * (y - ref);
+                ref2 += ref * ref;
+                checked++;
+            }
+        }
     }
-    const double total = (double)per_layer * L;
     if (e) {
-        out("%s | MDLA soporta %u/%u | compila en %.0f ms | la ejecucion FALLA (%d)", head, yes, ops,
-            compile_ms, e);
+        out("%s | %s | compila en %.0f ms | la ejecucion FALLA (%d)", head, mdla, compile_ms, e);
     } else {
         qsort(times, (size_t)runs, sizeof times[0], by_time);
-        out("%s | MDLA soporta %u/%u | compila en %.0f ms | red compilada %.1f MB = %.2f bytes por peso "
-            "(codigo %d) | minimo %.3f ms, mediana %.3f ms por ejecucion de %.0f M de pesos "
-            "(%d medidas) | error relativo %.4f",
-            head, yes, ops, compile_ms, dla / 1048576.0, dla / total, de, runs ? times[0] : 0.0,
-            runs ? times[runs / 2] : 0.0, total / 1e6, runs, ref2 > 0.0 ? sqrt(err2 / ref2) : -1.0);
+        const double median =
+                !runs ? 0.0 : runs % 2 ? times[runs / 2] : (times[runs / 2 - 1] + times[runs / 2]) / 2;
+        out("%s | %s | compila en %.0f ms | %s | minimo %.3f ms, mediana %.3f ms por ejecucion de "
+            "%.0f M de pesos (%d medidas) | error relativo %.4f sobre %u valores de %s",
+            head, mdla, compile_ms, size, runs ? times[0] : 0.0, median, total / 1e6, runs,
+            ref2 > 0.0 ? sqrt(err2 / ref2) : -1.0, checked,
+            g_chain ? "la ultima capa de la cadena" : "todas las capas");
     }
     free(in);
     free(got);
@@ -725,8 +813,21 @@ static uint32_t env_u32(const char* name, uint32_t fallback) {
 }
 
 int main(int argc, char** argv) {
+    // A process that tries one format ends by itself if anything in it hangs, the loading of the
+    // library included: whoever waits for it, the survey or the app, must not wait for ever
+    if (argc > 1) {
+        alarm(env_u32("NQ_TIMEOUT", 300));
+    }
     g_rows = env_u32("NQ_ROWS", g_rows);
     g_cols = env_u32("NQ_COLS", g_cols);
+    g_chain = env_u32("NQ_CHAIN", 0) != 0;
+    if (g_chain && g_rows != g_cols) {
+        out("NQ_CHAIN pide capas cuadradas: NQ_ROWS y NQ_COLS iguales (son %u y %u)", g_rows, g_cols);
+        return 1;
+    }
+    if (g_chain) {
+        g_w_std = 1.0f / sqrtf((float)g_cols);
+    }
     g_layers = env_u32("NQ_LAYERS", g_layers);
     if (g_layers < 1 || g_layers > 16) {
         g_layers = 4;
@@ -791,8 +892,9 @@ int main(int argc, char** argv) {
             version.minor, version.patch, platform ? platform : "(sin MTKNN_ADAPTER_DLA_PLATFORM)",
             g_rows, g_cols, g_layers);
     } else if (!only) {
-        out("Neuron %u.%u.%u | dispositivos: %s| capa %u x %u, %u por grafo | MDLA %s", version.major,
-            version.minor, version.patch, names, g_rows, g_cols, g_layers,
+        out("Neuron %u.%u.%u | dispositivos: %s| capa %u x %u, %u por grafo %s | MDLA %s",
+            version.major, version.minor, version.patch, names, g_rows, g_cols, g_layers,
+            g_chain ? "en cadena" : "lado a lado",
             mdla ? "encontrado" : "NO encontrado: se compila sin forzar dispositivo");
     }
     if (!only) {
@@ -804,8 +906,6 @@ int main(int argc, char** argv) {
     // With a format name this process tries it, without options, with them, or both
     const char* which = argc > 2 ? argv[2] : NULL;
     if (only) {
-        // A compiler that hangs must not hold the rest of the survey: the attempt ends by itself
-        alarm(env_u32("NQ_TIMEOUT", 300));
         for (size_t i = 0; i < FORMAT_COUNT; i++) {
             const Format* f = &FORMATS[i];
             if (strcmp(only, f->name) != 0) {
@@ -836,10 +936,15 @@ int main(int argc, char** argv) {
                 continue;
             }
             fflush(stdout);
+            const pid_t survey = getpid();
             const pid_t child = fork();
             if (child == 0) {
-                // if this process is stopped, the attempt in course must not stay behind
+                // if this process is stopped, the attempt in course must not stay behind: not
+                // even when it was stopped before the line above took effect
                 prctl(PR_SET_PDEATHSIG, SIGKILL);
+                if (getppid() != survey) {
+                    _exit(0);
+                }
                 execl("/proc/self/exe", "neuron_quant_probe", f->name, pass ? "con" : "sin",
                       (char*)NULL);
                 // where /proc/self/exe cannot be run, the path this program was started with
