@@ -24,7 +24,7 @@
 // Environment: NQ_ROWS and NQ_COLS (default 8960 x 1536, the up projection of Qwen 2.5 1.5B),
 // NQ_LAYERS (default 4 layers side by side in one graph), NQ_OPTS (compiler options for the second
 // pass, "none" to skip it), NQ_PASS ("sin" or "con" for one pass of the whole survey), NQ_TIMEOUT
-// (seconds an attempt may take, default 300).
+// (seconds an attempt may take, default 300), NQ_RUNS (timed executions of every graph, default 40).
 //
 // Type codes and prototypes are the ones of NeuronAdapter.h, NeuroPilot 8.
 //
@@ -36,12 +36,14 @@
 #endif
 #include <dlfcn.h>
 #include <math.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -132,6 +134,7 @@ static int (*NeuronExecution_compute)(NeuronExecution*);
 static void* g_lib;
 // On a PC there is no accelerator: the graphs are compiled for the chip and nothing is executed
 static bool g_host;
+static const char* g_self = ""; // the path this program was started with
 
 // Every line is flushed so a crash inside the vendor library still shows the last step reached
 static void out(const char* fmt, ...) {
@@ -312,6 +315,14 @@ static const char* const LLM_OPTIONS = "--option-bundle=llm_gen_accuracy";
 #define OUT_MAX 4.0f
 
 static uint32_t g_rows = 8960, g_cols = 1536, g_layers = 4;
+
+#define MAX_RUNS 4000
+static uint32_t g_runs = 40; // timed executions of every graph
+
+static int by_time(const void* a, const void* b) {
+    const double x = *(const double*)a, y = *(const double*)b;
+    return x < y ? -1 : x > y;
+}
 
 static size_t act_bytes(const Format* f) {
     return f->act_bits == 16 ? 2 : f->act_bits == 8 ? 1 : 4;
@@ -630,9 +641,12 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
         }
     }
 
-    double sum_ms = 0.0;
+    // The first runs warm the driver up. Of the rest, the least is what the accelerator can do and
+    // the median what it usually does: a mean is moved by a few slow runs
+    enum { WARMUP = 3 };
+    double times[MAX_RUNS];
     int runs = 0;
-    for (int r = 0; r < 23 && !e; r++) {
+    for (int r = 0; r < WARMUP + (int)g_runs && !e; r++) {
         NeuronExecution* x = NULL;
         e = NeuronExecution_create(c, &x);
         if (!e) {
@@ -646,9 +660,8 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
         if (!e) {
             e = NeuronExecution_compute(x);
         }
-        if (!e && r >= 3) {
-            sum_ms += now_ms() - a;
-            runs++;
+        if (!e && r >= WARMUP) {
+            times[runs++] = now_ms() - a;
         }
         if (x) {
             NeuronExecution_free(x);
@@ -686,10 +699,12 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
         out("%s | MDLA soporta %u/%u | compila en %.0f ms | la ejecucion FALLA (%d)", head, yes, ops,
             compile_ms, e);
     } else {
+        qsort(times, (size_t)runs, sizeof times[0], by_time);
         out("%s | MDLA soporta %u/%u | compila en %.0f ms | red compilada %.1f MB = %.2f bytes por peso "
-            "(codigo %d) | %.3f ms por ejecucion de %.0f M de pesos | error relativo %.4f",
-            head, yes, ops, compile_ms, dla / 1048576.0, dla / total, de, runs ? sum_ms / runs : 0.0,
-            total / 1e6, ref2 > 0.0 ? sqrt(err2 / ref2) : -1.0);
+            "(codigo %d) | minimo %.3f ms, mediana %.3f ms por ejecucion de %.0f M de pesos "
+            "(%d medidas) | error relativo %.4f",
+            head, yes, ops, compile_ms, dla / 1048576.0, dla / total, de, runs ? times[0] : 0.0,
+            runs ? times[runs / 2] : 0.0, total / 1e6, runs, ref2 > 0.0 ? sqrt(err2 / ref2) : -1.0);
     }
     free(in);
     free(got);
@@ -716,6 +731,11 @@ int main(int argc, char** argv) {
     if (g_layers < 1 || g_layers > 16) {
         g_layers = 4;
     }
+    g_runs = env_u32("NQ_RUNS", g_runs);
+    if (g_runs < 1 || g_runs > MAX_RUNS) {
+        g_runs = 40;
+    }
+    g_self = argv[0];
     const char* opts = getenv("NQ_OPTS");
     if (!opts || !*opts) {
         opts = LLM_OPTIONS;
@@ -818,8 +838,12 @@ int main(int argc, char** argv) {
             fflush(stdout);
             const pid_t child = fork();
             if (child == 0) {
+                // if this process is stopped, the attempt in course must not stay behind
+                prctl(PR_SET_PDEATHSIG, SIGKILL);
                 execl("/proc/self/exe", "neuron_quant_probe", f->name, pass ? "con" : "sin",
                       (char*)NULL);
+                // where /proc/self/exe cannot be run, the path this program was started with
+                execl(g_self, "neuron_quant_probe", f->name, pass ? "con" : "sin", (char*)NULL);
                 _exit(127);
             }
             int status = 0;

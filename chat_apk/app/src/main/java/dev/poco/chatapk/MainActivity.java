@@ -664,25 +664,45 @@ public class MainActivity extends Activity {
             for (int i = 1; i < parts.length && i < 3; i++) {
                 cmd.add(parts[i]);
             }
+            Run run = null;
             try {
                 ProcessBuilder pb = new ProcessBuilder(cmd);
                 pb.redirectErrorStream(true);
                 pb.directory(MainActivity.this.getFilesDir());
-                Process process = pb.start();
+                // La sonda ocupa el sitio de una generación: no corre junto a un modelo, y
+                // "Detener" y el cierre de la app la cortan igual que a un motor
+                synchronized (MainActivity.this) {
+                    if (current != null) {
+                        callPage("onStreamError", JSONObject.quote("Ya hay una generación en curso."));
+                        return;
+                    }
+                    run = new Run(pb.start());
+                    current = run;
+                }
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                        process.getInputStream(), StandardCharsets.UTF_8))) {
+                        run.process.getInputStream(), StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = reader.readLine()) != null) {
                         Log.d(TAG, "[SONDA] " + line);
                         callPage("onStreamChunk", JSONObject.quote(line + "\n\n"));
                     }
                 }
-                int exit = process.waitFor();
+                int exit = run.process.waitFor();
                 Log.d(TAG, "[SONDA] código de salida " + exit);
-                callPage("onStreamChunk", JSONObject.quote("(la sonda terminó con código " + exit + ")"));
+                callPage("onStreamChunk", JSONObject.quote(run.stopped
+                        ? "(sonda detenida)" : "(la sonda terminó con código " + exit + ")"));
             } catch (Exception e) {
                 Log.e(TAG, "[SONDA] no arrancó", e);
                 callPage("onStreamChunk", JSONObject.quote("No se pudo lanzar la sonda: " + e.getMessage()));
+            } finally {
+                if (run != null) {
+                    run.process.destroy();
+                    synchronized (MainActivity.this) {
+                        if (current == run) {
+                            current = null;
+                        }
+                    }
+                }
             }
             callPage("onStreamDone", "");
         }
