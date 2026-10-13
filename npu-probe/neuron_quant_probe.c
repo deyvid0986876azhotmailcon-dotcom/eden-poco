@@ -9,7 +9,9 @@
 //
 // The formats whose name starts with "f" take and give floats and keep the integers inside, between
 // a QUANTIZE and a DEQUANTIZE: what an engine needs to move one layer at a time to small weights
-// while the rest of the model stays in half precision.
+// while the rest of the model stays in half precision. The ones with a "c" before the bits write
+// the layer as a convolution of 1 x 1, as MediaTek's LLM flow does, and the ones that end in "c"
+// give the weights a scale per output row.
 //
 // Run from adb shell:
 //   ./neuron_quant_probe            every format, each attempt in its own process
@@ -60,11 +62,25 @@ enum {
     NEURON_TENSOR_INT32 = 4,
     NEURON_TENSOR_QUANT8_ASYMM = 5,
     NEURON_TENSOR_QUANT16_SYMM = 7,
+    NEURON_TENSOR_QUANT8_SYMM_PER_CHANNEL = 11,
     NEURON_TENSOR_QUANT8_SYMM = 13,
     NEURON_TENSOR_QUANT8_ASYMM_SIGNED = 14,
     NEURON_EXT_TENSOR_QUANT4_SYMM = 9005,
+    NEURON_EXT_TENSOR_QUANT4_SYMM_PER_CHANNEL = 9011,
 };
-enum { NEURON_DEQUANTIZE = 6, NEURON_FULLY_CONNECTED = 9, NEURON_QUANTIZE = 72 };
+enum {
+    NEURON_CONV_2D = 3,
+    NEURON_DEQUANTIZE = 6,
+    NEURON_FULLY_CONNECTED = 9,
+    NEURON_QUANTIZE = 72,
+};
+enum { NEURON_PADDING_VALID = 2 };
+
+typedef struct {
+    uint32_t channelDim;
+    uint32_t scaleCount;
+    const float* scales;
+} NeuronSymmPerChannelQuantParams;
 
 static int (*Neuron_getVersion)(NeuronRuntimeVersion*);
 static int (*Neuron_getDeviceCount)(uint32_t*);
@@ -74,6 +90,8 @@ static int (*NeuronModel_create)(NeuronModel**);
 static void (*NeuronModel_free)(NeuronModel*);
 static int (*NeuronModel_addOperand)(NeuronModel*, const NeuronOperandType*);
 static int (*NeuronModel_setOperandValue)(NeuronModel*, int32_t, const void*, size_t);
+static int (*NeuronModel_setOperandSymmPerChannelQuantParams)(
+        NeuronModel*, int32_t, const NeuronSymmPerChannelQuantParams*);
 static int (*NeuronModel_addOperation)(NeuronModel*, int32_t, uint32_t, const uint32_t*, uint32_t,
                                        const uint32_t*);
 static int (*NeuronModel_identifyInputsAndOutputs)(NeuronModel*, uint32_t, const uint32_t*,
@@ -127,6 +145,7 @@ static int load_symbols(void) {
     LOAD(NeuronModel_free)
     LOAD(NeuronModel_addOperand)
     LOAD(NeuronModel_setOperandValue)
+    LOAD(NeuronModel_setOperandSymmPerChannelQuantParams)
     LOAD(NeuronModel_addOperation)
     LOAD(NeuronModel_identifyInputsAndOutputs)
     LOAD(NeuronModel_relaxComputationFloat32toFloat16)
@@ -175,6 +194,8 @@ typedef struct {
     // and a DEQUANTIZE. It is how an engine that keeps the rest of the model in half precision
     // would use these weights
     bool island;
+    bool conv;        // the layer is a CONV_2D of 1 x 1 and not a FULLY_CONNECTED
+    bool per_channel; // the weights have a scale per output row
 } Format;
 
 static const Format FORMATS[] = {
@@ -202,6 +223,34 @@ static const Format FORMATS[] = {
      NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_EXT_TENSOR_QUANT4_SYMM, 4, 0, false, true},
     {"f16w4p", "entrada y salida en coma flotante, la capa en 16 bits con pesos de 4 (dos por byte)",
      NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_EXT_TENSOR_QUANT4_SYMM, 4, 0, true, true},
+    {"a16w8c", "activaciones de 16 bits, pesos de 8 bits con una escala por fila",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_TENSOR_QUANT8_SYMM_PER_CHANNEL, 8, 0, false, false,
+     false, true},
+    {"a16w4c", "activaciones de 16 bits, pesos de 4 bits con una escala por fila (uno por byte)",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_EXT_TENSOR_QUANT4_SYMM_PER_CHANNEL, 4, 0, false,
+     false, false, true},
+    {"cfp16", "convolucion de 1 x 1 en coma flotante, calculo en media precision",
+     NEURON_TENSOR_FLOAT32, 0, 0, NEURON_TENSOR_FLOAT32, 0, 0, false, false, true, false},
+    {"c16w8", "convolucion de 1 x 1, activaciones de 16 bits, pesos de 8 bits",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_TENSOR_QUANT8_SYMM, 8, 0, false, false, true, false},
+    {"c16w8c", "convolucion de 1 x 1, activaciones de 16 bits, pesos de 8 bits con una escala por fila",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_TENSOR_QUANT8_SYMM_PER_CHANNEL, 8, 0, false, false,
+     true, true},
+    {"c16w4", "convolucion de 1 x 1, activaciones de 16 bits, pesos de 4 bits (uno por byte)",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_EXT_TENSOR_QUANT4_SYMM, 4, 0, false, false, true,
+     false},
+    {"c16w4c", "convolucion de 1 x 1, 16 bits, pesos de 4 bits con una escala por fila (uno por byte)",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_EXT_TENSOR_QUANT4_SYMM_PER_CHANNEL, 4, 0, false,
+     false, true, true},
+    {"c16w4cp", "convolucion de 1 x 1, 16 bits, pesos de 4 bits con una escala por fila (dos por byte)",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_EXT_TENSOR_QUANT4_SYMM_PER_CHANNEL, 4, 0, true,
+     false, true, true},
+    {"fc16w8c", "entrada y salida en coma flotante, convolucion en 16 bits con pesos de 8 por fila",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_TENSOR_QUANT8_SYMM_PER_CHANNEL, 8, 0, false, true,
+     true, true},
+    {"fc16w4c", "entrada y salida en coma flotante, convolucion en 16 bits con pesos de 4 por fila",
+     NEURON_TENSOR_QUANT16_SYMM, 16, 0, NEURON_EXT_TENSOR_QUANT4_SYMM_PER_CHANNEL, 4, 0, false,
+     true, true, true},
 };
 #define FORMAT_COUNT (sizeof FORMATS / sizeof FORMATS[0])
 
@@ -287,9 +336,14 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
     size_t w_size = 0;
     void* w = q ? pack_weights(f, q, per_layer * L, &w_size) : NULL;
     void* bias = calloc(R, 4);
-    if (!q || !w || !bias) {
+    float* scales = malloc(R * sizeof(float));
+    if (!q || !w || !bias || !scales) {
         out("%s | sin memoria para %zu pesos", head, per_layer * L);
         return 1;
+    }
+    // Every row gets the same scale: the numbers are the ones of the format without rows
+    for (uint32_t r = 0; r < R; r++) {
+        scales[r] = w_scale;
     }
     const size_t w_layer = w_size / L;
 
@@ -299,8 +353,16 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
         out("%s | NeuronModel_create FALLO (%d)", head, e);
         return 1;
     }
-    const uint32_t in_dims[] = {1, C}, out_dims[] = {1, R}, w_dims[] = {R, C}, b_dims[] = {R};
-    const int32_t no_activation = 0;
+    // A convolution of 1 x 1 over a single position is the same sum as the fully connected layer
+    const uint32_t fc_in_dims[] = {1, C}, fc_out_dims[] = {1, R}, fc_w_dims[] = {R, C};
+    const uint32_t cv_in_dims[] = {1, 1, 1, C}, cv_out_dims[] = {1, 1, 1, R};
+    const uint32_t cv_w_dims[] = {R, 1, 1, C};
+    const uint32_t rank = f->conv ? 4 : 2;
+    const uint32_t* in_dims = f->conv ? cv_in_dims : fc_in_dims;
+    const uint32_t* out_dims = f->conv ? cv_out_dims : fc_out_dims;
+    const uint32_t* w_dims = f->conv ? cv_w_dims : fc_w_dims;
+    const uint32_t b_dims[] = {R};
+    const int32_t no_activation = 0, padding_valid = NEURON_PADDING_VALID, stride = 1;
     uint32_t next = 0;
     const char* step = "";
 #define ADD(type_, rank_, dims_, scale_, zero_)                                                    \
@@ -318,9 +380,9 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
     const bool ext_float = f->act_bits == 0 || f->island;
     uint32_t fc_in = 0; // what the layers read: the input, or the input turned into integers
     if (f->island) {
-        ADD(NEURON_TENSOR_FLOAT32, 2, in_dims, 0.0f, 0); // operand 0: the input
+        ADD(NEURON_TENSOR_FLOAT32, rank, in_dims, 0.0f, 0); // operand 0: the input
         fc_in = next;
-        ADD(f->act_type, 2, in_dims, in_scale, f->act_zero);
+        ADD(f->act_type, rank, in_dims, in_scale, f->act_zero);
         const uint32_t q_in = 0;
         if (!e) {
             e = NeuronModel_addOperation(m, NEURON_QUANTIZE, 1, &q_in, 1, &fc_in);
@@ -329,12 +391,19 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
             }
         }
     } else {
-        ADD(f->act_type, 2, in_dims, in_scale, f->act_zero); // operand 0: the input
+        ADD(f->act_type, rank, in_dims, in_scale, f->act_zero); // operand 0: the input
     }
     uint32_t outs[16];
     for (uint32_t l = 0; l < L; l++) {
         const uint32_t wi = next;
-        ADD(f->wt_type, 2, w_dims, w_scale, f->wt_zero);
+        ADD(f->wt_type, rank, w_dims, f->per_channel ? 0.0f : w_scale, f->wt_zero);
+        if (!e && f->per_channel) {
+            const NeuronSymmPerChannelQuantParams rows = {0, R, scales};
+            e = NeuronModel_setOperandSymmPerChannelQuantParams(m, (int32_t)wi, &rows);
+            if (e) {
+                step = "setOperandSymmPerChannelQuantParams";
+            }
+        }
         if (!e) {
             e = NeuronModel_setOperandValue(m, (int32_t)wi, (const uint8_t*)w + l * w_layer, w_layer);
             if (e) {
@@ -343,7 +412,8 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
         }
         const uint32_t bi = next;
         if (f->wt_bits) {
-            ADD(NEURON_TENSOR_INT32, 1, b_dims, in_scale * w_scale, 0);
+            // with a scale per row the bias takes its scales from the weights and declares none
+            ADD(NEURON_TENSOR_INT32, 1, b_dims, f->per_channel ? 0.0f : in_scale * w_scale, 0);
         } else {
             ADD(NEURON_TENSOR_FLOAT32, 1, b_dims, 0.0f, 0);
         }
@@ -359,18 +429,34 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
             e = NeuronModel_setOperandValue(m, (int32_t)ai, &no_activation, sizeof no_activation);
         }
         const uint32_t oi = next;
-        ADD(f->act_type, 2, out_dims, out_scale, f->act_zero);
+        ADD(f->act_type, rank, out_dims, out_scale, f->act_zero);
         outs[l] = oi;
-        const uint32_t op_in[] = {fc_in, wi, bi, ai};
+        uint32_t op_in[7] = {fc_in, wi, bi, ai};
+        uint32_t op_in_count = 4;
+        if (f->conv) {
+            // input, filter, bias, padding scheme, stride in x, stride in y, activation
+            for (uint32_t k = 3; k < 6; k++) {
+                op_in[k] = next;
+                ADD(NEURON_INT32, 0, NULL, 0.0f, 0);
+                if (!e) {
+                    e = NeuronModel_setOperandValue(m, (int32_t)op_in[k],
+                                                    k == 3 ? &padding_valid : &stride,
+                                                    sizeof(int32_t));
+                }
+            }
+            op_in[6] = ai;
+            op_in_count = 7;
+        }
         if (!e) {
-            e = NeuronModel_addOperation(m, NEURON_FULLY_CONNECTED, 4, op_in, 1, &oi);
+            e = NeuronModel_addOperation(m, f->conv ? NEURON_CONV_2D : NEURON_FULLY_CONNECTED,
+                                         op_in_count, op_in, 1, &oi);
             if (e) {
-                step = "addOperation FULLY_CONNECTED";
+                step = f->conv ? "addOperation CONV_2D" : "addOperation FULLY_CONNECTED";
             }
         }
         if (f->island) {
             const uint32_t fi = next;
-            ADD(NEURON_TENSOR_FLOAT32, 2, out_dims, 0.0f, 0);
+            ADD(NEURON_TENSOR_FLOAT32, rank, out_dims, 0.0f, 0);
             if (!e) {
                 e = NeuronModel_addOperation(m, NEURON_DEQUANTIZE, 1, &oi, 1, &fi);
                 if (e) {
@@ -536,6 +622,7 @@ static int run_format(const Format* f, const NeuronDevice* dev, const char* opti
     free(w);
     free(q);
     free(bias);
+    free(scales);
     return e ? 1 : 0;
 }
 
