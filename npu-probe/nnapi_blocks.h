@@ -28,7 +28,8 @@
 //   rescales: if the residual grows a lot from one layer to the next, use fewer per graph.
 //
 // NNAPI_BLOCKS=<n>        layers per graph, 0 = off. default: 4 with a checkpoint of gguf2bin.c
-// NNAPI_BACKEND=neuron   use Neuron for blocks, CPU elsewhere; default NNAPI
+// NNAPI_BACKEND=neuron   use Neuron for blocks and optional classifier; default NNAPI
+// NNAPI_HEAD_CHUNK=<n>   classifier rows per FC in a separate Neuron graph; default 0 (off)
 // NNAPI_NEURON_OPTS      optional compiler string; no compilation cache on Neuron
 // NNAPI_BLOCK_T=<n>       positions kept, default 256
 // NNAPI_BLOCK_LAYERS=<n>  only the first n layers go in graphs
@@ -238,7 +239,8 @@ static uint32_t bb_rmsnorm(BlockBuilder* b, uint32_t x, const float* weight, uin
     return bb_mul(b, normalized, bb_const(b, 1, &dim, weight, dim), 2, xd);
 }
 
-static uint32_t bb_linear(BlockBuilder* b, BlockGraph* bg, uint32_t x, MatmulGraph* g, float scale, const float* bias) {
+static uint32_t bb_linear_zeros(BlockBuilder* b, BlockGraph* bg, uint32_t x, MatmulGraph* g,
+                                float scale, const float* bias, const float* zeros) {
     // (W @ x + bias) * scale, with x of shape (1,n) and the result (1,d).
     // W comes as the 8-bit weights of prepare_weights_8bit: row i is m[i] * q, stored as
     // q + 128 on NNAPI or signed q on Neuron, and g->row_scale[i] is 127 * m[i]. The tensor takes the
@@ -264,7 +266,7 @@ static uint32_t bb_linear(BlockBuilder* b, BlockGraph* bg, uint32_t x, MatmulGra
           : block_api.Model_setOperandValue(b->model, (int32_t)w8, g->w8, (size_t)d * n);
     if (!b->e) { b->e = e; }
     uint32_t w = nn.neuron ? w8 : bb_op(b, ANEURALNETWORKS_DEQUANTIZE, 1, &w8, bb_tensor(b, 2, wd));
-    uint32_t fc_in[] = {x, w, bb_const(b, 1, bd, blk.zeros, d), bb_int(b, 0)};
+    uint32_t fc_in[] = {x, w, bb_const(b, 1, bd, zeros, d), bb_int(b, 0)};
     uint32_t out = bb_op(b, ANEURALNETWORKS_FULLY_CONNECTED, 4, fc_in, bb_tensor(b, 2, od));
     out = bb_mul(b, out, bb_const(b, 2, od, rows, d), 2, od);
     if (bias) {
@@ -273,6 +275,10 @@ static uint32_t bb_linear(BlockBuilder* b, BlockGraph* bg, uint32_t x, MatmulGra
         out = bb_add(b, out, bb_const(b, 2, od, scaled, d), 2, od);
     }
     return out;
+}
+
+static uint32_t bb_linear(BlockBuilder* b, BlockGraph* bg, uint32_t x, MatmulGraph* g, float scale, const float* bias) {
+    return bb_linear_zeros(b, bg, x, g, scale, bias, blk.zeros);
 }
 
 static uint32_t bb_layer(BlockBuilder* b, BlockGraph* bg, Transformer* t, int l, uint32_t x, uint32_t alpha,
@@ -406,6 +412,7 @@ static int blocks_finish(BlockGraph* bg, const uint8_t* token) {
 }
 
 static void blocks_compile(Transformer* t, BlockGraph* bg) {
+    setup_begin();
     static bool takes[BLOCK_MAX_OPS];
     BlockBuilder b;
     double start = now_ms();
@@ -451,6 +458,7 @@ static void blocks_compile(Transformer* t, BlockGraph* bg) {
     if (e) {
         fprintf(stderr, "nnapi: blocks: layers %d to %d did not compile for %s (error %d), they stay on the CPU\n",
                 bg->first, bg->first + bg->count - 1, nn.device_name, e);
+        setup_end();
         return;
     }
     bg->state = 1;
@@ -466,9 +474,10 @@ static void blocks_compile(Transformer* t, BlockGraph* bg) {
             fprintf(stderr, "nnapi: blocks: neuron compiled network size unavailable\n");
         }
     }
+    setup_end();
 }
 
-static void blocks_setup(Transformer* t) {
+static void blocks_setup_impl(Transformer* t) {
     Config* p = &t->config;
     TransformerWeights* w = &t->weights;
     blk.state = -1;
@@ -587,6 +596,12 @@ static void blocks_setup(Transformer* t) {
             blk.layers - blk.first, blk.n_groups, nn.device_name, blk.T);
 }
 
+static void blocks_setup(Transformer* t) {
+    setup_begin();
+    blocks_setup_impl(t);
+    setup_end();
+}
+
 static void blocks_position(Transformer* t, int pos) {
     // what every graph gets for this position, besides the residual
     Config* p = &t->config;
@@ -627,6 +642,7 @@ static void blocks_position(Transformer* t, int pos) {
 
 static int blocks_run(Transformer* t, BlockGraph* bg, float alpha) {
     // an execution is single use: what is kept between calls is the compilation
+    double start = now_ms();
     Config* p = &t->config;
     size_t dim = p->dim, kvh = p->n_kv_heads, head_size = dim / p->n_heads;
     size_t kv_dim = kvh * head_size;
@@ -654,6 +670,7 @@ static int blocks_run(Transformer* t, BlockGraph* bg, float alpha) {
     }
     if (!e) { e = block_api.Execution_compute(execution); }
     if (execution) { block_api.Execution_free(execution); }
+    speed.apu_ms += now_ms() - start;
     return e;
 }
 
@@ -837,4 +854,197 @@ static void blocks_free(void) {
     free(blk.v);
     free(blk.rot);
     free(blk.mask);
+}
+
+// ---- optional classifier: one graph, several FC outputs in vocabulary order
+
+static struct {
+    int state, chunk, chunks;
+    BlockGraph graph;
+    MatmulGraph weights;
+    float* ref;
+    long runs, verified, matched;
+    double run_ms, rel_sum, rel_max;
+} head;
+
+static void head_free(void) {
+    BlockGraph* bg = &head.graph;
+    if (bg->compilation) { block_api.Compilation_free(bg->compilation); }
+    if (bg->model) { block_api.Model_free(bg->model); }
+    for (int i = 0; i < bg->n_owned; i++) { free(bg->owned[i]); }
+    free(bg->owned);
+    memset(bg, 0, sizeof *bg);
+    free(head.weights.w8);
+    free(head.weights.row_scale);
+    free(head.ref);
+    head.weights.w8 = NULL;
+    head.weights.row_scale = NULL;
+    head.ref = NULL;
+}
+
+static void head_setup(Transformer* t) {
+    head.state = -1;
+    const char* value = getenv("NNAPI_HEAD_CHUNK");
+    if (!value || !*value) { return; }
+    char* end;
+    errno = 0;
+    long chunk = strtol(value, &end, 10);
+    if (errno || *end || chunk < 0 || chunk > INT_MAX) {
+        fprintf(stderr, "nnapi: head: invalid NNAPI_HEAD_CHUNK, chunked classifier disabled\n");
+        return;
+    }
+    if (!chunk) { return; }
+    setup_begin();
+    if (nn.state == 0) { nnapi_setup(); }
+    if (nn.state < 0 || !nn.neuron) {
+        fprintf(stderr, "nnapi: head: requires available neuron backend, classifier uses existing path\n");
+        setup_end();
+        return;
+    }
+    double start = now_ms();
+    MatmulGraph* g = &head.weights;
+    g->w = t->weights.wcls;
+    g->n = t->config.dim;
+    g->d = t->config.vocab_size;
+    head.chunk = chunk < g->d ? (int)chunk : g->d;
+    head.chunks = 1 + (g->d - 1) / head.chunk;
+    size_t bytes = (size_t)g->n * g->d;
+    // Independent RAM weights keep the existing per-matrix file numbering unchanged.
+    g->w8 = malloc(bytes);
+    g->row_scale = malloc((size_t)g->d * sizeof(float));
+    head.ref = nn.verify ? malloc((size_t)g->d * sizeof(float)) : NULL;
+    uint32_t* outputs = malloc((size_t)head.chunks * sizeof(uint32_t));
+    bool* takes = malloc((size_t)head.chunks * 2 * sizeof(bool));
+    float* zeros = calloc(head.chunk, sizeof(float));
+    int e = 0;
+    if (!g->w8 || !g->row_scale || (nn.verify && !head.ref) || !outputs || !takes || !zeros) {
+        e = -1;
+    }
+    if (!e) {
+        make_weights_8bit(g, g->w8);
+        scale_rows(g);
+        for (size_t i = 0; i < bytes; i++) {
+            ((int8_t*)g->w8)[i] = (int8_t)((int)g->w8[i] - Q8_ZERO);
+        }
+    }
+    nn.weights_ms += now_ms() - start;
+    start = now_ms();
+    BlockGraph* bg = &head.graph;
+    BlockBuilder b = {.owner = bg};
+    uint32_t input = 0;
+    if (!e) { e = block_api.Model_create(&bg->model); }
+    if (!e && !bg->model) { e = -1; }
+    if (!e) {
+        b.model = bg->model;
+        uint32_t dims[] = {1, (uint32_t)g->n};
+        input = bb_tensor(&b, 2, dims);
+        for (int i = 0; i < head.chunks && !b.e; i++) {
+            int row = i * head.chunk;
+            MatmulGraph slice = {.n = g->n, .d = g->d - row < head.chunk ? g->d - row : head.chunk,
+                                 .w8 = g->w8 + (size_t)row * g->n, .row_scale = g->row_scale + row};
+            outputs[i] = bb_linear_zeros(&b, bg, input, &slice, 1.0f, NULL, zeros);
+        }
+        e = b.e;
+    }
+    if (!e) { e = block_api.Model_identifyInputsAndOutputs(bg->model, 1, &input, head.chunks, outputs); }
+    if (!e) { e = block_api.Model_relaxComputationFloat32toFloat16(bg->model, true); }
+    if (!e) { e = block_api.Model_finish(bg->model); }
+    if (!e) {
+        const ANeuralNetworksDevice* const one[] = {nn.device};
+        if (!block_api.Model_getSupportedOperationsForDevices(bg->model, one, 1, takes)) {
+            uint32_t supported = 0;
+            for (uint32_t i = 0; i < b.n_ops; i++) { supported += takes[i] ? 1 : 0; }
+            fprintf(stderr, "nnapi: head: %s supports %u/%u operations\n", nn.device_name, supported, b.n_ops);
+            if (supported != b.n_ops) { e = -1; }
+        }
+    }
+    if (!e) { e = blocks_finish(bg, NULL); }
+    double elapsed = now_ms() - start;
+    nn.compile_ms += elapsed;
+    free(outputs);
+    free(takes);
+    free(zeros);
+    if (e) {
+        fprintf(stderr, "nnapi: head: graph with %d chunks of up to %d rows did not compile (error %d), classifier stays on CPU\n",
+                head.chunks, head.chunk, e);
+        head_free();
+    } else {
+        head.state = 1;
+        fprintf(stderr, "nnapi: head: %zu signed weight bytes in RAM (not cached)\n", bytes);
+        fprintf(stderr, "nnapi: head: %d x %d in one neuron graph, %d chunks of up to %d rows, compiled in %.0f ms\n",
+                g->d, g->n, head.chunks, head.chunk, elapsed);
+        size_t network_bytes = 0;
+        if (block_api.Compilation_getCompiledNetworkSize
+            && !block_api.Compilation_getCompiledNetworkSize(bg->compilation, &network_bytes)) {
+            fprintf(stderr, "nnapi: head: compiled network: %zu bytes\n", network_bytes);
+        }
+    }
+    setup_end();
+}
+
+static int head_forward(Transformer* t, float* x, float* logits, int pos) {
+    if (head.state == 0) { head_setup(t); }
+    if (head.state < 0) { return 0; }
+    MatmulGraph* g = &head.weights;
+    // x already includes final RMSNorm; each output includes its row correction.
+    double start = now_ms();
+    ANeuralNetworksExecution* execution = NULL;
+    int e = block_api.Execution_create(head.graph.compilation, &execution);
+    if (!e) { e = block_api.Execution_setInput(execution, 0, NULL, x, (size_t)g->n * sizeof(float)); }
+    for (int i = 0; i < head.chunks && !e; i++) {
+        int row = i * head.chunk;
+        int rows = g->d - row < head.chunk ? g->d - row : head.chunk;
+        e = block_api.Execution_setOutput(execution, i, NULL, logits + row, (size_t)rows * sizeof(float));
+    }
+    if (!e) { e = block_api.Execution_compute(execution); }
+    if (execution) { block_api.Execution_free(execution); }
+    double elapsed = now_ms() - start;
+    speed.apu_ms += elapsed;
+    for (int i = 0; i < g->d && !e; i++) {
+        if (!isfinite(logits[i])) { e = -1; }
+    }
+    if (e) {
+        fprintf(stderr, "nnapi: head: execution failed or non-finite logits at pos %d (error %d), classifier stays on CPU\n", pos, e);
+        head.state = -1;
+        head_free();
+        return 0;
+    }
+    head.runs++;
+    head.run_ms += elapsed;
+    if (nn.verify) {
+        matmul_cpu(head.ref, x, g->w, g->n, g->d);
+        nn.cpu_runs++;
+        double err2 = 0.0, ref2 = 0.0;
+        int apu_max = 0, cpu_max = 0;
+        for (int i = 0; i < g->d; i++) {
+            double err = (double)logits[i] - head.ref[i];
+            err2 += err * err;
+            ref2 += (double)head.ref[i] * head.ref[i];
+            if (logits[i] > logits[apu_max]) { apu_max = i; }
+            if (head.ref[i] > head.ref[cpu_max]) { cpu_max = i; }
+        }
+        double rel = ref2 > 0.0 ? sqrt(err2 / ref2) : (err2 == 0.0 ? 0.0 : INFINITY);
+        head.verified++;
+        head.matched += apu_max == cpu_max;
+        head.rel_sum += rel;
+        if (rel > head.rel_max) { head.rel_max = rel; }
+        fprintf(stderr, "nnapi: head: verify: pos %d relative error %.6f%%, argmax APU %d CPU %d match %s\n",
+                pos, rel * 100.0, apu_max, cpu_max, apu_max == cpu_max ? "yes" : "no");
+        // Verification follows the CPU trajectory, as block verification does.
+        memcpy(logits, head.ref, (size_t)g->d * sizeof(float));
+    } else {
+        nn.nnapi_runs++;
+        nn.run_ms += elapsed;
+    }
+    return 1;
+}
+
+static void head_report(void) {
+    if (!head.chunks) { return; }
+    fprintf(stderr, "nnapi: head: %s, %ld executions at %.3f ms each\n",
+            head.state == 1 ? "neuron" : "CPU fallback", head.runs, head.runs ? head.run_ms / head.runs : 0.0);
+    if (head.verified) {
+        fprintf(stderr, "nnapi: head: verify: relative error %.6f%% average, %.6f%% worst, argmax matched %ld/%ld\n",
+                100.0 * head.rel_sum / head.verified, 100.0 * head.rel_max, head.matched, head.verified);
+    }
 }

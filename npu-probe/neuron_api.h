@@ -1,4 +1,4 @@
-// Block graphs share the NNAPI ABI; Neuron prototypes and type 13 are from neuron_quant_probe.c.
+// Block and classifier graphs share the NNAPI ABI; declarations come from neuron_quant_probe.c.
 // Handles stay opaque. A process uses only one backend for these graphs.
 #ifndef NEURON_API_H
 #define NEURON_API_H

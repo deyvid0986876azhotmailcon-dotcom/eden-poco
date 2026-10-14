@@ -2,6 +2,9 @@
 /* Reads the fp32 checkpoints of run.c and the Q8_0 (int8) ones of runq.c. Besides Llama 2 it */
 /* runs the models gguf2bin.c makes a Q8_0 checkpoint of: Qwen 2 and Llama 3 (see ModelExtras) */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -13,6 +16,8 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <pthread.h>
+#include <sched.h>
 #if defined _WIN32
     #include "win.h"
 #else
@@ -408,34 +413,116 @@ void softmax(float* x, int size) {
     }
 }
 
-void matmul_cpu(float* xout, float* x, Matrix* w, int n, int d) {
+static double now_ms(void) {
+    struct timespec time;
+    clock_gettime(CLOCK_MONOTONIC, &time);
+    return time.tv_sec * 1000.0 + time.tv_nsec / 1e6;
+}
+
+static struct {
+    double cpu_ms, apu_ms, excluded_ms, setup_start;
+    int setup_depth;
+    long tokens[2]; // prompt, generation: counted by the input of each forward call
+    double ms[2], cpu[2], apu[2];
+    double start, excluded, cpu_start, apu_start;
+} speed;
+
+static void setup_begin(void) {
+    if (speed.setup_depth++ == 0) { speed.setup_start = now_ms(); }
+}
+
+static void setup_end(void) {
+    if (--speed.setup_depth == 0) { speed.excluded_ms += now_ms() - speed.setup_start; }
+}
+
+static void token_begin(void) {
+    speed.start = now_ms();
+    speed.excluded = speed.excluded_ms;
+    speed.cpu_start = speed.cpu_ms;
+    speed.apu_start = speed.apu_ms;
+}
+
+static void token_end(bool prompt) {
+    int i = prompt ? 0 : 1;
+    speed.tokens[i]++;
+    speed.ms[i] += now_ms() - speed.start - (speed.excluded_ms - speed.excluded);
+    speed.cpu[i] += speed.cpu_ms - speed.cpu_start;
+    speed.apu[i] += speed.apu_ms - speed.apu_start;
+}
+
+static double token_rate(long n, double ms) { return ms > 0.0 ? n * 1000.0 / ms : 0.0; }
+
+static void report_speed(void) {
+    long n = speed.tokens[0] + speed.tokens[1];
+    double ms = speed.ms[0] + speed.ms[1];
+    double cpu = speed.cpu[0] + speed.cpu[1], apu = speed.apu[0] + speed.apu[1];
+    fprintf(stderr, "nnapi: speed: %ld tokens in %.3f ms = %.3f tok/s (prompt %ld tokens at %.3f tok/s, generation %ld tokens at %.3f tok/s)\n",
+            n, ms, token_rate(n, ms), speed.tokens[0], token_rate(speed.tokens[0], speed.ms[0]),
+            speed.tokens[1], token_rate(speed.tokens[1], speed.ms[1]));
+    fprintf(stderr, "nnapi: time/token: APU graphs %.3f ms, CPU matmul %.3f ms, rest %.3f ms\n",
+            n ? apu / n : 0.0, n ? cpu / n : 0.0, n ? (ms - cpu - apu) / n : 0.0);
+}
+
+typedef struct {
+    float* out;
+    const float* x;
+    const Matrix* w;
+    const int8_t* xq;
+    const float* xs;
+    int n, d;
+} CpuJob;
+
+#define CPU_MAX_THREADS 8
+static struct {
+    pthread_t workers[CPU_MAX_THREADS - 1];
+    int ids[CPU_MAX_THREADS - 1];
+    pthread_mutex_t mutex;
+    pthread_cond_t work, done;
+    int threads, pending;
+    unsigned long generation;
+    bool stop;
+    CpuJob job;
+} cpu_pool = {.mutex = PTHREAD_MUTEX_INITIALIZER,
+              .work = PTHREAD_COND_INITIALIZER, .done = PTHREAD_COND_INITIALIZER};
+
+static void cpu_affinity(int id, bool single) {
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    if (single) {
+        CPU_SET(4 + id % 4, &mask);
+    } else {
+        for (int i = 4; i < 8; i++) { CPU_SET(i, &mask); }
+    }
+    if (sched_setaffinity(0, sizeof mask, &mask) != 0) {
+        fprintf(stderr, "nnapi: CPU thread %d affinity failed: %s\n", id, strerror(errno));
+    }
+}
+
+static void matmul_rows(const CpuJob* job, int first, int end) {
+    float* xout = job->out;
+    const float* x = job->x;
+    const Matrix* w = job->w;
+    int n = job->n;
     // W (d,n) @ x (n,) -> xout (d,)
-    // the original matmuls: used when NNAPI or the accelerator cannot take a matrix
     int i;
     if (w->f) {
-        // fp32 weights, as in run.c
-        #pragma omp parallel for private(i)
-        for (i = 0; i < d; i++) {
+        for (i = first; i < end; i++) {
             float val = 0.0f;
             for (int j = 0; j < n; j++) {
-                val += w->f[i * n + j] * x[j];
+                val += w->f[(size_t)i * n + j] * x[j];
             }
             xout[i] = val;
         }
         return;
     }
 
-    // Q8_0 weights, as in runq.c: x is quantized the same way and both inputs are int8
-    int8_t* xq = malloc(n * sizeof(int8_t));
-    float* xs = malloc(n / GS * sizeof(float));
-    if (!xq || !xs) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
-    quantize(xq, xs, x, n);
-    #pragma omp parallel for private(i)
-    for (i = 0; i < d; i++) {
+    const int8_t* xq = job->xq;
+    const float* xs = job->xs;
+    for (i = first; i < end; i++) {
 
         float val = 0.0f;
         int32_t ival = 0;
-        int in = i * n;
+        size_t in = (size_t)i * n;
 
         // do the matmul in groups of GS
         int j;
@@ -449,8 +536,92 @@ void matmul_cpu(float* xout, float* x, Matrix* w, int n, int d) {
 
         xout[i] = val;
     }
+}
+
+static void* cpu_worker(void* arg) {
+    int id = *(int*)arg;
+    cpu_affinity(id, true);
+    unsigned long seen = 0;
+    pthread_mutex_lock(&cpu_pool.mutex);
+    for (;;) {
+        while (!cpu_pool.stop && seen == cpu_pool.generation) {
+            pthread_cond_wait(&cpu_pool.work, &cpu_pool.mutex);
+        }
+        if (cpu_pool.stop) { break; }
+        seen = cpu_pool.generation;
+        CpuJob job = cpu_pool.job;
+        int threads = cpu_pool.threads;
+        pthread_mutex_unlock(&cpu_pool.mutex);
+        matmul_rows(&job, (int)((int64_t)job.d * id / threads),
+                    (int)((int64_t)job.d * (id + 1) / threads));
+        pthread_mutex_lock(&cpu_pool.mutex);
+        if (--cpu_pool.pending == 0) { pthread_cond_signal(&cpu_pool.done); }
+    }
+    pthread_mutex_unlock(&cpu_pool.mutex);
+    return NULL;
+}
+
+static void cpu_setup(void) {
+    if (cpu_pool.threads) { return; }
+    setup_begin();
+    const char* value = getenv("NNAPI_CPU_THREADS");
+    int threads = value ? atoi(value) : 4;
+    if (threads < 1) { threads = 1; }
+    if (threads > CPU_MAX_THREADS) { threads = CPU_MAX_THREADS; }
+    cpu_affinity(0, threads > 1);
+    cpu_pool.threads = 1;
+    for (int i = 1; i < threads; i++) {
+        cpu_pool.ids[i - 1] = i;
+        int e = pthread_create(&cpu_pool.workers[i - 1], NULL, cpu_worker, &cpu_pool.ids[i - 1]);
+        if (e) {
+            fprintf(stderr, "nnapi: CPU pthread_create failed: %s; using %d threads\n", strerror(e), cpu_pool.threads);
+            break;
+        }
+        cpu_pool.threads++;
+    }
+    fprintf(stderr, "nnapi: CPU matmul: %d threads, requested cores 4-7\n", cpu_pool.threads);
+    setup_end();
+}
+
+static void cpu_free(void) {
+    pthread_mutex_lock(&cpu_pool.mutex);
+    cpu_pool.stop = true;
+    pthread_cond_broadcast(&cpu_pool.work);
+    pthread_mutex_unlock(&cpu_pool.mutex);
+    for (int i = 1; i < cpu_pool.threads; i++) { pthread_join(cpu_pool.workers[i - 1], NULL); }
+}
+
+void matmul_cpu(float* xout, float* x, Matrix* w, int n, int d) {
+    // Only the caller owns nn/blk and dispatches jobs. Workers only write disjoint rows.
+    cpu_setup();
+    double start = now_ms();
+    int8_t* xq = NULL;
+    float* xs = NULL;
+    if (!w->f) {
+        xq = malloc(n * sizeof(int8_t));
+        xs = malloc(n / GS * sizeof(float));
+        if (!xq || !xs) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
+        quantize(xq, xs, x, n);
+    }
+    CpuJob job = {xout, x, w, xq, xs, n, d};
+    int threads = cpu_pool.threads;
+    if (threads > 1) {
+        pthread_mutex_lock(&cpu_pool.mutex);
+        cpu_pool.job = job;
+        cpu_pool.pending = threads - 1;
+        cpu_pool.generation++;
+        pthread_cond_broadcast(&cpu_pool.work);
+        pthread_mutex_unlock(&cpu_pool.mutex);
+    }
+    matmul_rows(&job, 0, d / threads);
+    if (threads > 1) {
+        pthread_mutex_lock(&cpu_pool.mutex);
+        while (cpu_pool.pending) { pthread_cond_wait(&cpu_pool.done, &cpu_pool.mutex); }
+        pthread_mutex_unlock(&cpu_pool.mutex);
+    }
     free(xq);
     free(xs);
+    speed.cpu_ms += now_ms() - start;
 }
 
 // ----------------------------------------------------------------------------
@@ -573,7 +744,7 @@ typedef struct {
 
 typedef struct {
     int state; // 0 = not set up yet, 1 = ready, -1 = unavailable
-    bool neuron; // only block graphs use Neuron; other matrices stay on the CPU
+    bool neuron; // block graphs and optional classifier use Neuron
     const ANeuralNetworksDevice* device;
     const char* device_name;
     char cache_dir[PATH_MAX]; // "" = no compilation caching
@@ -600,12 +771,6 @@ typedef struct {
 } MatmulState;
 
 static MatmulState nn;
-
-static double now_ms(void) {
-    struct timespec time;
-    clock_gettime(CLOCK_MONOTONIC, &time);
-    return time.tv_sec * 1000.0 + time.tv_nsec / 1e6;
-}
 
 static bool nnapi_load(void) {
     void* lib = dlopen("libneuralnetworks.so", RTLD_NOW);
@@ -693,7 +858,7 @@ static void weights_files_setup(void) {
     fprintf(stderr, "nnapi: 8-bit weights in %s.<matrix>\n", path);
 }
 
-static void nnapi_setup(void) {
+static void nnapi_setup_impl(void) {
     // the accelerators NNAPI lists on the Dimensity 8300; the MDLA (the APU itself) goes first
     static const char* const mtk_devices[] = {"mtk-mdla_shim", "mtk-neuron_shim"};
     const char* want = getenv("NNAPI_DEVICE");
@@ -712,7 +877,7 @@ static void nnapi_setup(void) {
         nn.verify = verify && atoi(verify) != 0;
         nn.state = 1;
         const char* opts = getenv("NNAPI_NEURON_OPTS");
-        fprintf(stderr, "nnapi: blocks: neuron options: %s; matrices outside blocks use CPU\n",
+        fprintf(stderr, "nnapi: blocks: neuron options: %s; matrices outside blocks use CPU unless NNAPI_HEAD_CHUNK is enabled\n",
                 opts && *opts ? opts : "none");
         return;
     }
@@ -761,6 +926,12 @@ static void nnapi_setup(void) {
     fprintf(stderr, "nnapi: matmul runs on %s with %s\n", nn.device_name,
             nn.q8 == Q8_DEQUANT ? "8-bit weights dequantized in the graph, fp32 input and output"
             : nn.q8 == Q8_IO ? "8-bit weights, input and output" : "fp32 weights in half precision");
+}
+
+static void nnapi_setup(void) {
+    setup_begin();
+    nnapi_setup_impl();
+    setup_end();
 }
 
 static void make_weights_8bit(MatmulGraph* g, uint8_t* w8) {
@@ -1026,6 +1197,7 @@ static MatmulGraph* matmul_graph(Matrix* w, int n, int d) {
     }
 
     // first use of this matrix: build its model and compile it, once
+    setup_begin();
     nn.graphs = realloc(nn.graphs, (nn.n_graphs + 1) * sizeof(MatmulGraph));
     void* bias = calloc(d, sizeof(float)); // zeros, be it as fp32 or as the int32 of an 8-bit graph
     if (!nn.graphs || !bias) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
@@ -1061,6 +1233,7 @@ static MatmulGraph* matmul_graph(Matrix* w, int n, int d) {
                 nn.device_name, d, n, e);
         explain_rejection(g);
     }
+    setup_end();
     return g;
 }
 
@@ -1092,12 +1265,14 @@ static void verify_matmul(float* xout, float* x, Matrix* w, int n, int d) {
 
 static int run_matmul_graph(MatmulGraph* g, const void* in, size_t in_size, void* out, size_t out_size) {
     // an execution is single use: what is kept between calls is the compilation
+    double start = now_ms();
     ANeuralNetworksExecution* execution = NULL;
     int e = ANeuralNetworksExecution_create(g->compilation, &execution);
     if (!e) { e = ANeuralNetworksExecution_setInput(execution, 0, NULL, in, in_size); }
     if (!e) { e = ANeuralNetworksExecution_setOutput(execution, 0, NULL, out, out_size); }
     if (!e) { e = ANeuralNetworksExecution_compute(execution); }
     if (execution) { ANeuralNetworksExecution_free(execution); }
+    speed.apu_ms += now_ms() - start;
     return e;
 }
 
@@ -1222,6 +1397,7 @@ void report_matmul() {
     fprintf(stderr, "nnapi: %ld matmuls on %s at %.3f ms each, %ld on the CPU\n",
             nn.nnapi_runs, nn.device_name, nn.nnapi_runs ? nn.run_ms / nn.nnapi_runs : 0.0, nn.cpu_runs);
     blocks_report();
+    head_report();
     if (nn.q8 == Q8_IO) {
         fprintf(stderr, "nnapi: %ld executions repeated because the outputs did not fit in 8 bits\n", nn.retries);
     }
@@ -1235,6 +1411,8 @@ void report_matmul() {
 
 void free_matmul() {
     // call this before the checkpoint is unmapped: the models point at the weights
+    cpu_free();
+    head_free();
     blocks_free();
     for (int i = 0; i < nn.n_graphs; i++) {
         MatmulGraph* g = &nn.graphs[i];
@@ -1424,7 +1602,9 @@ float* forward(Transformer* transformer, int token, int pos) {
     rmsnorm(x, x, w->rms_final_weight, dim);
 
     // classifier into logits
-    matmul(s->logits, x, w->wcls, p->dim, p->vocab_size);
+    if (!head_forward(transformer, x, s->logits, pos)) {
+        matmul(s->logits, x, w->wcls, p->dim, p->vocab_size);
+    }
     return s->logits;
 }
 
@@ -1815,11 +1995,12 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
     }
 
     // start the main loop
-    long start = 0;  // used to time our code, only initialized after first iteration
     int next;        // will store the next token in the sequence
     int token = prompt_tokens[0]; // kick off with the first token in the prompt
     int pos = 0;     // position in the sequence
     while (pos < steps) {
+        bool prompt_step = pos < num_prompt_tokens;
+        token_begin();
 
         // forward the transformer to get logits for the next token
         float* logits = forward(transformer, token, pos);
@@ -1835,7 +2016,7 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
         pos++;
 
         // data-dependent terminating condition: the BOS (=1) token delimits sequences
-        if (next == 1) { break; }
+        if (next == 1) { token_end(prompt_step); break; }
 
         // print the token as string, decode it with the Tokenizer object
         char* piece = decode(tokenizer, token, next);
@@ -1843,16 +2024,9 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
         fflush(stdout);
         token = next;
 
-        // init the timer here because the first iteration can be slower
-        if (start == 0) { start = time_in_ms(); }
+        token_end(prompt_step);
     }
     printf("\n");
-
-    // report achieved tok/s (pos-1 because the timer starts after first iteration)
-    if (pos > 1) {
-        long end = time_in_ms();
-        fprintf(stderr, "achieved tok/s: %f\n", (pos-1) / (double)(end-start)*1000);
-    }
 
     free(prompt_tokens);
 }
@@ -1953,6 +2127,7 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
         }
 
         // determine the token to pass into the transformer next
+        bool prompt_step = user_idx < num_prompt_tokens;
         if (user_idx < num_prompt_tokens) {
             // if we are still processing the input prompt, force the next prompt token
             token = prompt_tokens[user_idx++];
@@ -1966,7 +2141,8 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
             if (cli_user_prompt != NULL) { break; }
         }
 
-        // forward the transformer to get logits for the next token
+        // User input and prompt encoding are outside the token timer.
+        token_begin();
         float* logits = forward(transformer, token, pos);
         next = sample(sampler, logits);
         pos++;
@@ -1974,7 +2150,7 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
         if (user_idx >= num_prompt_tokens) {
             if (next == eos_token) {
                 printf("\n");
-                if (cli_user_prompt != NULL) { break; }
+                if (cli_user_prompt != NULL) { token_end(prompt_step); break; }
             } else {
                 // the Assistant is responding, so print its output
                 char* piece = decode(tokenizer, token, next);
@@ -1982,6 +2158,7 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
                 fflush(stdout);
             }
         }
+        token_end(prompt_step);
     }
     printf("\n");
     free(prompt_tokens);
@@ -2005,7 +2182,7 @@ void error_usage() {
     fprintf(stderr, "  -m <string> mode: generate|chat, default: generate\n");
     fprintf(stderr, "  -y <string> (optional) system prompt in chat mode\n");
     fprintf(stderr, "Environment:\n");
-    fprintf(stderr, "  NNAPI_BACKEND    neuron = block graphs on mtk-mdla, other matrices on CPU; default NNAPI\n");
+    fprintf(stderr, "  NNAPI_BACKEND    neuron = block/head graphs on mtk-mdla, other matrices on CPU; default NNAPI\n");
     fprintf(stderr, "  NNAPI_NEURON_OPTS  Neuron compiler options, default none; Neuron compiles each startup\n");
     fprintf(stderr, "  NNAPI_DEVICE     NNAPI device for the matmuls, default mtk-mdla_shim, then mtk-neuron_shim.\n");
     fprintf(stderr, "                   off = no NNAPI, the plain C matmul\n");
@@ -2021,6 +2198,8 @@ void error_usage() {
     fprintf(stderr, "                   default 4 with a checkpoint of gguf2bin. nnapi_blocks.h has the rest\n");
     fprintf(stderr, "  NNAPI_BLOCK_FIRST  first layer in block graphs; earlier layers use CPU, default 0\n");
     fprintf(stderr, "  NNAPI_BLOCK_EPS  1 = scale the model RMSNorm epsilon with the residual, default 0\n");
+    fprintf(stderr, "  NNAPI_CPU_THREADS  CPU matmul threads, 1-8, default 4; cores 4-7, caller included\n");
+    fprintf(stderr, "  NNAPI_HEAD_CHUNK  classifier rows per FC in one Neuron graph, default 0 (off)\n");
     exit(EXIT_FAILURE);
 }
 
@@ -2080,6 +2259,7 @@ int main(int argc, char *argv[]) {
     build_sampler(&sampler, transformer.config.vocab_size, temperature, topp, rng_seed);
 
     // run!
+    cpu_setup();
     if (strcmp(mode, "generate") == 0) {
         generate(&transformer, &tokenizer, &sampler, prompt, steps);
     } else if (strcmp(mode, "chat") == 0) {
@@ -2088,7 +2268,9 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "unknown mode: %s\n", mode);
         error_usage();
     }
+    report_speed();
     report_matmul();
+    if (nn.verify) { fprintf(stderr, "nnapi: speed includes CPU verification work\n"); }
 
     // memory and file handles cleanup
     free_matmul(); // before free_transformer: the NNAPI models point at the mapped weights
