@@ -666,7 +666,8 @@ static uint32_t bb_layer(BlockBuilder* b, BlockGraph* bg, Transformer* t, int l,
     scores = bb_add(b, scores, mask, 3, attd);
     // Restore the temperature inside stable SOFTMAX; masked logits scale too.
     uint32_t softmax_in[] = {scores, bb_float(b, 1.0f / score_gain)}; // beta
-    uint32_t weights = bb_op(b, ANEURALNETWORKS_SOFTMAX, 2, softmax_in, bb_tensor(b, 3, attd));
+    uint32_t weights = blk.ablate && strchr(blk.ablate, 'm') ? scores
+                     : bb_op(b, ANEURALNETWORKS_SOFTMAX, 2, softmax_in, bb_tensor(b, 3, attd));
     uint32_t mixed = bb_matmul(b, weights, values, false, qd);
     mixed = bb_reshape(b, mixed, 2, xd);
     // 'a': the queries in place of what the attention mixed; the scores and softmax go unused
@@ -955,7 +956,8 @@ static void blocks_setup_impl(Transformer* t) {
     blk.rescale = rescale && atoi(rescale) != 0 && !blk.renorm;
     const char* probe = getenv("NNAPI_BLOCK_PROBE");
     blk.probe = probe && atoi(probe) == 1 && !blk.rescale;
-    // letters: n = no rmsnorm, r = no RoPE, a = no attention, s = no SiLU, c = no row corrections
+    // letters: n = no rmsnorm, r = no RoPE, a = no attention, s = no SiLU, c = no row corrections,
+    // m = no softmax
     blk.ablate = getenv("NNAPI_BLOCK_ABLATE");
     if (blk.ablate && !*blk.ablate) { blk.ablate = NULL; }
     if (blk.ablate) { fprintf(stderr, "nnapi: blocks: ABLATE=%s: graphs without those parts, the text will be WRONG\n", blk.ablate); }
