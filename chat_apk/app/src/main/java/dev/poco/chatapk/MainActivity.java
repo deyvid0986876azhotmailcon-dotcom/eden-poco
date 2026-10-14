@@ -339,6 +339,11 @@ public class MainActivity extends Activity {
         } else if ("llama32_3b".equals(modelChoice)) {
             m.bin = new File(LLM_DIR + "llama3_2_3b.bin");
             m.weightsPrefix = LLM_DIR + "wf_l3/l3";
+            // Con pesos de 8 bits solo 4 de sus 7 grupos de capas entran en la memoria del driver de la
+            // APU (unos 1,6 GB); el motor deja el resto en la CPU en lugar de reiniciar el teléfono
+            m.neuronFirst = 0;
+            m.neuronRescale = 3;
+            m.steps = 192;
             File own = new File(LLM_DIR + "llama3_2_3b.bin.tokenizer");
             if (own.exists()) { m.tokenizer = own; }
         } else if ("llama2_7b".equals(modelChoice)) {
