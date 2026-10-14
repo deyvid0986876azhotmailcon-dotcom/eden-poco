@@ -1027,12 +1027,18 @@ static int prepare_weights_8bit(MatmulGraph* g) {
     g->x1 = malloc(g->n * sizeof(float));
     g->in = malloc(g->n);
     g->out = malloc(g->d);
-    if (!g->row_scale || !g->x1 || !g->in || !g->out) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
+    if (!g->row_scale || !g->x1 || !g->in || !g->out) {
+        if (nn.neuron) { return -1; }
+        fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE);
+    }
     g->att = 1.0f;
 
     if (nn.weights_path[0] == '\0') {
         g->w8 = malloc(size);
-        if (!g->w8) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
+        if (!g->w8) {
+            if (nn.neuron) { return -1; }
+            fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE);
+        }
         make_weights_8bit(g, g->w8);
         scale_rows(g);
         return 0;
@@ -1055,7 +1061,10 @@ static int prepare_weights_8bit(MatmulGraph* g) {
         // no file yet, or one made from another checkpoint: start it over
         if (fd != -1) { close(fd); }
         uint8_t* w8 = malloc(size);
-        if (!w8) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
+        if (!w8) {
+            if (nn.neuron) { return -1; }
+            fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE);
+        }
         make_weights_8bit(g, w8);
         memset(&tail, 0, sizeof tail);
         tail.made_from = nn.weights_from;
@@ -1081,7 +1090,7 @@ static int prepare_weights_8bit(MatmulGraph* g) {
     if (nn.neuron) {
         // Keep the existing unsigned file format; signed conversion happens only in RAM.
         g->w8 = malloc(size);
-        if (!g->w8) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
+        if (!g->w8) { close(fd); return -1; }
         bool read_ok = pread_all(fd, g->w8, size, 0);
         close(fd);
         return read_ok ? 0 : -1;
@@ -2203,6 +2212,8 @@ void error_usage() {
     fprintf(stderr, "Environment:\n");
     fprintf(stderr, "  NNAPI_BACKEND    neuron = block/head graphs on mtk-mdla, other matrices on CPU; default NNAPI\n");
     fprintf(stderr, "  NNAPI_NEURON_OPTS  Neuron compiler options, default none; Neuron compiles each startup\n");
+    fprintf(stderr, "  NNAPI_MEM_MARGIN_MB  Neuron available-memory margin in MiB, default 1500; stops new graphs\n");
+    fprintf(stderr, "  NNAPI_FREE_AFTER_COMPILE  Neuron: release group/head constants after finish, default 1\n");
     fprintf(stderr, "  NNAPI_DEVICE     NNAPI device for the matmuls, default mtk-mdla_shim, then mtk-neuron_shim.\n");
     fprintf(stderr, "                   off = no NNAPI, the plain C matmul\n");
     fprintf(stderr, "  NNAPI_CACHE_DIR  compilation cache directory, default ./nnapi_cache. empty = no cache\n");

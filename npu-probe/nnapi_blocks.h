@@ -32,6 +32,8 @@
 // NNAPI_BACKEND=neuron   use Neuron for blocks and optional classifier; default NNAPI
 // NNAPI_HEAD_CHUNK=<n>   classifier rows per FC in a separate Neuron graph; default 0 (off)
 // NNAPI_NEURON_OPTS      optional compiler string; no compilation cache on Neuron
+// NNAPI_FREE_AFTER_COMPILE  release Neuron constants after finish, default 1 (Neuron only)
+// NNAPI_MEM_MARGIN_MB    reserve beyond estimated peak, default 1500 MiB (Neuron only)
 // NNAPI_WEIGHT_BITS=4    W4 row MSE quantization (Neuron only); default 8
 // NNAPI_W4_MODE          hybrid (default), or calibrated QUANT16 island
 // NNAPI_W4_CALIB         island range file; absent file collects 8 CPU tokens
@@ -67,7 +69,7 @@ typedef struct {
     int state; // 0 = not built yet, 1 = ready, -1 = the device didn't take it: these layers run on the CPU
     ANeuralNetworksModel* model; // has to outlive the compilation
     ANeuralNetworksCompilation* compilation;
-    void** owned; // constants made for this graph: they have to outlive the model
+    void** owned; // Neuron constants live through finish; NNAPI retains the legacy lifetime
     int n_owned;
     long runs;
     double run_ms;
@@ -116,6 +118,7 @@ typedef struct {
 static BlockState blk;
 
 #include "nnapi_w4_calib.h"
+#include "nnapi_memory.h"
 
 // ---- building a model, one operand and one operation at a time
 
@@ -316,7 +319,7 @@ static uint32_t bb_linear_gain(BlockBuilder* b, BlockGraph* bg, uint32_t x, Matm
         uint32_t w8 = bb_operand(b, w4.enabled ? NEURON_EXT_TENSOR_QUANT4_SYMM
                                  : nn.neuron ? NEURON_TENSOR_QUANT8_SYMM : ANEURALNETWORKS_TENSOR_QUANT8_ASYMM,
                                  2, wd, tensor_scale, nn.neuron ? 0 : Q8_ZERO);
-        // g->w8 already has signed bytes on Neuron and outlives every block graph.
+        // Neuron signed bytes remain alive through Compilation_finish.
         int e = !nn.neuron && g->memory
               ? ANeuralNetworksModel_setOperandValueFromMemory(b->model, (int32_t)w8, g->memory, 0, (size_t)d * n)
               : block_api.Model_setOperandValue(b->model, (int32_t)w8, g->w8, (size_t)d * n);
@@ -754,6 +757,8 @@ static void blocks_compile(Transformer* t, BlockGraph* bg) {
     BlockBuilder b;
     double start = now_ms();
     bg->state = -1;
+    if (nn.neuron && !neuron_group_prepare(bg, true)) { setup_end(); return; }
+    start = now_ms();
     int e = blocks_build(t, bg, &b, NULL);
     if (!e && b.n_ops <= BLOCK_MAX_OPS) {
         // restricted to one device the backend has no CPU to fall back to: one operation the
@@ -771,6 +776,7 @@ static void blocks_compile(Transformer* t, BlockGraph* bg) {
         }
         if (rejected) { e = -1; }
     }
+    if (!e && nn.neuron && !neuron_mem_before_finish(neuron_group_bytes(bg))) { e = -1; }
     if (!e) {
         // the token of the compilation cache: the weights in the graph, the layers and the positions kept
         uint8_t token[CACHE_TOKEN_SIZE];
@@ -796,6 +802,11 @@ static void blocks_compile(Transformer* t, BlockGraph* bg) {
         if (w4.enabled) { fprintf(stderr, "nnapi: %s rejected by MDLA for this block; CPU fallback\n", weight_format); }
         fprintf(stderr, "nnapi: blocks: layers %d to %d did not compile for %s (error %d), they stay on the CPU\n",
                 bg->first, bg->first + bg->count - 1, nn.device_name, e);
+        if (nn.neuron) {
+            if (bg->model) { block_api.Model_free(bg->model); bg->model = NULL; }
+            neuron_constants_free(bg);
+            neuron_group_free(bg);
+        }
         setup_end();
         return;
     }
@@ -810,6 +821,17 @@ static void blocks_compile(Transformer* t, BlockGraph* bg) {
                     bg->first, bg->first + bg->count - 1, bytes);
         } else {
             fprintf(stderr, "nnapi: blocks: neuron compiled network size unavailable\n");
+        }
+        neuron_mem_charge(bg->compilation, neuron_group_bytes(bg));
+        if (neuron_mem.release) {
+            // Neuron's referenced constant buffers are needed until finish returns.
+            // Inference uses the compiled network. VERIFY/fallback use g->w in the
+            // checkpoint; calibration/probe explicitly reload their own group.
+            // Keep the opaque model handle until compilation teardown as before.
+            neuron_constants_free(bg);
+            neuron_group_free(bg);
+            fprintf(stderr, "nnapi: memory: layers %d..%d constants released after finish\n",
+                    bg->first, bg->first + bg->count - 1);
         }
     }
     setup_end();
@@ -915,22 +937,33 @@ static void blocks_setup_impl(Transformer* t) {
             g->d = ds[i];
             g->w4_id = l * BLOCK_MATRICES + i;
             // Reserve CPU matrices too: no single-matmul graphs, stable weight file indices.
-            if (l < blk.first) { continue; }
+            if (l < blk.first || nn.neuron) { continue; }
             if ((w4.enabled ? prepare_weights_4bit(g) : prepare_weights_8bit(g)) != 0) {
                 fprintf(stderr, "nnapi: blocks: no weights for a matrix of layer %d, off\n", l);
                 return;
-            }
-            if (nn.neuron && !w4.enabled) {
-                // q + 128 becomes q without requantization; preserve scales and the on-disk bytes.
-                int8_t* signed_weights = (int8_t*)g->w8;
-                for (size_t j = 0; j < (size_t)g->n * g->d; j++) {
-                    signed_weights[j] = (int8_t)((int)g->w8[j] - Q8_ZERO);
-                }
             }
         }
     }
     nn.weights_ms += now_ms() - start;
     if (blk.first >= blk.layers) { return; }
+
+    if (nn.neuron) {
+        neuron_mem_setup(t);
+        double total = 0.0, largest = 0.0, weights = 0.0;
+        for (int l = blk.first; l < blk.layers; l += blk.per_graph) {
+            BlockGraph group = {.first = l, .count = blk.layers - l < blk.per_graph ? blk.layers - l : blk.per_graph};
+            double bytes = neuron_group_bytes(&group);
+            weights += bytes;
+            total += neuron_mem_graph(bytes);
+            largest = fmax(largest, bytes);
+        }
+        fprintf(stderr, "nnapi: memory: plan: one group RAM weights up to %.1f MiB (W4 also uses one byte/weight), "
+                "all block weights %.1f MiB, all block graphs expected %.1f MiB; "
+                "groups loaded/compiled sequentially, %s\n",
+                largest / NN_MIB, weights / NN_MIB, total / NN_MIB,
+                neuron_mem.release ? "weights released after each finish" : "compiled groups retain weights by request");
+        if (!neuron_mem_admit("block setup", 0.0, false)) { return; }
+    }
 
     size_t cache = (size_t)blk.layers * p->n_kv_heads * blk.T * head_size;
     blk.kc = calloc(cache, sizeof(float));
@@ -1275,6 +1308,11 @@ static int blocks_forward(Transformer* t, unsigned long long* layer, int pos) {
     }
     if (w4.collecting) {
         setup_begin();
+        if (nn.neuron && !neuron_group_prepare(bg, false)) {
+            w4.failed = true; // Do not save a calibration missing these matrices.
+            setup_end();
+            return 0;
+        }
         BlockGraph scratch = {.first = bg->first, .count = bg->count};
         W4Replay replay = {.alpha = alpha, .epsilon = (float)((double)NORM_EPS * alpha * alpha)};
         replay.operands = calloc(BLOCK_MAX_OPS * 8, sizeof(W4Operand));
@@ -1283,6 +1321,7 @@ static int blocks_forward(Transformer* t, unsigned long long* layer, int pos) {
         for (int i = 0; i < scratch.n_owned; i++) { free(scratch.owned[i]); }
         free(scratch.owned);
         free(replay.operands);
+        if (nn.neuron) { neuron_group_free(bg); }
         if (err) {
             fprintf(stderr, "nnapi: W4 calibration replay failed in layers %d..%d; CPU fallback, no file saved\n",
                     l, l + bg->count - 1);
@@ -1294,7 +1333,12 @@ static int blocks_forward(Transformer* t, unsigned long long* layer, int pos) {
 
     // Before execution: preserves the exact input/history, and also diagnoses a graph
     // whose first execution returns non-finite values. No model or cache is mutated.
-    if (blk.probe) { blocks_probe_layer(t, bg, pos, alpha); }
+    if (blk.probe) {
+        if (!nn.neuron || !neuron_mem.release || neuron_group_prepare(bg, false)) {
+            blocks_probe_layer(t, bg, pos, alpha);
+            if (nn.neuron && neuron_mem.release) { neuron_group_free(bg); }
+        }
+    }
     double start = now_ms();
     int e = blocks_run(t, bg, alpha);
     float output_alpha = blk.rescale || blk.renorm ? blk.out_alpha : alpha;
@@ -1484,6 +1528,13 @@ static void head_setup(Transformer* t) {
         return;
     }
     size_t bytes = (size_t)g->n * g->d;
+    neuron_mem_setup(t);
+    if (!neuron_mem_admit("classifier", (double)bytes, !w4.collecting)) {
+        if (w4.collecting) { w4.failed = true; }
+        head_free();
+        setup_end();
+        return;
+    }
     if (w4.enabled) {
         g->w4_id = t->config.n_layers * BLOCK_MATRICES;
         if (!g->w8 && prepare_weights_4bit(g)) {
@@ -1551,6 +1602,7 @@ static void head_setup(Transformer* t) {
             if (supported != b.n_ops) { e = -1; }
         }
     }
+    if (!e && !neuron_mem_before_finish((double)bytes)) { e = -1; }
     if (!e) { e = blocks_finish(bg, NULL); }
     double elapsed = now_ms() - start;
     nn.compile_ms += elapsed;
@@ -1572,6 +1624,12 @@ static void head_setup(Transformer* t) {
             && !block_api.Compilation_getCompiledNetworkSize(bg->compilation, &network_bytes)) {
             fprintf(stderr, "nnapi: head: compiled network: %zu bytes\n", network_bytes);
         }
+        neuron_mem_charge(bg->compilation, (double)bytes);
+        if (neuron_mem.release) {
+            neuron_constants_free(bg);
+            neuron_weights_free(g);
+            fprintf(stderr, "nnapi: memory: classifier constants released after finish\n");
+        }
     }
     setup_end();
 }
@@ -1579,7 +1637,7 @@ static void head_setup(Transformer* t) {
 static int head_forward(Transformer* t, float* x, float* logits, int pos) {
     w4_calib_setup(t);
     if (w4.failed) { return 0; }
-    if (head.state == 0 || (head.state == 2 && !w4.collecting)) { head_setup(t); }
+    if (head.state == 0 || (head.state == 2 && (!w4.collecting || !head.weights.w8))) { head_setup(t); }
     if (head.state < 0) { return 0; }
     MatmulGraph* g = &head.weights;
     if (w4.collecting) {
@@ -1603,6 +1661,7 @@ static int head_forward(Transformer* t, float* x, float* logits, int pos) {
         for (int i = 0; i < scratch.n_owned; i++) { free(scratch.owned[i]); }
         free(scratch.owned);
         free(replay.operands);
+        neuron_weights_free(g); // Calibration streams the classifier again next token.
         if (b.e) { fprintf(stderr, "nnapi: W4 classifier calibration failed; CPU fallback\n"); w4.failed = true; }
         setup_end();
         return 0;

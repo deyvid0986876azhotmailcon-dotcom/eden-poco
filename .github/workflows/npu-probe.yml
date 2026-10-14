@@ -27,7 +27,8 @@ jobs:
           mkdir -p out lib/arm64-v8a
 
           "$CC" -O2 -Wall -DPROBE_EXE -o out/npu_probe npu_probe.c -llog -ldl -lm
-          "$CC" -O3 -Wall -o out/run_nnapi run_nnapi.c -llog -ldl -lm || true
+          # what the compiler says goes into the artifact: the build log is not readable without a login
+          "$CC" -O3 -Wall -o out/run_nnapi run_nnapi.c -llog -ldl -lm 2> out/run_nnapi.build.txt || true
           "$CC" -O2 -Wall -o out/gguf2bin gguf2bin.c -lm
           gcc -O2 -Wall -o out/gguf2bin_host gguf2bin.c -lm
           "$CC" -O2 -Wall -o out/npu_block_probe npu_block_probe.c -llog -ldl -lm
