@@ -301,6 +301,9 @@ public class MainActivity extends Activity {
         File tokenizer;       // el de ese .bin
         String weightsPrefix; // de los archivos de pesos de 8 bits que run_nnapi deja para la APU
         int steps = 64;       // tokens que run_nnapi procesa, contando los de la pregunta
+        // Capas iniciales que el motor nuevo (API Neuron, pesos de 8 bits) deja en la CPU; -1 = motor
+        // viejo sobre NNAPI. En Qwen 1.5B las tres primeras se salen del rango de la media precisión
+        int neuronFirst = -1;
     }
 
     private ModelFiles filesOf(String modelChoice) {
@@ -315,11 +318,15 @@ public class MainActivity extends Activity {
         if ("qwen15".equals(modelChoice)) {
             m.bin = new File(LLM_DIR + "qwen2.5_1.5b.bin");
             m.weightsPrefix = LLM_DIR + "wf_qwen/q15";
+            m.neuronFirst = 3;
+            m.steps = 192;
             File own = new File(LLM_DIR + "qwen2.5_1.5b.bin.tokenizer");
             if (own.exists()) { m.tokenizer = own; }
         } else if ("llama32_1b".equals(modelChoice)) {
             m.bin = new File(LLM_DIR + "llama3_2_1b.bin");
             m.weightsPrefix = LLM_DIR + "wf_l1/l1";
+            m.neuronFirst = 0;
+            m.steps = 192;
             File own = new File(LLM_DIR + "llama3_2_1b.bin.tokenizer");
             if (own.exists()) { m.tokenizer = own; }
         } else if ("llama32_3b".equals(modelChoice)) {
@@ -824,8 +831,16 @@ public class MainActivity extends Activity {
                 ProcessBuilder pb = new ProcessBuilder(cmd);
                 Map<String, String> env = pb.environment();
                 if (!llamaCpp && apu) {
-                    env.put("NNAPI_DEVICE", "mtk-mdla_shim");
-                    env.put("NNAPI_Q8", "2");
+                    if (mf.neuronFirst >= 0) {
+                        // medido en el teléfono: 7 tokens por segundo con Qwen 1.5B y 11 con Llama 1B,
+                        // y entran todas las capas, que por NNAPI no entraban
+                        env.put("NNAPI_BACKEND", "neuron");
+                        env.put("NNAPI_BLOCKS", "4");
+                        env.put("NNAPI_BLOCK_FIRST", String.valueOf(mf.neuronFirst));
+                    } else {
+                        env.put("NNAPI_DEVICE", "mtk-mdla_shim");
+                        env.put("NNAPI_Q8", "2");
+                    }
                     env.put("NNAPI_CACHE_DIR", cache.getAbsolutePath());
                     if (weightsPrefix != null) {
                         env.put("NNAPI_WEIGHTS_FILE", weightsPrefix);
