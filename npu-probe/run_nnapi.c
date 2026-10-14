@@ -721,6 +721,10 @@ typedef struct {
     ANeuralNetworksMemory* memory; // W as the graph takes it, when it is mapped from its weights file
     uint64_t hash; // of those weights, for the cache token
     float* row_scale; // (d,) what one unit of each output is worth, for an input that peaks at 1.0
+    // NNAPI_W4_GROUP: 4-bit weights with a scale per row and per block of group_cols columns,
+    // (d, n / group_cols). NULL = one scale per row
+    float* group_scale;
+    int group_cols;
     float* x1; // (n,) the input of an execution, scaled to [-1,1]
     // and this only for the all 8-bit graph
     float out_scale; // scale of the output tensor

@@ -126,6 +126,7 @@ static void neuron_mem_charge(ANeuralNetworksCompilation* compilation, double we
 static void neuron_weights_free(MatmulGraph* g) {
     free(g->w8); g->w8 = NULL;
     free(g->row_scale); g->row_scale = NULL;
+    free(g->group_scale); g->group_scale = NULL;
     free(g->x1); g->x1 = NULL;
     free(g->in); g->in = NULL;
     free(g->out); g->out = NULL;

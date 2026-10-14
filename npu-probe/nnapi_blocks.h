@@ -238,6 +238,7 @@ static const char* block_op_name(int op) {
         case ANEURALNETWORKS_CONCATENATION: return "CONCATENATION";
         case ANEURALNETWORKS_DEQUANTIZE: return "DEQUANTIZE";
         case NEURON_QUANTIZE: return "QUANTIZE";
+        case NEURON_SLICE: return "SLICE";
         case ANEURALNETWORKS_FULLY_CONNECTED: return "FULLY_CONNECTED";
         case ANEURALNETWORKS_LOGISTIC: return "LOGISTIC";
         case ANEURALNETWORKS_MUL: return "MUL";
@@ -309,12 +310,77 @@ static uint32_t bb_linear_gain(BlockBuilder* b, BlockGraph* bg, uint32_t x, Matm
             for (uint32_t i = 0; i < d; i++) {
                 double sum = 0.0;
                 const int8_t* row = (const int8_t*)g->w8 + (size_t)i * n;
-                for (uint32_t j = 0; j < n; j++) { sum += (double)row[j] * input[j]; }
+                if (g->group_scale) {
+                    // what the grouped graph gives before the row correction below: each group
+                    // at its own scale, in units of the largest one of the row
+                    uint32_t cols = (uint32_t)g->group_cols, groups = n / cols;
+                    float unit = g->row_scale[i] / 127.0f;
+                    for (uint32_t k = 0; k < groups && unit > 0.0f; k++) {
+                        double part = 0.0;
+                        for (uint32_t j = k * cols; j < (k + 1) * cols; j++) { part += (double)row[j] * input[j]; }
+                        sum += part * g->group_scale[(size_t)i * groups + k] / unit;
+                    }
+                } else {
+                    for (uint32_t j = 0; j < n; j++) { sum += (double)row[j] * input[j]; }
+                }
                 raw[i] = (float)(sum * tensor_scale);
             }
             b->e = w4_observe(g, input, raw);
         } else { b->e = -1; }
         b->replay->operands[out].data = raw;
+    } else if (w4.enabled && w4.island && g->group_scale) {
+        // NNAPI_W4_GROUP: one island per group of columns, each FULLY_CONNECTED with its own
+        // tensor scale, every row put back to its scale in that group, and the groups added up
+        W4Range* range = g->w4_id >= 0 && g->w4_id < w4.count ? &w4.ranges[g->w4_id] : NULL;
+        if (!range || !range->samples || range->hash != g->hash || gain != 1.0f) {
+            fprintf(stderr, "nnapi: W4 missing/stale calibration for grouped matrix %d; CPU fallback\n", g->w4_id);
+            b->e = -1;
+            return x;
+        }
+        float in_scale = w4_activation_scale(range->input), in_range = range->input * w4.margin;
+        uint32_t cols = (uint32_t)g->group_cols, groups = n / cols;
+        uint32_t gd[] = {d, cols}, sd[] = {1, cols};
+        out = 0;
+        for (uint32_t k = 0; k < groups && !b->e; k++) {
+            int8_t* part = block_keep_bytes(bg, (size_t)d * cols);
+            float group_largest = 0.0f;
+            int worst = 0; // the largest sum of |q| in a row: with the input range, the most the group gives
+            for (uint32_t i = 0; i < d; i++) {
+                const int8_t* src = (const int8_t*)g->w8 + (size_t)i * n + (size_t)k * cols;
+                memcpy(part + (size_t)i * cols, src, cols);
+                int total = 0;
+                for (uint32_t j = 0; j < cols; j++) { total += abs(src[j]); }
+                if (total > worst) { worst = total; }
+                group_largest = fmaxf(group_largest, g->group_scale[(size_t)i * groups + k]);
+            }
+            if (!(group_largest > 0.0f)) { group_largest = 1.0f; }
+            int32_t begin[] = {0, (int32_t)(k * cols)}, size[] = {1, (int32_t)cols};
+            uint32_t slice_in[] = {x, bb_ints(b, begin, 2), bb_ints(b, size, 2)};
+            uint32_t xk = bb_op(b, NEURON_SLICE, 3, slice_in, bb_tensor(b, 2, sd));
+            uint32_t qk = bb_op(b, NEURON_QUANTIZE, 1, &xk, bb_operand(b, NEURON_TENSOR_QUANT16_SYMM, 2, sd, in_scale, 0));
+            uint32_t wk = bb_operand(b, NEURON_EXT_TENSOR_QUANT4_SYMM, 2, gd, group_largest, 0);
+            int e = block_api.Model_setOperandValue(b->model, (int32_t)wk, part, (size_t)d * cols);
+            if (!b->e) { b->e = e; }
+            int32_t* izeros = block_keep_bytes(bg, (size_t)d * sizeof(int32_t));
+            memset(izeros, 0, (size_t)d * sizeof(int32_t));
+            uint32_t bk = bb_value(b, bb_operand(b, ANEURALNETWORKS_TENSOR_INT32, 1, bd, in_scale * group_largest, 0),
+                                   izeros, (size_t)d * sizeof(int32_t));
+            float out_scale = fmaxf(in_range * group_largest * (float)worst / 32767.0f, 1e-12f);
+            uint32_t fc_in[] = {qk, wk, bk, bb_int(b, 0)};
+            uint32_t qo = bb_op(b, ANEURALNETWORKS_FULLY_CONNECTED, 4, fc_in,
+                                bb_operand(b, NEURON_TENSOR_QUANT16_SYMM, 2, od, out_scale, 0));
+            uint32_t part_out = bb_op(b, ANEURALNETWORKS_DEQUANTIZE, 1, &qo, bb_tensor(b, 2, od));
+            float* rk = block_keep(bg, d);
+            for (uint32_t i = 0; i < d; i++) { rk[i] = g->group_scale[(size_t)i * groups + k] / group_largest * scale; }
+            part_out = bb_mul(b, part_out, bb_const(b, 2, od, rk, d), 2, od);
+            out = k ? bb_add(b, out, part_out, 2, od) : part_out;
+        }
+        if (bias) {
+            float* scaled = block_keep(bg, d);
+            for (uint32_t i = 0; i < d; i++) { scaled[i] = bias[i] * scale; }
+            out = bb_add(b, out, bb_const(b, 2, od, scaled, d), 2, od);
+        }
+        return out;
     } else {
         uint32_t w8 = bb_operand(b, w4.enabled ? NEURON_EXT_TENSOR_QUANT4_SYMM
                                  : nn.neuron ? NEURON_TENSOR_QUANT8_SYMM : ANEURALNETWORKS_TENSOR_QUANT8_ASYMM,
@@ -1537,7 +1603,12 @@ static void head_setup(Transformer* t) {
     }
     if (w4.enabled) {
         g->w4_id = t->config.n_layers * BLOCK_MATRICES;
-        if (!g->w8 && prepare_weights_4bit(g)) {
+        // the classifier is built here with one scale per row: NNAPI_W4_GROUP is for the blocks
+        int grouping = w4.group;
+        w4.group = 0;
+        int prepared = g->w8 ? 0 : prepare_weights_4bit(g);
+        w4.group = grouping;
+        if (prepared) {
             fprintf(stderr, "nnapi: W4 classifier weights unavailable; CPU fallback\n");
             head_free();
             setup_end();
