@@ -391,7 +391,7 @@ static uint32_t bb_linear_gain(BlockBuilder* b, BlockGraph* bg, uint32_t x, Matm
               : block_api.Model_setOperandValue(b->model, (int32_t)w8, g->w8, (size_t)d * n);
         if (!b->e) { b->e = e; }
         uint32_t w = nn.neuron ? w8 : bb_op(b, ANEURALNETWORKS_DEQUANTIZE, 1, &w8, bb_tensor(b, 2, wd));
-        if (g->w4 && w4.island) {
+        if ((g->w4 || w4.w8_island) && w4.island) {
             W4Range* range = g->w4_id >= 0 && g->w4_id < w4.count ? &w4.ranges[g->w4_id] : NULL;
             if (!range || !range->samples || range->hash != g->hash) {
                 fprintf(stderr, "nnapi: W4 missing/stale calibration for matrix %d; CPU fallback\n", g->w4_id);

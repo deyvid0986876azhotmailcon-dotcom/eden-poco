@@ -11,6 +11,9 @@ static struct {
     // NNAPI_W4_MATS: which matrices of a layer get 4 bits, by their place in it (0 wq, 1 wk, 2 wv,
     // 3 wo, 4 w1, 5 w3, 6 w2); NULL = all of them. The rest keep 8 bits
     const char* mats;
+    // NNAPI_W8_ISLAND=1: the 8-bit matrices also go in a 16-bit island, not as float activations with
+    // int8 weights. On the phone the all-island 4-bit graph ran 1.5 times faster than the float one
+    bool w8_island;
     int tokens, target, count;
     float margin;
     const char* path;
@@ -40,6 +43,8 @@ static bool w4_options(void) {
         return false;
     }
     if (w4.group > 0) { weight_format = "4-bit island, grouped"; }
+    const char* w8_island = getenv("NNAPI_W8_ISLAND");
+    w4.w8_island = w8_island && atoi(w8_island) != 0 && w4.island;
     w4.mats = getenv("NNAPI_W4_MATS");
     if (w4.mats && *w4.mats) { weight_format = "4-bit island for some matrices, 8-bit the rest"; }
     else { w4.mats = NULL; }
