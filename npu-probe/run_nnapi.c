@@ -459,8 +459,11 @@ static void report_speed(void) {
     fprintf(stderr, "nnapi: speed: %ld tokens in %.3f ms = %.3f tok/s (prompt %ld tokens at %.3f tok/s, generation %ld tokens at %.3f tok/s)\n",
             n, ms, token_rate(n, ms), speed.tokens[0], token_rate(speed.tokens[0], speed.ms[0]),
             speed.tokens[1], token_rate(speed.tokens[1], speed.ms[1]));
-    fprintf(stderr, "nnapi: time/token: APU graphs %.3f ms, CPU matmul %.3f ms, rest %.3f ms\n",
+    // Same prefix as throughput: callers filtering "nnapi: speed:" must retain
+    // the breakdown too. Both reports are unconditional, including zero tokens.
+    fprintf(stderr, "nnapi: speed: time/token: APU graphs %.3f ms, CPU matmul %.3f ms, rest %.3f ms\n",
             n ? apu / n : 0.0, n ? cpu / n : 0.0, n ? (ms - cpu - apu) / n : 0.0);
+    fflush(stderr);
 }
 
 typedef struct {
@@ -2198,6 +2201,7 @@ void error_usage() {
     fprintf(stderr, "                   default 4 with a checkpoint of gguf2bin. nnapi_blocks.h has the rest\n");
     fprintf(stderr, "  NNAPI_BLOCK_FIRST  first layer in block graphs; earlier layers use CPU, default 0\n");
     fprintf(stderr, "  NNAPI_BLOCK_EPS  1 = scale the model RMSNorm epsilon with the residual, default 0\n");
+    fprintf(stderr, "  NNAPI_BLOCK_RESCALE  1 = rescale residual/FFN inside each graph (fixed norm <=64, scaled epsilon), default 0\n");
     fprintf(stderr, "  NNAPI_CPU_THREADS  CPU matmul threads, 1-8, default 4; cores 4-7, caller included\n");
     fprintf(stderr, "  NNAPI_HEAD_CHUNK  classifier rows per FC in one Neuron graph, default 0 (off)\n");
     exit(EXIT_FAILURE);

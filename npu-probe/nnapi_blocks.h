@@ -24,8 +24,9 @@
 //   rmsnorm adds up squares. The residual goes in scaled to a length (L2 norm) of
 //   NNAPI_BLOCK_NORM: the sum of its squares is then 4096 whatever the model does, and their
 //   mean is not small either. The scale is an input too, to weigh what each layer adds to the
-//   residual. RMSNorm needs epsilon scaled too (NNAPI_BLOCK_EPS=1). Inside a graph nobody
-//   rescales: if the residual grows a lot from one layer to the next, use fewer per graph.
+//   residual. RMSNorm needs epsilon scaled too (NNAPI_BLOCK_EPS=1). The legacy path
+//   keeps that scale for the whole graph. RESCALE tracks a bounded vector and its
+//   inverse scale after every residual addition, and also protects the FFN.
 //
 // NNAPI_BLOCKS=<n>        layers per graph, 0 = off. default: 4 with a checkpoint of gguf2bin.c
 // NNAPI_BACKEND=neuron   use Neuron for blocks and optional classifier; default NNAPI
@@ -36,6 +37,8 @@
 // NNAPI_BLOCK_FIRST=<n>   keep layers below n on CPU, default 0; LAYERS remains the exclusive end
 // NNAPI_BLOCK_NORM=<f>    length of the residual at the input of a graph, default 64
 // NNAPI_BLOCK_EPS=1       use NORM_EPS * alpha^2 in RMSNorm, default 0 (legacy epsilon)
+// NNAPI_BLOCK_RESCALE=1   bounded residual/FFN vectors with a separate inverse scale;
+//                         implies scaled epsilon, fixes internal norm at 64, default 0
 // NNAPI_VERIFY=1          the CPU computes every group too and the difference is reported. The
 //                         text is then the one of the CPU
 
@@ -47,7 +50,7 @@ enum {
     ANEURALNETWORKS_MEAN = 31, ANEURALNETWORKS_RSQRT = 83, ANEURALNETWORKS_BATCH_MATMUL = 102,
 };
 #define BLOCK_MAX_LAYERS 8     // in one graph
-#define BLOCK_MAX_OPS 1024
+#define BLOCK_MAX_OPS 4096     // rescaled graphs have more scalar/reduction operations
 #define BLOCK_MATRICES 7       // of a layer: wq, wk, wv, wo, w1, w3, w2, in the order forward uses them
 #define BLOCK_MASKED -10000.0f // added to the score of an empty slot: its weight after the softmax is 0
 #define BLOCK_EPS 1e-5f        // legacy epsilon in scaled units
@@ -74,6 +77,7 @@ typedef struct {
     int first; // first layer eligible for graphs
     int layers; // exclusive end of layers eligible for graphs
     bool scaled_eps;
+    bool rescale;
     int T;
     float norm; // length the residual is scaled to at the input of a graph
     BlockGraph* groups;
@@ -85,6 +89,7 @@ typedef struct {
     // inputs and outputs of an execution
     float* x; // (dim,)
     float* y; // (dim,)
+    float out_alpha; // RESCALE: real output = y / out_alpha
     float* k; // (per_graph, kv_dim) keys of this position, one row per layer of the graph
     float* v;
     float* rot; // (n_kv_heads, head_size, head_size) the rotation of RoPE for position rot_pos
@@ -239,8 +244,8 @@ static uint32_t bb_rmsnorm(BlockBuilder* b, uint32_t x, const float* weight, uin
     return bb_mul(b, normalized, bb_const(b, 1, &dim, weight, dim), 2, xd);
 }
 
-static uint32_t bb_linear_zeros(BlockBuilder* b, BlockGraph* bg, uint32_t x, MatmulGraph* g,
-                                float scale, const float* bias, const float* zeros) {
+static uint32_t bb_linear_gain(BlockBuilder* b, BlockGraph* bg, uint32_t x, MatmulGraph* g,
+                               float scale, const float* bias, const float* zeros, float gain) {
     // (W @ x + bias) * scale, with x of shape (1,n) and the result (1,d).
     // W comes as the 8-bit weights of prepare_weights_8bit: row i is m[i] * q, stored as
     // q + 128 on NNAPI or signed q on Neuron, and g->row_scale[i] is 127 * m[i]. The tensor takes the
@@ -252,7 +257,7 @@ static uint32_t bb_linear_zeros(BlockBuilder* b, BlockGraph* bg, uint32_t x, Mat
     for (uint32_t i = 0; i < d; i++) {
         if (g->row_scale[i] > largest) { largest = g->row_scale[i]; }
     }
-    float tensor_scale = largest > 0.0f ? largest / 127.0f : 1.0f;
+    float tensor_scale = (largest > 0.0f ? largest / 127.0f : 1.0f) * gain;
     float* rows = block_keep(bg, d);
     for (uint32_t i = 0; i < d; i++) {
         rows[i] = g->row_scale[i] / 127.0f / tensor_scale * scale;
@@ -277,11 +282,173 @@ static uint32_t bb_linear_zeros(BlockBuilder* b, BlockGraph* bg, uint32_t x, Mat
     return out;
 }
 
+static uint32_t bb_linear_zeros(BlockBuilder* b, BlockGraph* bg, uint32_t x, MatmulGraph* g,
+                                float scale, const float* bias, const float* zeros) {
+    return bb_linear_gain(b, bg, x, g, scale, bias, zeros, 1.0f);
+}
+
 static uint32_t bb_linear(BlockBuilder* b, BlockGraph* bg, uint32_t x, MatmulGraph* g, float scale, const float* bias) {
     return bb_linear_zeros(b, bg, x, g, scale, bias, blk.zeros);
 }
 
-static uint32_t bb_layer(BlockBuilder* b, BlockGraph* bg, Transformer* t, int l, uint32_t x, uint32_t alpha,
+// RESCALE uses (z, a), real vector = z/a, ||z|| <= 64, 0 < a <= 1.
+// No new operation codes: reciprocals of POSITIVE scalars use RSQRT then MUL.
+// A small reduction floor prevents zero/denormal reductions; it does not change
+// the represented vector because every normalization also changes a.
+static uint32_t bb_number(BlockBuilder* b, float value) {
+    uint32_t one = 1;
+    return bb_const(b, 1, &one, &value, 1);
+}
+
+static uint32_t bb_reciprocal(BlockBuilder* b, uint32_t x) {
+    uint32_t one = 1;
+    uint32_t r = bb_op(b, ANEURALNETWORKS_RSQRT, 1, &x, bb_tensor(b, 1, &one));
+    return bb_mul(b, r, r, 1, &one);
+}
+
+static uint32_t bb_normalize_pair(BlockBuilder* b, uint32_t z, uint32_t* a, uint32_t dim) {
+    uint32_t xd[] = {1, dim}, one = 1;
+    int32_t axis = -1;
+    uint32_t squares = bb_mul(b, z, z, 2, xd); // sum <= 4096 BEFORE reducing
+    uint32_t args[] = {squares, bb_ints(b, &axis, 1), bb_int(b, 0)};
+    uint32_t mean = bb_op(b, ANEURALNETWORKS_MEAN, 3, args, bb_tensor(b, 1, &one));
+    mean = bb_add(b, mean, bb_number(b, 1.0f / 4096.0f), 1, &one);
+    uint32_t r = bb_op(b, ANEURALNETWORKS_RSQRT, 1, &mean, bb_tensor(b, 1, &one));
+    r = bb_mul(b, r, bb_number(b, 64.0f / sqrtf((float)dim)), 1, &one);
+    z = bb_mul(b, z, r, 2, xd);
+    *a = bb_mul(b, *a, r, 1, &one);
+    // Cap inverse scale without MAX/MIN: a/(1+a) <= 1. No squaring of a.
+    uint32_t cap = bb_reciprocal(b, bb_add(b, *a, bb_number(b, 1.0f), 1, &one));
+    *a = bb_mul(b, *a, cap, 1, &one);
+    return bb_mul(b, z, cap, 2, xd);
+}
+
+static uint32_t bb_pair_add(BlockBuilder* b, uint32_t x, uint32_t* a,
+                            uint32_t y, uint32_t c, uint32_t dim) {
+    uint32_t xd[] = {1, dim}, one = 1;
+    // Convex combination BEFORE adding: never form real y or a*y.
+    // u=c/(a+c), v=a/(a+c); z=u*x+v*y, new inverse scale=a*u.
+    uint32_t inv = bb_reciprocal(b, bb_add(b, *a, c, 1, &one));
+    uint32_t u = bb_mul(b, c, inv, 1, &one);
+    uint32_t v = bb_mul(b, *a, inv, 1, &one);
+    x = bb_add(b, bb_mul(b, x, u, 2, xd), bb_mul(b, y, v, 2, xd), 2, xd);
+    *a = bb_mul(b, *a, u, 1, &one);
+    return bb_normalize_pair(b, x, a, dim);
+}
+
+static uint32_t bb_pair_epsilon(BlockBuilder* b, uint32_t a) {
+    uint32_t one = 1;
+    uint32_t root = bb_mul(b, a, bb_number(b, sqrtf(NORM_EPS)), 1, &one);
+    return bb_mul(b, root, root, 1, &one);
+}
+
+static double bb_norm_bound(const float* weight, uint32_t dim) {
+    double largest = 0.0;
+    for (uint32_t i = 0; i < dim; i++) {
+        double v = fabs((double)weight[i]);
+        if (v > largest) { largest = v; }
+    }
+    return sqrt((double)dim) * largest;
+}
+
+// Frobenius bounds of the actual quantized matrices, BEFORE and AFTER the row
+// correction. Cauchy-Schwarz gives ||W*x|| <= ||W||F * ||x||. Read the existing
+// signed/unsigned bytes; never requantize or alter the weight-file format.
+static int bb_matrix_bounds(MatmulGraph* g, double* raw, double* corrected, double* max_row) {
+    size_t bytes = (size_t)g->n * g->d;
+    const uint8_t* data = g->w8;
+    void* mapped = MAP_FAILED;
+    if (!data) {
+        // NNAPI with weight files owns an opaque ANeuralNetworksMemory, not w8.
+        // Temporarily map the same file for the bounds, without retaining RAM weights.
+        char path[PATH_MAX];
+        snprintf(path, sizeof path, "%s.%d", nn.weights_path, (int)(g - nn.graphs));
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) { return -1; }
+        struct stat st;
+        if (fstat(fd, &st) == 0 && st.st_size >= (off_t)bytes) {
+            mapped = mmap(NULL, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
+        }
+        close(fd);
+        if (mapped == MAP_FAILED) { return -1; }
+        data = mapped;
+    }
+    double largest = 0.0, all_q2 = 0.0, real2 = 0.0;
+    *max_row = 0.0;
+    for (int i = 0; i < g->d; i++) {
+        double row = g->row_scale[i] / 127.0;
+        if (row > largest) { largest = row; }
+        uint64_t q2 = 0;
+        for (int j = 0; j < g->n; j++) {
+            size_t at = (size_t)i * g->n + j;
+            int q = nn.neuron ? ((const int8_t*)data)[at] : (int)data[at] - Q8_ZERO;
+            q2 += q * q;
+        }
+        all_q2 += (double)q2;
+        real2 += (double)q2 * row * row;
+        if ((double)q2 * row * row > *max_row) { *max_row = (double)q2 * row * row; }
+    }
+    *raw = sqrt(all_q2) * largest;
+    *corrected = sqrt(real2);
+    *max_row = sqrt(*max_row);
+    if (mapped != MAP_FAILED) { munmap(mapped, bytes); }
+    return 0;
+}
+
+// Protect the FC accumulator/output BEFORE row correction by moving a common
+// gain into the weight tensor's scale. Restoring everything after FC is too late.
+// paired=true returns a bounded vector and its inverse scale; false returns real
+// q/k/v (with bias) and a bound needed by the attention output projection.
+static uint32_t bb_safe_linear(BlockBuilder* b, BlockGraph* bg, uint32_t x, MatmulGraph* g,
+                               double input_bound, float scale, const float* bias,
+                               int paired, uint32_t* a, double* bound) {
+    // paired=2 additionally checks the real gate consumed by LOGISTIC.
+    double raw = 0.0, real = 0.0, max_row = 0.0, bias2 = 0.0;
+    if (bb_matrix_bounds(g, &raw, &real, &max_row)) {
+        fprintf(stderr, "nnapi: blocks: cannot read quantized weights for rescale bounds; CPU fallback\n");
+        if (!b->e) { b->e = -1; }
+    }
+    if (bias) {
+        for (int i = 0; i < g->d; i++) { bias2 += (double)bias[i] * bias[i]; }
+    }
+    double limit = (real * input_bound + sqrt(bias2)) * fabs((double)scale);
+    if (bound) { *bound = limit; }
+    // Factor two of headroom for fp16 rounding, and never amplify a tiny FC.
+    float output_gain = paired && limit > 32.0 ? (float)(32.0 / limit) : 1.0f;
+    double raw_limit = raw * fmax(input_bound, 1.0); // also bound dequantized weights themselves
+    float gain = raw_limit > 32.0 ? (float)(32.0 / raw_limit) : 1.0f;
+    if (gain > output_gain) { gain = output_gain; }
+    if (!isfinite(limit) || !isfinite(gain) || !(gain > 0.0f) || input_bound > 32000.0
+        || (!paired && limit > 32000.0) || output_gain * fabsf(scale) / gain > 32000.0f
+        || (paired == 2 && (max_row * input_bound + sqrt(bias2)) * fabs((double)scale) > 32000.0)
+        || (paired && output_gain < 1.0f / 16384.0f)) {
+        fprintf(stderr, "nnapi: blocks: rescale cannot safely represent FC %dx%d bound %.9g; CPU fallback\n",
+                g->d, g->n, limit);
+        if (!b->e) { b->e = -1; }
+        gain = output_gain = 1.0f; // graph will be discarded, keep construction finite
+    }
+    uint32_t z = bb_linear_gain(b, bg, x, g, scale * output_gain, bias, blk.zeros, gain);
+    if (paired) {
+        *a = bb_number(b, output_gain);
+        z = bb_normalize_pair(b, z, a, (uint32_t)g->d);
+    }
+    return z;
+}
+
+static uint32_t bb_bound_pair(BlockBuilder* b, uint32_t x, uint32_t* a, uint32_t dim, double bound) {
+    uint32_t xd[] = {1, dim};
+    float gain = bound > 32.0 ? (float)(32.0 / bound) : 1.0f;
+    if (!isfinite(bound) || gain < 1.0f / 16384.0f) {
+        fprintf(stderr, "nnapi: blocks: rescale attention bound %.9g too large; CPU fallback\n", bound);
+        if (!b->e) { b->e = -1; }
+        gain = 1.0f;
+    }
+    *a = bb_number(b, gain);
+    x = bb_mul(b, x, *a, 2, xd);
+    return bb_normalize_pair(b, x, a, dim);
+}
+
+static uint32_t bb_layer(BlockBuilder* b, BlockGraph* bg, Transformer* t, int l, uint32_t x, uint32_t* scale,
                          uint32_t epsilon, uint32_t rot, uint32_t mask, uint32_t kc, uint32_t vc,
                          uint32_t* k_out, uint32_t* v_out) {
     // layer l, from the residual x to the residual after it. the same steps as forward()
@@ -295,15 +462,30 @@ static uint32_t bb_layer(BlockBuilder* b, BlockGraph* bg, Transformer* t, int l,
     uint32_t kd[] = {KVH, 1, HD};      // the key (or value) of this position
     uint32_t alld[] = {KVH, T + 1, HD}; // and with the ones before
     uint32_t attd[] = {KVH, G, T + 1};
+    uint32_t alpha = *scale, one = 1;
     MatmulGraph* m = &nn.graphs[blk.first_matrix + BLOCK_MATRICES * l]; // wq, wk, wv, wo, w1, w3, w2
     // the scores are divided by sqrt(head_size): done on the queries, that is the same and keeps the products smaller
     float score_scale = 1.0f / sqrtf((float)HD);
 
     // attention rmsnorm and the qkv matmuls for this position
-    uint32_t xn = bb_rmsnorm(b, x, w->rms_att_weight + (size_t)l * D, D, epsilon);
-    uint32_t q = bb_linear(b, bg, xn, &m[0], score_scale, w->bq ? w->bq + (size_t)l * D : NULL);
-    uint32_t k = bb_linear(b, bg, xn, &m[1], 1.0f, w->bk ? w->bk + (size_t)l * KD : NULL);
-    uint32_t v = bb_linear(b, bg, xn, &m[2], 1.0f, w->bv ? w->bv + (size_t)l * KD : NULL);
+    if (blk.rescale) { epsilon = bb_pair_epsilon(b, alpha); }
+    const float* aw = w->rms_att_weight + (size_t)l * D;
+    uint32_t xn = bb_rmsnorm(b, x, aw, D, epsilon);
+    const float* qb = w->bq ? w->bq + (size_t)l * D : NULL;
+    const float* kb = w->bk ? w->bk + (size_t)l * KD : NULL;
+    const float* vb = w->bv ? w->bv + (size_t)l * KD : NULL;
+    uint32_t q, k, v;
+    double q_bound = 0.0, k_bound = 0.0, v_bound = 0.0;
+    if (blk.rescale) {
+        double input_bound = bb_norm_bound(aw, D);
+        q = bb_safe_linear(b, bg, xn, &m[0], input_bound, score_scale, qb, 0, NULL, &q_bound);
+        k = bb_safe_linear(b, bg, xn, &m[1], input_bound, 1.0f, kb, 0, NULL, &k_bound);
+        v = bb_safe_linear(b, bg, xn, &m[2], input_bound, 1.0f, vb, 0, NULL, &v_bound);
+    } else {
+        q = bb_linear(b, bg, xn, &m[0], score_scale, qb);
+        k = bb_linear(b, bg, xn, &m[1], 1.0f, kb);
+        v = bb_linear(b, bg, xn, &m[2], 1.0f, vb);
+    }
     q = bb_reshape(b, q, 3, qd);
     k = bb_reshape(b, k, 3, kd);
     v = bb_reshape(b, v, 3, kd);
@@ -317,12 +499,61 @@ static uint32_t bb_layer(BlockBuilder* b, BlockGraph* bg, Transformer* t, int l,
     uint32_t keys = bb_op(b, ANEURALNETWORKS_CONCATENATION, 3, keys_in, bb_tensor(b, 3, alld));
     uint32_t values_in[] = {vc, v, bb_int(b, 1)};
     uint32_t values = bb_op(b, ANEURALNETWORKS_CONCATENATION, 3, values_in, bb_tensor(b, 3, alld));
+    float score_gain = 1.0f;
+    if (blk.rescale) {
+        double score_bound = q_bound * k_bound;
+        if (score_bound > 8192.0) { score_gain = (float)(8192.0 / score_bound); }
+        if (!isfinite(score_gain) || score_gain < 1.0f / 16384.0f) {
+            fprintf(stderr, "nnapi: blocks: rescale score bound %.9g too large; CPU fallback\n", score_bound);
+            if (!b->e) { b->e = -1; }
+            score_gain = 1.0f;
+        }
+        q = bb_mul(b, q, bb_number(b, score_gain), 3, qd);
+        uint32_t maskd[] = {1, 1, T + 1};
+        mask = bb_mul(b, mask, bb_number(b, score_gain), 3, maskd);
+    }
     uint32_t scores = bb_matmul(b, q, keys, true, attd);
     scores = bb_add(b, scores, mask, 3, attd);
-    uint32_t softmax_in[] = {scores, bb_float(b, 1.0f)}; // beta
+    // Restore the temperature inside stable SOFTMAX; masked logits scale too.
+    uint32_t softmax_in[] = {scores, bb_float(b, 1.0f / score_gain)}; // beta
     uint32_t weights = bb_op(b, ANEURALNETWORKS_SOFTMAX, 2, softmax_in, bb_tensor(b, 3, attd));
     uint32_t mixed = bb_matmul(b, weights, values, false, qd);
     mixed = bb_reshape(b, mixed, 2, xd);
+
+    if (blk.rescale) {
+        uint32_t am, aa, ag, au, ad;
+        // Each attention head can select a DIFFERENT token. Bound each head by
+        // the full V bound, then account for all query heads, including GQA.
+        mixed = bb_bound_pair(b, mixed, &am, D, sqrt((double)p->n_heads) * v_bound);
+        uint32_t attended = bb_safe_linear(b, bg, mixed, &m[3], 64.0, 1.0f, NULL, 1, &aa, NULL);
+        aa = bb_mul(b, aa, am, 1, &one);
+        uint32_t h = bb_pair_add(b, x, &alpha, attended, aa, D);
+        epsilon = bb_pair_epsilon(b, alpha);
+        const float* fw = w->rms_ffn_weight + (size_t)l * D;
+        uint32_t hn = bb_rmsnorm(b, h, fw, D, epsilon);
+        double input_bound = bb_norm_bound(fw, D);
+        uint32_t gate = bb_safe_linear(b, bg, hn, &m[4], input_bound, 1.0f, NULL, 2, &ag, NULL);
+        uint32_t up = bb_safe_linear(b, bg, hn, &m[5], input_bound, 1.0f, NULL, 1, &au, NULL);
+        uint32_t real_gate = bb_mul(b, gate, bb_reciprocal(b, ag), 2, fd);
+        uint32_t sigmoid = bb_op(b, ANEURALNETWORKS_LOGISTIC, 1, &real_gate, bb_tensor(b, 2, fd));
+        // ||gate||,||up||<=64. Divide EACH by 8 BEFORE their product: hidden
+        // has norm <=64, including with a single large outlier coordinate.
+        gate = bb_mul(b, gate, bb_number(b, 0.125f), 2, fd);
+        up = bb_mul(b, up, bb_number(b, 0.125f), 2, fd);
+        uint32_t hidden = bb_mul(b, bb_mul(b, gate, sigmoid, 2, fd), up, 2, fd);
+        // This pair represents real SwiGLU / 64. Carry that fixed factor through
+        // the linear down projection, rather than underflow ag*au/64 here.
+        uint32_t ah = bb_mul(b, ag, au, 1, &one);
+        hidden = bb_normalize_pair(b, hidden, &ah, F);
+        uint32_t down = bb_safe_linear(b, bg, hidden, &m[6], 64.0, 1.0f, NULL, 1, &ad, NULL);
+        ad = bb_mul(b, ad, ah, 1, &one);
+        ad = bb_mul(b, ad, bb_number(b, 1.0f / 64.0f), 1, &one);
+        x = bb_pair_add(b, h, &alpha, down, ad, D);
+        *scale = alpha;
+        *k_out = k;
+        *v_out = v;
+        return x;
+    }
 
     // final matmul to get the output of the attention, and the residual connection
     uint32_t attended = bb_linear(b, bg, mixed, &m[3], 1.0f, NULL);
@@ -351,7 +582,7 @@ static int blocks_build(Transformer* t, BlockGraph* bg, BlockBuilder* b) {
     uint32_t D = (uint32_t)p->dim, T = (uint32_t)blk.T;
     uint32_t KVH = (uint32_t)p->n_kv_heads, HD = D / (uint32_t)p->n_heads;
     uint32_t xd[] = {1, D}, single = 1, rotd[] = {KVH, HD, HD}, maskd[] = {1, 1, T + 1}, cached[] = {KVH, T, HD};
-    uint32_t in[5 + 2 * BLOCK_MAX_LAYERS], out[1 + 2 * BLOCK_MAX_LAYERS];
+    uint32_t in[5 + 2 * BLOCK_MAX_LAYERS], out[2 + 2 * BLOCK_MAX_LAYERS];
     uint32_t kc[BLOCK_MAX_LAYERS], vc[BLOCK_MAX_LAYERS], k[BLOCK_MAX_LAYERS], v[BLOCK_MAX_LAYERS];
     uint32_t n_in = 0, n_out = 0;
 
@@ -373,16 +604,17 @@ static int blocks_build(Transformer* t, BlockGraph* bg, BlockBuilder* b) {
         in[n_in++] = kc[i];
         in[n_in++] = vc[i];
     }
-    uint32_t epsilon = blk.scaled_eps ? bb_tensor(b, 1, &single) : 0;
-    if (blk.scaled_eps) { in[n_in++] = epsilon; }
+    uint32_t epsilon = blk.scaled_eps && !blk.rescale ? bb_tensor(b, 1, &single) : 0;
+    if (blk.scaled_eps && !blk.rescale) { in[n_in++] = epsilon; }
     for (int i = 0; i < bg->count; i++) {
-        x = bb_layer(b, bg, t, bg->first + i, x, alpha, epsilon, rot, mask, kc[i], vc[i], &k[i], &v[i]);
+        x = bb_layer(b, bg, t, bg->first + i, x, &alpha, epsilon, rot, mask, kc[i], vc[i], &k[i], &v[i]);
     }
     out[n_out++] = x;
     for (int i = 0; i < bg->count; i++) {
         out[n_out++] = k[i];
         out[n_out++] = v[i];
     }
+    if (blk.rescale) { out[n_out++] = alpha; }
     e = b->e;
     if (!e) { e = block_api.Model_identifyInputsAndOutputs(b->model, n_in, in, n_out, out); }
     if (!e) { e = block_api.Model_relaxComputationFloat32toFloat16(b->model, true); }
@@ -443,7 +675,7 @@ static void blocks_compile(Transformer* t, BlockGraph* bg) {
             hash = (hash ^ nn.graphs[blk.first_matrix + BLOCK_MATRICES * bg->first + i].hash) * 0x100000001b3ULL;
         }
         memset(token, 0, CACHE_TOKEN_SIZE);
-        memcpy(token, blk.scaled_eps ? "blocks-2" : "blocks-1", 8);
+        memcpy(token, blk.rescale ? "blocks-3" : (blk.scaled_eps ? "blocks-2" : "blocks-1"), 8);
         memcpy(token + 12, &blk.T, sizeof blk.T);
         memcpy(token + 16, &hash, sizeof hash);
         memcpy(token + 24, &bg->first, sizeof bg->first);
@@ -499,6 +731,7 @@ static void blocks_setup_impl(Transformer* t) {
     const char* some_layers = getenv("NNAPI_BLOCK_LAYERS");
     const char* first = getenv("NNAPI_BLOCK_FIRST");
     const char* scaled_eps = getenv("NNAPI_BLOCK_EPS");
+    const char* rescale = getenv("NNAPI_BLOCK_RESCALE");
     const char* norm = getenv("NNAPI_BLOCK_NORM");
     blk.per_graph = per_graph < BLOCK_MAX_LAYERS ? per_graph : BLOCK_MAX_LAYERS;
     blk.T = positions ? atoi(positions) : 256;
@@ -511,9 +744,20 @@ static void blocks_setup_impl(Transformer* t) {
     if (blk.first < 0) { blk.first = 0; }
     if (blk.first > p->n_layers) { blk.first = p->n_layers; }
     if ((!blk.layers && !blk.first) || blk.T < 1) { return; }
-    blk.scaled_eps = scaled_eps && atoi(scaled_eps) != 0;
+    blk.rescale = rescale && atoi(rescale) != 0;
+    blk.scaled_eps = blk.rescale || (scaled_eps && atoi(scaled_eps) != 0);
     blk.norm = norm ? (float)atof(norm) : 64.0f;
     if (!(blk.norm > 0.0f)) { blk.norm = 64.0f; }
+    if (blk.rescale) {
+        // Bounds in the graph require this fixed norm and dimensions >=64.
+        // The old NNAPI_BLOCK_NORM setting still controls the legacy path.
+        blk.norm = 64.0f;
+        if (dim < 64 || hidden < 64) {
+            fprintf(stderr, "nnapi: blocks: rescale needs dim and hidden_dim >=64; blocks disabled\n");
+            return;
+        }
+        fprintf(stderr, "nnapi: blocks: dynamic rescale, norm <=64, inverse scale <=1, scalar output, bounded FC/SwiGLU\n");
+    }
     blk.rot_pos = -1;
     if (blk.first) { fprintf(stderr, "nnapi: blocks: first %d layers stay on the CPU\n", blk.first); }
     if (blk.scaled_eps) { fprintf(stderr, "nnapi: blocks: RMSNorm uses NORM_EPS * alpha^2\n"); }
@@ -660,13 +904,16 @@ static int blocks_run(Transformer* t, BlockGraph* bg, float alpha) {
         e = block_api.Execution_setInput(execution, 4 + 2 * i, NULL, blk.kc + at, cache * sizeof(float));
         if (!e) { e = block_api.Execution_setInput(execution, 5 + 2 * i, NULL, blk.vc + at, cache * sizeof(float)); }
     }
-    if (!e && blk.scaled_eps) {
+    if (!e && blk.scaled_eps && !blk.rescale) {
         e = block_api.Execution_setInput(execution, 4 + 2 * bg->count, NULL, &epsilon, sizeof epsilon);
     }
     if (!e) { e = block_api.Execution_setOutput(execution, 0, NULL, blk.y, dim * sizeof(float)); }
     for (int i = 0; i < bg->count && !e; i++) {
         e = block_api.Execution_setOutput(execution, 1 + 2 * i, NULL, blk.k + i * kv_dim, kv_dim * sizeof(float));
         if (!e) { e = block_api.Execution_setOutput(execution, 2 + 2 * i, NULL, blk.v + i * kv_dim, kv_dim * sizeof(float)); }
+    }
+    if (!e && blk.rescale) {
+        e = block_api.Execution_setOutput(execution, 1 + 2 * bg->count, NULL, &blk.out_alpha, sizeof blk.out_alpha);
     }
     if (!e) { e = block_api.Execution_compute(execution); }
     if (execution) { block_api.Execution_free(execution); }
@@ -728,15 +975,17 @@ static int blocks_forward(Transformer* t, unsigned long long* layer, int pos) {
     }
     float length = (float)sqrt(squares);
     float alpha = length > 0.0f ? blk.norm / length : 1.0f;
+    if (blk.rescale && alpha > 1.0f) { alpha = 1.0f; }
     for (int i = 0; i < dim; i++) {
         blk.x[i] = s->x[i] * alpha;
     }
 
     double start = now_ms();
     int e = blocks_run(t, bg, alpha);
-    bool finite = true;
+    float output_alpha = blk.rescale ? blk.out_alpha : alpha;
+    bool finite = isfinite(output_alpha) && output_alpha > 0.0f;
     for (int i = 0; i < dim && !e; i++) {
-        if (!isfinite(blk.y[i])) { finite = false; }
+        if (!isfinite(blk.y[i]) || (finite && !isfinite(blk.y[i] / output_alpha))) { finite = false; }
     }
     for (int i = 0; i < bg->count * kv_dim && !e; i++) {
         if (!isfinite(blk.k[i]) || !isfinite(blk.v[i])) { finite = false; }
@@ -783,7 +1032,11 @@ static int blocks_forward(Transformer* t, unsigned long long* layer, int pos) {
     if (nn.verify) {
         // the CPU computes these layers too, from the same residual, and blocks_check compares
         for (int i = 0; i < dim; i++) {
-            blk.expect[i] = blk.y[i] / alpha;
+            blk.expect[i] = blk.y[i] / output_alpha;
+        }
+        if (blk.rescale && pos < 16) {
+            fprintf(stderr, "nnapi: blocks: rescale: pos %d layers %d to %d inverse scale %.9g -> %.9g\n",
+                    pos, l, l + bg->count - 1, alpha, output_alpha);
         }
         blk.pending = bg;
         blk.pending_pos = pos;
@@ -791,7 +1044,7 @@ static int blocks_forward(Transformer* t, unsigned long long* layer, int pos) {
         return 0;
     }
     for (int i = 0; i < dim; i++) {
-        s->x[i] = blk.y[i] / alpha;
+        s->x[i] = blk.y[i] / output_alpha;
     }
     // counted as the matmuls they stand for, so that the report says where the model ran
     nn.nnapi_runs += BLOCK_MATRICES * bg->count;
