@@ -153,6 +153,14 @@ static void neuron_group_free(BlockGraph* bg) {
     }
 }
 
+// 4 or 8 bits for this matrix of the blocks, as NNAPI_WEIGHT_BITS and NNAPI_W4_MATS say
+static int prepare_weights_block(MatmulGraph* g) {
+    bool four = w4.enabled && (!w4.mats || strchr(w4.mats, (char)('0' + g->w4_id % 7)));
+    int e = four ? prepare_weights_4bit(g) : prepare_weights_8bit(g);
+    g->w4 = four && e == 0;
+    return e;
+}
+
 static bool neuron_group_prepare(BlockGraph* bg, bool compile) {
     char name[80];
     snprintf(name, sizeof name, "layers %d..%d%s", bg->first, bg->first + bg->count - 1,
@@ -163,8 +171,8 @@ static bool neuron_group_prepare(BlockGraph* bg, bool compile) {
     for (int i = 0; i < BLOCK_MATRICES * bg->count; i++) {
         MatmulGraph* g = &nn.graphs[blk.first_matrix + BLOCK_MATRICES * bg->first + i];
         if (g->w8) { continue; }
-        if ((w4.enabled ? prepare_weights_4bit(g) : prepare_weights_8bit(g)) != 0) { ok = false; break; }
-        if (!w4.enabled) {
+        if (prepare_weights_block(g) != 0) { ok = false; break; }
+        if (!g->w4) {
             // Preserve unsigned cache files and exactly the previous signed conversion.
             for (size_t j = 0; j < (size_t)g->n * g->d; j++) {
                 ((int8_t*)g->w8)[j] = (int8_t)((int)g->w8[j] - Q8_ZERO);

@@ -8,6 +8,9 @@ typedef struct {
 static struct {
     bool enabled, island, collecting, failed, initialized;
     int group; // NNAPI_W4_GROUP: columns that share a scale in each row, 0 = the whole row
+    // NNAPI_W4_MATS: which matrices of a layer get 4 bits, by their place in it (0 wq, 1 wk, 2 wv,
+    // 3 wo, 4 w1, 5 w3, 6 w2); NULL = all of them. The rest keep 8 bits
+    const char* mats;
     int tokens, target, count;
     float margin;
     const char* path;
@@ -37,6 +40,9 @@ static bool w4_options(void) {
         return false;
     }
     if (w4.group > 0) { weight_format = "4-bit island, grouped"; }
+    w4.mats = getenv("NNAPI_W4_MATS");
+    if (w4.mats && *w4.mats) { weight_format = "4-bit island for some matrices, 8-bit the rest"; }
+    else { w4.mats = NULL; }
     w4.margin = 2.0f;
     const char* margin = getenv("NNAPI_W4_MARGIN");
     if (margin) {

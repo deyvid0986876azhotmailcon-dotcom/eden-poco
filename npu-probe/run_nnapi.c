@@ -725,6 +725,7 @@ typedef struct {
     // (d, n / group_cols). NULL = one scale per row
     float* group_scale;
     int group_cols;
+    bool w4; // these weights are the 4-bit ones (NNAPI_WEIGHT_BITS=4 and NNAPI_W4_MATS)
     float* x1; // (n,) the input of an execution, scaled to [-1,1]
     // and this only for the all 8-bit graph
     float out_scale; // scale of the output tensor

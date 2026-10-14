@@ -328,7 +328,7 @@ static uint32_t bb_linear_gain(BlockBuilder* b, BlockGraph* bg, uint32_t x, Matm
             b->e = w4_observe(g, input, raw);
         } else { b->e = -1; }
         b->replay->operands[out].data = raw;
-    } else if (w4.enabled && w4.island && g->group_scale) {
+    } else if (g->w4 && w4.island && g->group_scale) {
         // NNAPI_W4_GROUP: one island per group of columns, each FULLY_CONNECTED with its own
         // tensor scale, every row put back to its scale in that group, and the groups added up
         W4Range* range = g->w4_id >= 0 && g->w4_id < w4.count ? &w4.ranges[g->w4_id] : NULL;
@@ -382,7 +382,7 @@ static uint32_t bb_linear_gain(BlockBuilder* b, BlockGraph* bg, uint32_t x, Matm
         }
         return out;
     } else {
-        uint32_t w8 = bb_operand(b, w4.enabled ? NEURON_EXT_TENSOR_QUANT4_SYMM
+        uint32_t w8 = bb_operand(b, g->w4 ? NEURON_EXT_TENSOR_QUANT4_SYMM
                                  : nn.neuron ? NEURON_TENSOR_QUANT8_SYMM : ANEURALNETWORKS_TENSOR_QUANT8_ASYMM,
                                  2, wd, tensor_scale, nn.neuron ? 0 : Q8_ZERO);
         // Neuron signed bytes remain alive through Compilation_finish.
@@ -391,7 +391,7 @@ static uint32_t bb_linear_gain(BlockBuilder* b, BlockGraph* bg, uint32_t x, Matm
               : block_api.Model_setOperandValue(b->model, (int32_t)w8, g->w8, (size_t)d * n);
         if (!b->e) { b->e = e; }
         uint32_t w = nn.neuron ? w8 : bb_op(b, ANEURALNETWORKS_DEQUANTIZE, 1, &w8, bb_tensor(b, 2, wd));
-        if (w4.enabled && w4.island) {
+        if (g->w4 && w4.island) {
             W4Range* range = g->w4_id >= 0 && g->w4_id < w4.count ? &w4.ranges[g->w4_id] : NULL;
             if (!range || !range->samples || range->hash != g->hash) {
                 fprintf(stderr, "nnapi: W4 missing/stale calibration for matrix %d; CPU fallback\n", g->w4_id);
