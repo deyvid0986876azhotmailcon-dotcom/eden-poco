@@ -78,6 +78,7 @@ typedef struct {
     int layers; // exclusive end of layers eligible for graphs
     bool scaled_eps;
     bool rescale;
+    bool renorm; // NNAPI_BLOCK_RESCALE=2
     int T;
     float norm; // length the residual is scaled to at the input of a graph
     BlockGraph* groups;
@@ -570,7 +571,23 @@ static uint32_t bb_layer(BlockBuilder* b, BlockGraph* bg, Transformer* t, int l,
 
     *k_out = k;
     *v_out = v;
-    return bb_add(b, h, bb_mul(b, down, alpha, 2, xd), 2, xd);
+    uint32_t y = bb_add(b, h, bb_mul(b, down, alpha, 2, xd), 2, xd);
+    if (blk.renorm) {
+        // Back to the length the graph started with before the next layer, and the scale goes
+        // with it: in the first layers of Qwen the residual grows a hundred times in one layer,
+        // and several of them in a row leave fp16. A sixty-fourth of y is what gets squared, so
+        // that neither a residual that grew that much nor one that did not leaves its range
+        int32_t axis = -1;
+        uint32_t small = bb_mul(b, y, bb_number(b, 1.0f / 64.0f), 2, xd);
+        uint32_t args[] = {bb_mul(b, small, small, 2, xd), bb_ints(b, &axis, 1), bb_int(b, 0)};
+        uint32_t mean = bb_op(b, ANEURALNETWORKS_MEAN, 3, args, bb_tensor(b, 1, &one));
+        mean = bb_add(b, mean, bb_number(b, 1e-6f), 1, &one);
+        uint32_t r = bb_op(b, ANEURALNETWORKS_RSQRT, 1, &mean, bb_tensor(b, 1, &one));
+        r = bb_mul(b, r, bb_number(b, blk.norm / sqrtf((float)D)), 1, &one);
+        y = bb_mul(b, small, r, 2, xd);
+        *scale = bb_mul(b, bb_mul(b, alpha, r, 1, &one), bb_number(b, 1.0f / 64.0f), 1, &one);
+    }
+    return y;
 }
 
 // ---- a graph: building it, compiling it, running it
@@ -614,7 +631,7 @@ static int blocks_build(Transformer* t, BlockGraph* bg, BlockBuilder* b) {
         out[n_out++] = k[i];
         out[n_out++] = v[i];
     }
-    if (blk.rescale) { out[n_out++] = alpha; }
+    if (blk.rescale || blk.renorm) { out[n_out++] = alpha; }
     e = b->e;
     if (!e) { e = block_api.Model_identifyInputsAndOutputs(b->model, n_in, in, n_out, out); }
     if (!e) { e = block_api.Model_relaxComputationFloat32toFloat16(b->model, true); }
@@ -675,7 +692,7 @@ static void blocks_compile(Transformer* t, BlockGraph* bg) {
             hash = (hash ^ nn.graphs[blk.first_matrix + BLOCK_MATRICES * bg->first + i].hash) * 0x100000001b3ULL;
         }
         memset(token, 0, CACHE_TOKEN_SIZE);
-        memcpy(token, blk.rescale ? "blocks-3" : (blk.scaled_eps ? "blocks-2" : "blocks-1"), 8);
+        memcpy(token, blk.renorm ? "blocks-4" : blk.rescale ? "blocks-3" : (blk.scaled_eps ? "blocks-2" : "blocks-1"), 8);
         memcpy(token + 12, &blk.T, sizeof blk.T);
         memcpy(token + 16, &hash, sizeof hash);
         memcpy(token + 24, &bg->first, sizeof bg->first);
@@ -744,7 +761,11 @@ static void blocks_setup_impl(Transformer* t) {
     if (blk.first < 0) { blk.first = 0; }
     if (blk.first > p->n_layers) { blk.first = p->n_layers; }
     if ((!blk.layers && !blk.first) || blk.T < 1) { return; }
-    blk.rescale = rescale && atoi(rescale) != 0;
+    // 2 = the plain graph, with the residual brought back to its length after every layer
+    blk.renorm = rescale && atoi(rescale) == 2;
+    blk.rescale = rescale && atoi(rescale) != 0 && !blk.renorm;
+    if (blk.renorm) { fprintf(stderr, "nnapi: blocks: residual renormalized after every layer, scale as one more output
+"); }
     blk.scaled_eps = blk.rescale || (scaled_eps && atoi(scaled_eps) != 0);
     blk.norm = norm ? (float)atof(norm) : 64.0f;
     if (!(blk.norm > 0.0f)) { blk.norm = 64.0f; }
@@ -912,7 +933,7 @@ static int blocks_run(Transformer* t, BlockGraph* bg, float alpha) {
         e = block_api.Execution_setOutput(execution, 1 + 2 * i, NULL, blk.k + i * kv_dim, kv_dim * sizeof(float));
         if (!e) { e = block_api.Execution_setOutput(execution, 2 + 2 * i, NULL, blk.v + i * kv_dim, kv_dim * sizeof(float)); }
     }
-    if (!e && blk.rescale) {
+    if (!e && (blk.rescale || blk.renorm)) {
         e = block_api.Execution_setOutput(execution, 1 + 2 * bg->count, NULL, &blk.out_alpha, sizeof blk.out_alpha);
     }
     if (!e) { e = block_api.Execution_compute(execution); }
@@ -982,7 +1003,7 @@ static int blocks_forward(Transformer* t, unsigned long long* layer, int pos) {
 
     double start = now_ms();
     int e = blocks_run(t, bg, alpha);
-    float output_alpha = blk.rescale ? blk.out_alpha : alpha;
+    float output_alpha = blk.rescale || blk.renorm ? blk.out_alpha : alpha;
     bool finite = isfinite(output_alpha) && output_alpha > 0.0f;
     for (int i = 0; i < dim && !e; i++) {
         if (!isfinite(blk.y[i]) || (finite && !isfinite(blk.y[i] / output_alpha))) { finite = false; }
@@ -1034,7 +1055,7 @@ static int blocks_forward(Transformer* t, unsigned long long* layer, int pos) {
         for (int i = 0; i < dim; i++) {
             blk.expect[i] = blk.y[i] / output_alpha;
         }
-        if (blk.rescale && pos < 16) {
+        if ((blk.rescale || blk.renorm) && pos < 16) {
             fprintf(stderr, "nnapi: blocks: rescale: pos %d layers %d to %d inverse scale %.9g -> %.9g\n",
                     pos, l, l + bg->count - 1, alpha, output_alpha);
         }
