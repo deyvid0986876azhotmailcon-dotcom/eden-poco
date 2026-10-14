@@ -73,3 +73,10 @@ Cambios que se adoptan:
 - **Finanzas con código, no con el modelo:** "gasté 3500 en super" se interpreta con reglas fijas primero; el modelo solo ayuda si las reglas no alcanzan, y si algo es ambiguo, pregunta.
 
 A comprobar antes de programar esas partes (pedido a Gemini, `logs/delegado/verificacion_asistente.md`): alta y tokens de Meta, ventana de 24 horas y costos, envío de documentos; cuotas gratis de Cloudflare (KV, Durable Objects, D1); servicio en primer plano y accesibilidad para una app instalada fuera de Play en este Android.
+
+## Verificado en la documentación oficial (2026-10-14, `logs/delegado/verificacion_asistente.md`)
+
+- La cola del relevo va en un **Durable Object con SQLite** (gratis: 100.000 pedidos y 100.000 filas escritas por día). KV no sirve: solo 1.000 escrituras por día.
+- El servicio de la app **no puede ser de tipo dataSync** (Android 15+ lo corta a las 6 horas por día): va como `specialUse`, y se prueba en el teléfono que HyperOS no lo cierre.
+- WhatsApp: las respuestas dentro de las 24 horas son gratis; fuera, solo plantillas pagas. El resumen del domingo se manda solo si David escribió en las últimas 24 horas; si no, queda esperando.
+- Gemini gratis: Google puede leer lo que se le manda (revisores humanos). Para contratos con datos de otras personas, conviene la clave de pago o no mandar nombres ni documentos de identidad.
