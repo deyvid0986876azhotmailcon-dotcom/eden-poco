@@ -89,6 +89,7 @@ typedef struct {
     bool renorm; // NNAPI_BLOCK_RESCALE=2 or 3
     bool safe_norm; // NNAPI_BLOCK_RESCALE=3: rmsnorm squares a sixty-fourth of its input
     bool probe; // CPU range diagnostics, without changing graph outputs or verification
+    const char* ablate; // NNAPI_BLOCK_ABLATE: parts left out of the graph to time them; wrong output on purpose
     int T;
     float norm; // length the residual is scaled to at the input of a graph
     BlockGraph* groups;
@@ -266,6 +267,7 @@ static uint32_t bb_rmsnorm(BlockBuilder* b, uint32_t x, const float* weight, uin
     int32_t last_axis = -1;
     // RESCALE=3: rmsnorm does not change with the size of x, so it works on a sixty-fourth of x:
     // with the residual scaled up 150 times in the first layer of Qwen, x*x left fp16 inside it
+    if (blk.ablate && strchr(blk.ablate, 'n')) { return x; }
     if (blk.safe_norm) { x = bb_mul(b, x, bb_number(b, 1.0f / 64.0f), 2, xd); }
     uint32_t squares = bb_mul(b, x, x, 2, xd);
     uint32_t mean_in[] = {squares, bb_ints(b, &last_axis, 1), bb_int(b, 1)}; // 1 = keep the dimension
@@ -417,7 +419,9 @@ static uint32_t bb_linear_gain(BlockBuilder* b, BlockGraph* bg, uint32_t x, Matm
             out = bb_op(b, ANEURALNETWORKS_FULLY_CONNECTED, 4, fc_in, bb_tensor(b, 2, od));
         }
     }
-    out = bb_mul(b, out, bb_const(b, 2, od, rows, d), 2, od);
+    if (!(blk.ablate && strchr(blk.ablate, 'c') && !b->replay)) {
+        out = bb_mul(b, out, bb_const(b, 2, od, rows, d), 2, od);
+    }
     if (bias) {
         float* scaled = block_keep(bg, d);
         for (uint32_t i = 0; i < d; i++) { scaled[i] = bias[i] * scale; }
@@ -635,8 +639,10 @@ static uint32_t bb_layer(BlockBuilder* b, BlockGraph* bg, Transformer* t, int l,
     v = bb_reshape(b, v, 3, kd);
 
     // RoPE: rotate q and k in each head
-    q = bb_matmul(b, q, rot, false, qd);
-    k = bb_matmul(b, k, rot, false, kd);
+    if (!(blk.ablate && strchr(blk.ablate, 'r'))) {
+        q = bb_matmul(b, q, rot, false, qd);
+        k = bb_matmul(b, k, rot, false, kd);
+    }
 
     // multihead attention over the positions before and this one, that goes last
     uint32_t keys_in[] = {kc, k, bb_int(b, 1)}; // along axis 1
@@ -663,6 +669,8 @@ static uint32_t bb_layer(BlockBuilder* b, BlockGraph* bg, Transformer* t, int l,
     uint32_t weights = bb_op(b, ANEURALNETWORKS_SOFTMAX, 2, softmax_in, bb_tensor(b, 3, attd));
     uint32_t mixed = bb_matmul(b, weights, values, false, qd);
     mixed = bb_reshape(b, mixed, 2, xd);
+    // 'a': the queries in place of what the attention mixed; the scores and softmax go unused
+    if (blk.ablate && strchr(blk.ablate, 'a')) { mixed = bb_reshape(b, q, 2, xd); }
 
     if (blk.rescale) {
         uint32_t am, aa, ag, au, ad;
@@ -707,8 +715,11 @@ static uint32_t bb_layer(BlockBuilder* b, BlockGraph* bg, Transformer* t, int l,
     uint32_t hn = bb_rmsnorm(b, h, w->rms_ffn_weight + (size_t)l * D, D, epsilon);
     uint32_t gate = bb_linear(b, bg, hn, &m[4], 1.0f, NULL);
     uint32_t up = bb_linear(b, bg, hn, &m[5], 1.0f, NULL);
-    uint32_t sigmoid = bb_op(b, ANEURALNETWORKS_LOGISTIC, 1, &gate, bb_tensor(b, 2, fd));
-    uint32_t silu = bb_mul(b, gate, sigmoid, 2, fd);
+    uint32_t silu = gate;
+    if (!(blk.ablate && strchr(blk.ablate, 's'))) {
+        uint32_t sigmoid = bb_op(b, ANEURALNETWORKS_LOGISTIC, 1, &gate, bb_tensor(b, 2, fd));
+        silu = bb_mul(b, gate, sigmoid, 2, fd);
+    }
     uint32_t hidden = bb_mul(b, silu, up, 2, fd);
     uint32_t down = bb_linear(b, bg, hidden, &m[6], 1.0f, NULL);
 
@@ -944,6 +955,10 @@ static void blocks_setup_impl(Transformer* t) {
     blk.rescale = rescale && atoi(rescale) != 0 && !blk.renorm;
     const char* probe = getenv("NNAPI_BLOCK_PROBE");
     blk.probe = probe && atoi(probe) == 1 && !blk.rescale;
+    // letters: n = no rmsnorm, r = no RoPE, a = no attention, s = no SiLU, c = no row corrections
+    blk.ablate = getenv("NNAPI_BLOCK_ABLATE");
+    if (blk.ablate && !*blk.ablate) { blk.ablate = NULL; }
+    if (blk.ablate) { fprintf(stderr, "nnapi: blocks: ABLATE=%s: graphs without those parts, the text will be WRONG\n", blk.ablate); }
     if (probe && atoi(probe) == 1) {
         fprintf(stderr, "nnapi: blocks: probe: %s\n", blk.probe
                 ? "CPU replay, single-layer graphs only; graph units, quantized weights, no fp16 emulation; speed includes probe"
