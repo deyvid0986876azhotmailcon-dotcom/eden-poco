@@ -302,11 +302,13 @@ public class MainActivity extends Activity {
         String weightsPrefix; // de los archivos de pesos de 8 bits que run_nnapi deja para la APU
         int steps = 64;       // tokens que run_nnapi procesa, contando los de la pregunta
         // Capas iniciales que el motor nuevo (API Neuron, pesos de 8 bits) deja en la CPU; -1 = motor
-        // viejo sobre NNAPI. En Qwen 1.5B las tres primeras se salen del rango de la media precisión
+        // viejo sobre NNAPI
         int neuronFirst = -1;
-        // El motor devuelve el residuo a su tamaño después de cada capa (NNAPI_BLOCK_RESCALE=2): con
-        // eso en Qwen 1.5B solo la primera capa necesita la CPU
-        boolean neuronRenorm = false;
+        // NNAPI_BLOCK_RESCALE: 3 devuelve el residuo a su tamaño después de cada capa y hace el rmsnorm
+        // sobre una copia reducida, con lo que las primeras capas de Qwen y de Llama caben en media
+        // precisión y todas van a la APU
+        int neuronRescale = 0;
+        int neuronBlocks = 4; // capas por grafo
     }
 
     private ModelFiles filesOf(String modelChoice) {
@@ -321,8 +323,8 @@ public class MainActivity extends Activity {
         if ("qwen15".equals(modelChoice)) {
             m.bin = new File(LLM_DIR + "qwen2.5_1.5b.bin");
             m.weightsPrefix = LLM_DIR + "wf_qwen/q15";
-            m.neuronFirst = 1;
-            m.neuronRenorm = true;
+            m.neuronFirst = 0;
+            m.neuronRescale = 3;
             m.steps = 192;
             File own = new File(LLM_DIR + "qwen2.5_1.5b.bin.tokenizer");
             if (own.exists()) { m.tokenizer = own; }
@@ -330,6 +332,7 @@ public class MainActivity extends Activity {
             m.bin = new File(LLM_DIR + "llama3_2_1b.bin");
             m.weightsPrefix = LLM_DIR + "wf_l1/l1";
             m.neuronFirst = 0;
+            m.neuronRescale = 3;
             m.steps = 192;
             File own = new File(LLM_DIR + "llama3_2_1b.bin.tokenizer");
             if (own.exists()) { m.tokenizer = own; }
@@ -347,6 +350,9 @@ public class MainActivity extends Activity {
             m.bin = tmp.exists() ? tmp : new File(files, "stories15M.bin");
             m.weightsPrefix = LLM_DIR + "wf/s15";
             m.steps = 128;
+            m.neuronFirst = 0;
+            m.neuronRescale = 3;
+            m.neuronBlocks = 6; // las 6 capas en un solo grafo
         }
         return m;
     }
@@ -836,13 +842,13 @@ public class MainActivity extends Activity {
                 Map<String, String> env = pb.environment();
                 if (!llamaCpp && apu) {
                     if (mf.neuronFirst >= 0) {
-                        // medido en el teléfono: 10 tokens por segundo con Qwen 1.5B y 11 con Llama 1B,
-                        // y entran todas las capas, que por NNAPI no entraban
+                        // medido en el teléfono la noche del 14: Qwen 1.5B 10 tokens por segundo, Llama 1B
+                        // 12 y Stories 15M 97, con todas las capas en la APU y texto correcto
                         env.put("NNAPI_BACKEND", "neuron");
-                        env.put("NNAPI_BLOCKS", "4");
+                        env.put("NNAPI_BLOCKS", String.valueOf(mf.neuronBlocks));
                         env.put("NNAPI_BLOCK_FIRST", String.valueOf(mf.neuronFirst));
-                        if (mf.neuronRenorm) {
-                            env.put("NNAPI_BLOCK_RESCALE", "2");
+                        if (mf.neuronRescale > 0) {
+                            env.put("NNAPI_BLOCK_RESCALE", String.valueOf(mf.neuronRescale));
                         }
                     } else {
                         env.put("NNAPI_DEVICE", "mtk-mdla_shim");
