@@ -24,7 +24,7 @@
 //   rmsnorm adds up squares. The residual goes in scaled to a length (L2 norm) of
 //   NNAPI_BLOCK_NORM: the sum of its squares is then 4096 whatever the model does, and their
 //   mean is not small either. The scale is an input too, to weigh what each layer adds to the
-//   residual. rmsnorm itself doesn't depend on it. Inside a graph of several layers nobody
+//   residual. RMSNorm needs epsilon scaled too (NNAPI_BLOCK_EPS=1). Inside a graph nobody
 //   rescales: if the residual grows a lot from one layer to the next, use fewer per graph.
 //
 // NNAPI_BLOCKS=<n>        layers per graph, 0 = off. default: 4 with a checkpoint of gguf2bin.c
@@ -32,7 +32,9 @@
 // NNAPI_NEURON_OPTS      optional compiler string; no compilation cache on Neuron
 // NNAPI_BLOCK_T=<n>       positions kept, default 256
 // NNAPI_BLOCK_LAYERS=<n>  only the first n layers go in graphs
+// NNAPI_BLOCK_FIRST=<n>   keep layers below n on CPU, default 0; LAYERS remains the exclusive end
 // NNAPI_BLOCK_NORM=<f>    length of the residual at the input of a graph, default 64
+// NNAPI_BLOCK_EPS=1       use NORM_EPS * alpha^2 in RMSNorm, default 0 (legacy epsilon)
 // NNAPI_VERIFY=1          the CPU computes every group too and the difference is reported. The
 //                         text is then the one of the CPU
 
@@ -47,7 +49,7 @@ enum {
 #define BLOCK_MAX_OPS 1024
 #define BLOCK_MATRICES 7       // of a layer: wq, wk, wv, wo, w1, w3, w2, in the order forward uses them
 #define BLOCK_MASKED -10000.0f // added to the score of an empty slot: its weight after the softmax is 0
-#define BLOCK_EPS 1e-5f        // of the rmsnorms: next to the squares of a residual scaled like that it is nothing
+#define BLOCK_EPS 1e-5f        // legacy epsilon in scaled units
 
 typedef struct {
     int first; // layer
@@ -68,7 +70,9 @@ typedef struct {
 typedef struct {
     int state; // 0 = not set up yet, 1 = on, -1 = off
     int per_graph;
-    int layers; // how many, from the first one, go in graphs
+    int first; // first layer eligible for graphs
+    int layers; // exclusive end of layers eligible for graphs
+    bool scaled_eps;
     int T;
     float norm; // length the residual is scaled to at the input of a graph
     BlockGraph* groups;
@@ -88,6 +92,8 @@ typedef struct {
     // NNAPI_VERIFY: what the graph gave for the group the CPU is computing again
     float* expect; // (dim,)
     BlockGraph* pending;
+    int pending_pos;
+    double pending_norm;
     double run_ms;
     long not_finite;
 } BlockState;
@@ -213,16 +219,20 @@ static float* block_keep(BlockGraph* bg, size_t count) {
 
 // ---- the pieces of a layer
 
-static uint32_t bb_rmsnorm(BlockBuilder* b, uint32_t x, const float* weight, uint32_t dim) {
+static uint32_t bb_rmsnorm(BlockBuilder* b, uint32_t x, const float* weight, uint32_t dim, uint32_t epsilon) {
     // weight * x * rsqrt(mean(x * x) + eps), as rmsnorm() does
-    uint32_t xd[] = {1, dim}, one[] = {1, 1}, single = 1;
+    uint32_t xd[] = {1, dim}, one[] = {1, 1};
     int32_t last_axis = -1;
-    float eps = BLOCK_EPS;
     uint32_t squares = bb_mul(b, x, x, 2, xd);
     uint32_t mean_in[] = {squares, bb_ints(b, &last_axis, 1), bb_int(b, 1)}; // 1 = keep the dimension
     uint32_t mean = bb_op(b, ANEURALNETWORKS_MEAN, 3, mean_in, bb_tensor(b, 2, one));
     // ADD and MUL take tensors only: a number goes in as a tensor of one element and broadcasts
-    uint32_t sum = bb_add(b, mean, bb_const(b, 1, &single, &eps, 1), 2, one);
+    if (!blk.scaled_eps) {
+        uint32_t single = 1;
+        float eps = BLOCK_EPS;
+        epsilon = bb_const(b, 1, &single, &eps, 1);
+    }
+    uint32_t sum = bb_add(b, mean, epsilon, 2, one);
     uint32_t inverse = bb_op(b, ANEURALNETWORKS_RSQRT, 1, &sum, bb_tensor(b, 2, one));
     uint32_t normalized = bb_mul(b, x, inverse, 2, xd);
     return bb_mul(b, normalized, bb_const(b, 1, &dim, weight, dim), 2, xd);
@@ -266,7 +276,8 @@ static uint32_t bb_linear(BlockBuilder* b, BlockGraph* bg, uint32_t x, MatmulGra
 }
 
 static uint32_t bb_layer(BlockBuilder* b, BlockGraph* bg, Transformer* t, int l, uint32_t x, uint32_t alpha,
-                         uint32_t rot, uint32_t mask, uint32_t kc, uint32_t vc, uint32_t* k_out, uint32_t* v_out) {
+                         uint32_t epsilon, uint32_t rot, uint32_t mask, uint32_t kc, uint32_t vc,
+                         uint32_t* k_out, uint32_t* v_out) {
     // layer l, from the residual x to the residual after it. the same steps as forward()
     Config* p = &t->config;
     TransformerWeights* w = &t->weights;
@@ -283,7 +294,7 @@ static uint32_t bb_layer(BlockBuilder* b, BlockGraph* bg, Transformer* t, int l,
     float score_scale = 1.0f / sqrtf((float)HD);
 
     // attention rmsnorm and the qkv matmuls for this position
-    uint32_t xn = bb_rmsnorm(b, x, w->rms_att_weight + (size_t)l * D, D);
+    uint32_t xn = bb_rmsnorm(b, x, w->rms_att_weight + (size_t)l * D, D, epsilon);
     uint32_t q = bb_linear(b, bg, xn, &m[0], score_scale, w->bq ? w->bq + (size_t)l * D : NULL);
     uint32_t k = bb_linear(b, bg, xn, &m[1], 1.0f, w->bk ? w->bk + (size_t)l * KD : NULL);
     uint32_t v = bb_linear(b, bg, xn, &m[2], 1.0f, w->bv ? w->bv + (size_t)l * KD : NULL);
@@ -312,7 +323,7 @@ static uint32_t bb_layer(BlockBuilder* b, BlockGraph* bg, Transformer* t, int l,
     uint32_t h = bb_add(b, x, bb_mul(b, attended, alpha, 2, xd), 2, xd);
 
     // ffn rmsnorm and self.w2(F.silu(self.w1(x)) * self.w3(x))
-    uint32_t hn = bb_rmsnorm(b, h, w->rms_ffn_weight + (size_t)l * D, D);
+    uint32_t hn = bb_rmsnorm(b, h, w->rms_ffn_weight + (size_t)l * D, D, epsilon);
     uint32_t gate = bb_linear(b, bg, hn, &m[4], 1.0f, NULL);
     uint32_t up = bb_linear(b, bg, hn, &m[5], 1.0f, NULL);
     uint32_t sigmoid = bb_op(b, ANEURALNETWORKS_LOGISTIC, 1, &gate, bb_tensor(b, 2, fd));
@@ -334,7 +345,7 @@ static int blocks_build(Transformer* t, BlockGraph* bg, BlockBuilder* b) {
     uint32_t D = (uint32_t)p->dim, T = (uint32_t)blk.T;
     uint32_t KVH = (uint32_t)p->n_kv_heads, HD = D / (uint32_t)p->n_heads;
     uint32_t xd[] = {1, D}, single = 1, rotd[] = {KVH, HD, HD}, maskd[] = {1, 1, T + 1}, cached[] = {KVH, T, HD};
-    uint32_t in[4 + 2 * BLOCK_MAX_LAYERS], out[1 + 2 * BLOCK_MAX_LAYERS];
+    uint32_t in[5 + 2 * BLOCK_MAX_LAYERS], out[1 + 2 * BLOCK_MAX_LAYERS];
     uint32_t kc[BLOCK_MAX_LAYERS], vc[BLOCK_MAX_LAYERS], k[BLOCK_MAX_LAYERS], v[BLOCK_MAX_LAYERS];
     uint32_t n_in = 0, n_out = 0;
 
@@ -356,8 +367,10 @@ static int blocks_build(Transformer* t, BlockGraph* bg, BlockBuilder* b) {
         in[n_in++] = kc[i];
         in[n_in++] = vc[i];
     }
+    uint32_t epsilon = blk.scaled_eps ? bb_tensor(b, 1, &single) : 0;
+    if (blk.scaled_eps) { in[n_in++] = epsilon; }
     for (int i = 0; i < bg->count; i++) {
-        x = bb_layer(b, bg, t, bg->first + i, x, alpha, rot, mask, kc[i], vc[i], &k[i], &v[i]);
+        x = bb_layer(b, bg, t, bg->first + i, x, alpha, epsilon, rot, mask, kc[i], vc[i], &k[i], &v[i]);
     }
     out[n_out++] = x;
     for (int i = 0; i < bg->count; i++) {
@@ -423,7 +436,7 @@ static void blocks_compile(Transformer* t, BlockGraph* bg) {
             hash = (hash ^ nn.graphs[blk.first_matrix + BLOCK_MATRICES * bg->first + i].hash) * 0x100000001b3ULL;
         }
         memset(token, 0, CACHE_TOKEN_SIZE);
-        memcpy(token, "blocks-1", 8);
+        memcpy(token, blk.scaled_eps ? "blocks-2" : "blocks-1", 8);
         memcpy(token + 12, &blk.T, sizeof blk.T);
         memcpy(token + 16, &hash, sizeof hash);
         memcpy(token + 24, &bg->first, sizeof bg->first);
@@ -475,6 +488,8 @@ static void blocks_setup(Transformer* t) {
     int kv_dim = head_size * p->n_kv_heads;
     const char* positions = getenv("NNAPI_BLOCK_T");
     const char* some_layers = getenv("NNAPI_BLOCK_LAYERS");
+    const char* first = getenv("NNAPI_BLOCK_FIRST");
+    const char* scaled_eps = getenv("NNAPI_BLOCK_EPS");
     const char* norm = getenv("NNAPI_BLOCK_NORM");
     blk.per_graph = per_graph < BLOCK_MAX_LAYERS ? per_graph : BLOCK_MAX_LAYERS;
     blk.T = positions ? atoi(positions) : 256;
@@ -482,10 +497,17 @@ static void blocks_setup(Transformer* t) {
     if (blk.T > p->seq_len - 1) { blk.T = p->seq_len - 1; }
     blk.layers = some_layers ? atoi(some_layers) : p->n_layers;
     if (blk.layers > p->n_layers) { blk.layers = p->n_layers; }
-    if (blk.layers < 1 || blk.T < 1) { return; }
+    if (blk.layers < 0) { blk.layers = 0; }
+    blk.first = first ? atoi(first) : 0;
+    if (blk.first < 0) { blk.first = 0; }
+    if (blk.first > p->n_layers) { blk.first = p->n_layers; }
+    if ((!blk.layers && !blk.first) || blk.T < 1) { return; }
+    blk.scaled_eps = scaled_eps && atoi(scaled_eps) != 0;
     blk.norm = norm ? (float)atof(norm) : 64.0f;
     if (!(blk.norm > 0.0f)) { blk.norm = 64.0f; }
     blk.rot_pos = -1;
+    if (blk.first) { fprintf(stderr, "nnapi: blocks: first %d layers stay on the CPU\n", blk.first); }
+    if (blk.scaled_eps) { fprintf(stderr, "nnapi: blocks: RMSNorm uses NORM_EPS * alpha^2\n"); }
 
     // Both backends use row scales in fp32 units. Only NNAPI dequantizes weights in the graph
     // and builds single-matmul graphs for matrices outside the blocks.
@@ -506,10 +528,11 @@ static void blocks_setup(Transformer* t) {
     // of weights are the same ones, and matmul() finds these matrices without a graph of
     // their own and computes them on the CPU when it has to
     double start = now_ms();
-    nn.graphs = realloc(nn.graphs, (nn.n_graphs + BLOCK_MATRICES * blk.layers) * sizeof(MatmulGraph));
+    int registered = blk.layers > blk.first ? blk.layers : blk.first;
+    nn.graphs = realloc(nn.graphs, (nn.n_graphs + BLOCK_MATRICES * registered) * sizeof(MatmulGraph));
     if (!nn.graphs) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
     blk.first_matrix = nn.n_graphs;
-    for (int l = 0; l < blk.layers; l++) {
+    for (int l = 0; l < registered; l++) {
         Matrix* matrices[BLOCK_MATRICES] = {w->wq + l, w->wk + l, w->wv + l, w->wo + l, w->w1 + l, w->w3 + l, w->w2 + l};
         int ns[BLOCK_MATRICES] = {dim, dim, dim, dim, dim, dim, hidden};
         int ds[BLOCK_MATRICES] = {dim, kv_dim, kv_dim, dim, hidden, hidden, dim};
@@ -519,6 +542,8 @@ static void blocks_setup(Transformer* t) {
             g->w = matrices[i];
             g->n = ns[i];
             g->d = ds[i];
+            // Reserve CPU matrices too: no single-matmul graphs, stable weight file indices.
+            if (l < blk.first) { continue; }
             if (prepare_weights_8bit(g) != 0) {
                 fprintf(stderr, "nnapi: blocks: no 8-bit weights for a matrix of layer %d, off\n", l);
                 return;
@@ -533,6 +558,7 @@ static void blocks_setup(Transformer* t) {
         }
     }
     nn.weights_ms += now_ms() - start;
+    if (blk.first >= blk.layers) { return; }
 
     size_t cache = (size_t)blk.layers * p->n_kv_heads * blk.T * head_size;
     blk.kc = calloc(cache, sizeof(float));
@@ -545,7 +571,7 @@ static void blocks_setup(Transformer* t) {
     blk.v = malloc((size_t)blk.per_graph * kv_dim * sizeof(float));
     blk.rot = malloc((size_t)p->n_kv_heads * head_size * head_size * sizeof(float));
     blk.mask = malloc(((size_t)blk.T + 1) * sizeof(float));
-    blk.n_groups = (blk.layers + blk.per_graph - 1) / blk.per_graph;
+    blk.n_groups = (blk.layers - blk.first + blk.per_graph - 1) / blk.per_graph;
     blk.groups = calloc(blk.n_groups, sizeof(BlockGraph));
     if (!blk.kc || !blk.vc || !blk.zeros || !blk.x || !blk.y || !blk.expect || !blk.k || !blk.v
         || !blk.rot || !blk.mask || !blk.groups) {
@@ -553,12 +579,12 @@ static void blocks_setup(Transformer* t) {
         exit(EXIT_FAILURE);
     }
     for (int i = 0; i < blk.n_groups; i++) {
-        blk.groups[i].first = i * blk.per_graph;
+        blk.groups[i].first = blk.first + i * blk.per_graph;
         blk.groups[i].count = blk.layers - blk.groups[i].first < blk.per_graph ? blk.layers - blk.groups[i].first : blk.per_graph;
     }
     blk.state = 1;
     fprintf(stderr, "nnapi: blocks: %d layers in %d graphs on %s, %d positions kept\n",
-            blk.layers, blk.n_groups, nn.device_name, blk.T);
+            blk.layers - blk.first, blk.n_groups, nn.device_name, blk.T);
 }
 
 static void blocks_position(Transformer* t, int pos) {
@@ -605,6 +631,8 @@ static int blocks_run(Transformer* t, BlockGraph* bg, float alpha) {
     size_t dim = p->dim, kvh = p->n_kv_heads, head_size = dim / p->n_heads;
     size_t kv_dim = kvh * head_size;
     size_t cache = kvh * blk.T * head_size; // of one layer
+    // Compute on CPU: alpha^2 alone can overflow fp16 even when epsilon fits.
+    float epsilon = (float)((double)NORM_EPS * alpha * alpha);
     ANeuralNetworksExecution* execution = NULL;
     int e = block_api.Execution_create(bg->compilation, &execution);
     if (!e) { e = block_api.Execution_setInput(execution, 0, NULL, blk.x, dim * sizeof(float)); }
@@ -615,6 +643,9 @@ static int blocks_run(Transformer* t, BlockGraph* bg, float alpha) {
         size_t at = (size_t)(bg->first + i) * cache;
         e = block_api.Execution_setInput(execution, 4 + 2 * i, NULL, blk.kc + at, cache * sizeof(float));
         if (!e) { e = block_api.Execution_setInput(execution, 5 + 2 * i, NULL, blk.vc + at, cache * sizeof(float)); }
+    }
+    if (!e && blk.scaled_eps) {
+        e = block_api.Execution_setInput(execution, 4 + 2 * bg->count, NULL, &epsilon, sizeof epsilon);
     }
     if (!e) { e = block_api.Execution_setOutput(execution, 0, NULL, blk.y, dim * sizeof(float)); }
     for (int i = 0; i < bg->count && !e; i++) {
@@ -634,13 +665,21 @@ static void blocks_check(Transformer* t, int l) {
     float* x = t->state.x;
     double err2 = 0.0;
     double ref2 = 0.0;
+    double max_abs = 0.0;
     for (int i = 0; i < t->config.dim; i++) {
         double err = (double)blk.expect[i] - x[i];
         err2 += err * err;
         ref2 += (double)x[i] * x[i];
+        if (fabs((double)x[i]) > max_abs) { max_abs = fabs((double)x[i]); }
+    }
+    double rel = ref2 > 0.0 ? sqrt(err2 / ref2) : (err2 == 0.0 ? 0.0 : INFINITY);
+    if (blk.pending_pos < 16) {
+        fprintf(stderr, "nnapi: blocks: verify: pos %d layers %d to %d: relative error %.6f%% "
+                "input norm %.9g CPU output norm %.9g CPU output maxabs %.9g\n",
+                blk.pending_pos, bg->first, bg->first + bg->count - 1,
+                100.0 * rel, blk.pending_norm, sqrt(ref2), max_abs);
     }
     if (ref2 > 0.0) {
-        double rel = sqrt(err2 / ref2);
         if (rel > bg->rel_max) { bg->rel_max = rel; }
         bg->rel_sum += rel;
         bg->verified++;
@@ -654,8 +693,9 @@ static int blocks_forward(Transformer* t, unsigned long long* layer, int pos) {
     if (blk.state == 0) { blocks_setup(t); }
     int l = (int)*layer;
     blocks_check(t, l);
-    if (blk.state < 0 || l >= blk.layers || l % blk.per_graph != 0 || pos > blk.T) { return 0; }
-    BlockGraph* bg = &blk.groups[l / blk.per_graph];
+    if (blk.state < 0 || l < blk.first || l >= blk.layers
+        || (l - blk.first) % blk.per_graph != 0 || pos > blk.T) { return 0; }
+    BlockGraph* bg = &blk.groups[(l - blk.first) / blk.per_graph];
     if (bg->state == 0) { blocks_compile(t, bg); }
     if (bg->state < 0) { return 0; }
 
@@ -729,6 +769,8 @@ static int blocks_forward(Transformer* t, unsigned long long* layer, int pos) {
             blk.expect[i] = blk.y[i] / alpha;
         }
         blk.pending = bg;
+        blk.pending_pos = pos;
+        blk.pending_norm = sqrt(squares);
         return 0;
     }
     for (int i = 0; i < dim; i++) {

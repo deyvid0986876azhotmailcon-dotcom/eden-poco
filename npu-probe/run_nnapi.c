@@ -2019,6 +2019,8 @@ void error_usage() {
     fprintf(stderr, "                   default: they are made in RAM at every run\n");
     fprintf(stderr, "  NNAPI_BLOCKS     layers that go in one graph, instead of one graph per matmul. 0 = off,\n");
     fprintf(stderr, "                   default 4 with a checkpoint of gguf2bin. nnapi_blocks.h has the rest\n");
+    fprintf(stderr, "  NNAPI_BLOCK_FIRST  first layer in block graphs; earlier layers use CPU, default 0\n");
+    fprintf(stderr, "  NNAPI_BLOCK_EPS  1 = scale the model RMSNorm epsilon with the residual, default 0\n");
     exit(EXIT_FAILURE);
 }
 
