@@ -2202,6 +2202,7 @@ void error_usage() {
     fprintf(stderr, "  NNAPI_BLOCK_FIRST  first layer in block graphs; earlier layers use CPU, default 0\n");
     fprintf(stderr, "  NNAPI_BLOCK_EPS  1 = scale the model RMSNorm epsilon with the residual, default 0\n");
     fprintf(stderr, "  NNAPI_BLOCK_RESCALE  1 = rescale residual/FFN inside each graph (fixed norm <=64, scaled epsilon), default 0\n");
+    fprintf(stderr, "  NNAPI_BLOCK_PROBE  1 = CPU range replay of single-layer graphs (RESCALE=0/2); includes raw FC outputs, slows execution\n");
     fprintf(stderr, "  NNAPI_CPU_THREADS  CPU matmul threads, 1-8, default 4; cores 4-7, caller included\n");
     fprintf(stderr, "  NNAPI_HEAD_CHUNK  classifier rows per FC in one Neuron graph, default 0 (off)\n");
     exit(EXIT_FAILURE);

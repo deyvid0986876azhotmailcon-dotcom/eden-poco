@@ -39,6 +39,8 @@
 // NNAPI_BLOCK_EPS=1       use NORM_EPS * alpha^2 in RMSNorm, default 0 (legacy epsilon)
 // NNAPI_BLOCK_RESCALE=1   bounded residual/FFN vectors with a separate inverse scale;
 //                         implies scaled epsilon, fixes internal norm at 64, default 0
+// NNAPI_BLOCK_PROBE=1     CPU replay of single-layer graphs, RESCALE=0/2, in graph units;
+//                         includes raw FC outputs. Diagnostic only, invalidates speed measurements.
 // NNAPI_VERIFY=1          the CPU computes every group too and the difference is reported. The
 //                         text is then the one of the CPU
 
@@ -78,7 +80,9 @@ typedef struct {
     int layers; // exclusive end of layers eligible for graphs
     bool scaled_eps;
     bool rescale;
-    bool renorm; // NNAPI_BLOCK_RESCALE=2
+    bool renorm; // NNAPI_BLOCK_RESCALE=2 or 3
+    bool safe_norm; // NNAPI_BLOCK_RESCALE=3: rmsnorm squares a sixty-fourth of its input
+    bool probe; // CPU range diagnostics, without changing graph outputs or verification
     int T;
     float norm; // length the residual is scaled to at the input of a graph
     BlockGraph* groups;
@@ -226,17 +230,22 @@ static float* block_keep(BlockGraph* bg, size_t count) {
 
 // ---- the pieces of a layer
 
+static uint32_t bb_number(BlockBuilder* b, float value);
+
 static uint32_t bb_rmsnorm(BlockBuilder* b, uint32_t x, const float* weight, uint32_t dim, uint32_t epsilon) {
     // weight * x * rsqrt(mean(x * x) + eps), as rmsnorm() does
     uint32_t xd[] = {1, dim}, one[] = {1, 1};
     int32_t last_axis = -1;
+    // RESCALE=3: rmsnorm does not change with the size of x, so it works on a sixty-fourth of x:
+    // with the residual scaled up 150 times in the first layer of Qwen, x*x left fp16 inside it
+    if (blk.safe_norm) { x = bb_mul(b, x, bb_number(b, 1.0f / 64.0f), 2, xd); }
     uint32_t squares = bb_mul(b, x, x, 2, xd);
     uint32_t mean_in[] = {squares, bb_ints(b, &last_axis, 1), bb_int(b, 1)}; // 1 = keep the dimension
     uint32_t mean = bb_op(b, ANEURALNETWORKS_MEAN, 3, mean_in, bb_tensor(b, 2, one));
     // ADD and MUL take tensors only: a number goes in as a tensor of one element and broadcasts
     if (!blk.scaled_eps) {
         uint32_t single = 1;
-        float eps = BLOCK_EPS;
+        float eps = blk.safe_norm ? BLOCK_EPS / 4096.0f : BLOCK_EPS;
         epsilon = bb_const(b, 1, &single, &eps, 1);
     }
     uint32_t sum = bb_add(b, mean, epsilon, 2, one);
@@ -762,8 +771,16 @@ static void blocks_setup_impl(Transformer* t) {
     if (blk.first > p->n_layers) { blk.first = p->n_layers; }
     if ((!blk.layers && !blk.first) || blk.T < 1) { return; }
     // 2 = the plain graph, with the residual brought back to its length after every layer
-    blk.renorm = rescale && atoi(rescale) == 2;
+    blk.renorm = rescale && (atoi(rescale) == 2 || atoi(rescale) == 3);
+    blk.safe_norm = rescale && atoi(rescale) == 3;
     blk.rescale = rescale && atoi(rescale) != 0 && !blk.renorm;
+    const char* probe = getenv("NNAPI_BLOCK_PROBE");
+    blk.probe = probe && atoi(probe) == 1 && !blk.rescale;
+    if (probe && atoi(probe) == 1) {
+        fprintf(stderr, "nnapi: blocks: probe: %s\n", blk.probe
+                ? "CPU replay, single-layer graphs only; graph units, quantized weights, no fp16 emulation; speed includes probe"
+                : "RESCALE=1 not supported; use RESCALE=0 or 2");
+    }
     if (blk.renorm) { fprintf(stderr, "nnapi: blocks: residual renormalized after every layer, scale as one more output\n"); }
     blk.scaled_eps = blk.rescale || (scaled_eps && atoi(scaled_eps) != 0);
     blk.norm = norm ? (float)atof(norm) : 64.0f;
@@ -904,6 +921,166 @@ static void blocks_position(Transformer* t, int pos) {
     blk.rot_pos = pos;
 }
 
+// Replay the unbounded (RESCALE=0/2) graph in CPU float, using double reductions.
+// These are range estimates BEFORE fp16 rounding, not observed MDLA activations.
+// In particular h already includes alpha, and q includes 1/sqrt(head_size).
+static void blocks_probe_stats(int pos, int l, const char* name, const float* x, int n) {
+    double peak = 0.0, squares = 0.0;
+    for (int i = 0; i < n; i++) {
+        double v = x[i];
+        if (!isfinite(v)) { peak = INFINITY; squares = INFINITY; break; }
+        if (fabs(v) > peak) { peak = fabs(v); }
+        squares += v * v;
+    }
+    fprintf(stderr, "nnapi: blocks: probe: pos %d layer %d %s maxabs %.9g norm %.9g\n",
+            pos, l, name, peak, sqrt(squares));
+}
+
+static int blocks_probe_linear(float* out, const float* x, MatmulGraph* g,
+                               float scale, const float* bias, int pos, int l, const char* raw_name) {
+    size_t bytes = (size_t)g->n * g->d;
+    const uint8_t* data = g->w8;
+    void* mapped = MAP_FAILED;
+    if (!data) {
+        char path[PATH_MAX];
+        snprintf(path, sizeof path, "%s.%d", nn.weights_path, (int)(g - nn.graphs));
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) { return -1; }
+        struct stat st;
+        if (fstat(fd, &st) == 0 && st.st_size >= (off_t)bytes) {
+            mapped = mmap(NULL, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
+        }
+        close(fd);
+        if (mapped == MAP_FAILED) { return -1; }
+        data = mapped;
+    }
+    float largest = 0.0f;
+    for (int i = 0; i < g->d; i++) {
+        if (g->row_scale[i] > largest) { largest = g->row_scale[i]; }
+    }
+    float tensor_scale = largest > 0.0f ? largest / 127.0f : 1.0f;
+    for (int i = 0; i < g->d; i++) {
+        double sum = 0.0;
+        for (int j = 0; j < g->n; j++) {
+            size_t at = (size_t)i * g->n + j;
+            int q = nn.neuron ? ((const int8_t*)data)[at] : (int)data[at] - Q8_ZERO;
+            sum += (double)x[j] * q;
+        }
+        out[i] = (float)(sum * tensor_scale);
+    }
+    if (mapped != MAP_FAILED) { munmap(mapped, bytes); }
+    blocks_probe_stats(pos, l, raw_name, out, g->d);
+    for (int i = 0; i < g->d; i++) {
+        out[i] *= g->row_scale[i] / 127.0f / tensor_scale * scale;
+        if (bias) { out[i] += bias[i] * scale; }
+    }
+    return 0;
+}
+
+static void blocks_probe_norm(float* out, const float* x, const float* w, int n, float epsilon) {
+    double squares = 0.0;
+    for (int i = 0; i < n; i++) { squares += (double)x[i] * x[i]; }
+    float inverse = (float)(1.0 / sqrt(squares / n + epsilon));
+    for (int i = 0; i < n; i++) { out[i] = (x[i] * inverse) * w[i]; }
+}
+
+static void blocks_probe_rope(float* x, float* scratch, int heads, int hd) {
+    // blocks_position currently supplies the same rotation to every KV head.
+    for (int h = 0; h < heads; h++) {
+        float* row = x + h * hd;
+        for (int j = 0; j < hd; j++) {
+            double sum = 0.0;
+            for (int i = 0; i < hd; i++) { sum += (double)row[i] * blk.rot[i * hd + j]; }
+            scratch[j] = (float)sum;
+        }
+        memcpy(row, scratch, hd * sizeof(float));
+    }
+}
+
+static void blocks_probe_layer(Transformer* t, BlockGraph* bg, int pos, float alpha) {
+    if (!blk.probe || bg->count != 1) { return; }
+    Config* p = &t->config;
+    TransformerWeights* w = &t->weights;
+    int l = bg->first, d = p->dim, f = p->hidden_dim;
+    int hd = d / p->n_heads, kd = hd * p->n_kv_heads, group = p->n_heads / p->n_kv_heads;
+    size_t count = (size_t)7 * d + (size_t)2 * kd + (size_t)3 * f + blk.T + 1;
+    float* mem = malloc(count * sizeof(float));
+    if (!mem) { fprintf(stderr, "nnapi: blocks: probe: allocation failed\n"); return; }
+    float *xn = mem, *q = xn + d, *mixed = q + d, *attended = mixed + d;
+    float *h = attended + d, *hn = h + d, *down = hn + d, *k = down + d, *v = k + kd;
+    float *gate = v + kd, *up = gate + f, *hidden = up + f, *scores = hidden + f;
+    MatmulGraph* m = &nn.graphs[blk.first_matrix + BLOCK_MATRICES * l];
+    float epsilon = blk.scaled_eps ? (float)((double)NORM_EPS * alpha * alpha) : BLOCK_EPS;
+    blocks_probe_stats(pos, l, "alpha", &alpha, 1);
+    blocks_probe_stats(pos, l, "x", blk.x, d);
+    blocks_probe_norm(xn, blk.x, w->rms_att_weight + (size_t)l * d, d, epsilon);
+    blocks_probe_stats(pos, l, "xn", xn, d);
+    if (blocks_probe_linear(q, xn, m, 1.0f / sqrtf((float)hd), w->bq ? w->bq + (size_t)l * d : NULL, pos, l, "q_raw")
+        || blocks_probe_linear(k, xn, m + 1, 1.0f, w->bk ? w->bk + (size_t)l * kd : NULL, pos, l, "k_raw")
+        || blocks_probe_linear(v, xn, m + 2, 1.0f, w->bv ? w->bv + (size_t)l * kd : NULL, pos, l, "v_raw")) { goto failed; }
+    blocks_probe_rope(q, mixed, p->n_heads, hd);
+    blocks_probe_rope(k, mixed, p->n_kv_heads, hd);
+    blocks_probe_stats(pos, l, "q", q, d);
+    blocks_probe_stats(pos, l, "k", k, kd);
+    blocks_probe_stats(pos, l, "v", v, kd);
+    for (int head = 0; head < p->n_heads; head++) {
+        int kv = head / group;
+        size_t at = ((size_t)l * p->n_kv_heads + kv) * blk.T * hd;
+        // Include masked slots exactly as the graph does; the current token is at T.
+        for (int slot = 0; slot <= blk.T; slot++) {
+            const float* key = slot == blk.T ? k + kv * hd : blk.kc + at + (size_t)slot * hd;
+            double sum = 0.0;
+            for (int i = 0; i < hd; i++) { sum += (double)q[head * hd + i] * key[i]; }
+            scores[slot] = (float)sum + blk.mask[slot];
+        }
+        softmax(scores, blk.T + 1);
+        for (int i = 0; i < hd; i++) {
+            double sum = 0.0;
+            for (int slot = 0; slot <= blk.T; slot++) {
+                float value = slot == blk.T ? v[kv * hd + i] : blk.vc[at + (size_t)slot * hd + i];
+                sum += (double)scores[slot] * value;
+            }
+            mixed[head * hd + i] = (float)sum;
+        }
+    }
+    blocks_probe_stats(pos, l, "mixed", mixed, d);
+    if (blocks_probe_linear(attended, mixed, m + 3, 1.0f, NULL, pos, l, "attended_raw")) { goto failed; }
+    blocks_probe_stats(pos, l, "attended", attended, d);
+    for (int i = 0; i < d; i++) { h[i] = blk.x[i] + alpha * attended[i]; }
+    blocks_probe_stats(pos, l, "h", h, d);
+    for (int i = 0; i < d; i++) { down[i] = h[i] * h[i]; }
+    blocks_probe_stats(pos, l, "h_squared", down, d);
+    blocks_probe_norm(hn, h, w->rms_ffn_weight + (size_t)l * d, d, epsilon);
+    blocks_probe_stats(pos, l, "hn", hn, d);
+    if (blocks_probe_linear(gate, hn, m + 4, 1.0f, NULL, pos, l, "gate_raw")
+        || blocks_probe_linear(up, hn, m + 5, 1.0f, NULL, pos, l, "up_raw")) { goto failed; }
+    blocks_probe_stats(pos, l, "gate", gate, f);
+    blocks_probe_stats(pos, l, "up", up, f);
+    for (int i = 0; i < f; i++) { hidden[i] = (gate[i] * (1.0f / (1.0f + expf(-gate[i])))) * up[i]; }
+    blocks_probe_stats(pos, l, "hidden", hidden, f);
+    if (blocks_probe_linear(down, hidden, m + 6, 1.0f, NULL, pos, l, "down_raw")) { goto failed; }
+    blocks_probe_stats(pos, l, "down", down, d);
+    for (int i = 0; i < d; i++) { down[i] *= alpha; h[i] += down[i]; }
+    blocks_probe_stats(pos, l, "alpha_down", down, d);
+    blocks_probe_stats(pos, l, "y", h, d);
+    if (blk.renorm) {
+        double sum = 0.0;
+        for (int i = 0; i < d; i++) { h[i] /= 64.0f; down[i] = h[i] * h[i]; sum += down[i]; }
+        blocks_probe_stats(pos, l, "renorm_squared", down, d);
+        float r = (float)(1.0 / sqrt(sum / d + 1e-6f)) * (blk.norm / sqrtf((float)d));
+        float ar = alpha * r, out_alpha = ar / 64.0f;
+        blocks_probe_stats(pos, l, "alpha_r", &ar, 1);
+        blocks_probe_stats(pos, l, "out_alpha", &out_alpha, 1);
+        for (int i = 0; i < d; i++) { h[i] *= r; }
+        blocks_probe_stats(pos, l, "y_renorm", h, d);
+    }
+    free(mem);
+    return;
+failed:
+    fprintf(stderr, "nnapi: blocks: probe: pos %d layer %d cannot read quantized weights\n", pos, l);
+    free(mem);
+}
+
 static int blocks_run(Transformer* t, BlockGraph* bg, float alpha) {
     // an execution is single use: what is kept between calls is the compilation
     double start = now_ms();
@@ -1000,6 +1177,9 @@ static int blocks_forward(Transformer* t, unsigned long long* layer, int pos) {
         blk.x[i] = s->x[i] * alpha;
     }
 
+    // Before execution: preserves the exact input/history, and also diagnoses a graph
+    // whose first execution returns non-finite values. No model or cache is mutated.
+    if (blk.probe) { blocks_probe_layer(t, bg, pos, alpha); }
     double start = now_ms();
     int e = blocks_run(t, bg, alpha);
     float output_alpha = blk.rescale || blk.renorm ? blk.out_alpha : alpha;
