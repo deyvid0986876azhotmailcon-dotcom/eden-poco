@@ -39,6 +39,9 @@
 // NNAPI_W4_CALIB         island range file; absent file collects 8 CPU tokens
 // NNAPI_W4_MARGIN        activation range headroom, default 2
 // NNAPI_BLOCK_T=<n>       positions kept, default 256
+// NNAPI_BLOCK_ATTN=fc    experimental dynamic FC per KV head instead of attention BATCH_MATMUL;
+//                         default bmm, Neuron only. Driver acceptance/speed must be measured.
+// NNAPI_BLOCK_ATTN_DIAG=1 report operation support and requested attention layout at compilation
 // NNAPI_BLOCK_LAYERS=<n>  only the first n layers go in graphs
 // NNAPI_BLOCK_FIRST=<n>   keep layers below n on CPU, default 0; LAYERS remains the exclusive end
 // NNAPI_BLOCK_NORM=<f>    length of the residual at the input of a graph, default 64
@@ -55,7 +58,8 @@ enum { ANEURALNETWORKS_FLOAT32 = 0, ANEURALNETWORKS_BOOL = 6 };
 enum {
     ANEURALNETWORKS_ADD = 0, ANEURALNETWORKS_CONCATENATION = 2, ANEURALNETWORKS_LOGISTIC = 14,
     ANEURALNETWORKS_MUL = 18, ANEURALNETWORKS_RESHAPE = 22, ANEURALNETWORKS_SOFTMAX = 25,
-    ANEURALNETWORKS_MEAN = 31, ANEURALNETWORKS_RSQRT = 83, ANEURALNETWORKS_BATCH_MATMUL = 102,
+    ANEURALNETWORKS_MEAN = 31, ANEURALNETWORKS_TRANSPOSE = 37,
+    ANEURALNETWORKS_RSQRT = 83, ANEURALNETWORKS_BATCH_MATMUL = 102,
 };
 #define BLOCK_MAX_LAYERS 8     // in one graph
 #define BLOCK_MAX_OPS 4096     // rescaled graphs have more scalar/reduction operations
@@ -90,6 +94,7 @@ typedef struct {
     bool safe_norm; // NNAPI_BLOCK_RESCALE=3: rmsnorm squares a sixty-fourth of its input
     bool probe; // CPU range diagnostics, without changing graph outputs or verification
     const char* ablate; // NNAPI_BLOCK_ABLATE: parts left out of the graph to time them; wrong output on purpose
+    bool attention_fc, attention_diag;
     int T;
     float norm; // length the residual is scaled to at the input of a graph
     BlockGraph* groups;
@@ -244,6 +249,7 @@ static const char* block_op_name(int op) {
         case ANEURALNETWORKS_LOGISTIC: return "LOGISTIC";
         case ANEURALNETWORKS_MUL: return "MUL";
         case ANEURALNETWORKS_RESHAPE: return "RESHAPE";
+        case ANEURALNETWORKS_TRANSPOSE: return "TRANSPOSE";
         case ANEURALNETWORKS_SOFTMAX: return "SOFTMAX";
         case ANEURALNETWORKS_MEAN: return "MEAN";
         case ANEURALNETWORKS_RSQRT: return "RSQRT";
@@ -255,6 +261,71 @@ static const char* block_op_name(int op) {
 static float* block_keep(BlockGraph* bg, size_t count) {
     // room for a constant of this graph, freed with it
     return block_keep_bytes(bg, count * sizeof(float));
+}
+
+// Extract one contiguous KV-head matrix from [KVH, rows, cols]. FC treats all
+// G query heads sharing that KV head as its batch, preserving GQA head order.
+static uint32_t bb_attention_head(BlockBuilder* b, uint32_t x, uint32_t head,
+                                   uint32_t heads, uint32_t rows, uint32_t cols) {
+    uint32_t flat[] = {rows, cols};
+    if (heads != 1) {
+        int32_t begin[] = {(int32_t)head, 0, 0}, size[] = {1, (int32_t)rows, (int32_t)cols};
+        uint32_t dims[] = {1, rows, cols};
+        uint32_t in[] = {x, bb_ints(b, begin, 3), bb_ints(b, size, 3)};
+        x = bb_op(b, NEURON_SLICE, 3, in, bb_tensor(b, 3, dims));
+    }
+    return bb_reshape(b, x, 2, flat);
+}
+
+// Inputs are already rotated/scaled; the current token is the LAST slot in
+// keys/values. This helper does not change K/V outputs, cache writes or alpha.
+static uint32_t bb_attention_mix(BlockBuilder* b, uint32_t q, uint32_t keys,
+                                 uint32_t values, uint32_t mask, uint32_t kvh,
+                                 uint32_t group, uint32_t hd, uint32_t slots, float beta) {
+    uint32_t qd[] = {kvh, group, hd}, attd[] = {kvh, group, slots};
+    bool no_softmax = blk.ablate && strchr(blk.ablate, 'm');
+    if (!blk.attention_fc) {
+        uint32_t scores = bb_matmul(b, q, keys, true, attd);
+        scores = bb_add(b, scores, mask, 3, attd);
+        uint32_t in[] = {scores, bb_float(b, beta)};
+        uint32_t weights = no_softmax ? scores
+            : bb_op(b, ANEURALNETWORKS_SOFTMAX, 2, in, bb_tensor(b, 3, attd));
+        return bb_matmul(b, weights, values, false, qd);
+    }
+
+    uint32_t md[] = {1, slots}, sd[] = {group, slots}, od[] = {group, hd};
+    uint32_t td[] = {hd, slots};
+    mask = bb_reshape(b, mask, 2, md);
+    float* zeros = block_keep(b->owner, slots > hd ? slots : hd);
+    memset(zeros, 0, (slots > hd ? slots : hd) * sizeof(float));
+    uint32_t score_bias = bb_const(b, 1, &slots, zeros, slots);
+    uint32_t value_bias = bb_const(b, 1, &hd, zeros, hd);
+    int32_t permutation[] = {1, 0};
+    uint32_t perm = bb_ints(b, permutation, 2), activation = bb_int(b, 0);
+    uint32_t temperature = bb_float(b, beta), mixed = 0;
+    for (uint32_t h = 0; h < kvh; h++) {
+        uint32_t qh = bb_attention_head(b, q, h, kvh, group, hd);
+        uint32_t kh = bb_attention_head(b, keys, h, kvh, slots, hd);
+        // Dynamic FLOAT32 filters, not quantized model weights: FC(Q,K,0)=Q K^T.
+        uint32_t score_in[] = {qh, kh, score_bias, activation};
+        uint32_t scores = bb_op(b, ANEURALNETWORKS_FULLY_CONNECTED, 4, score_in, bb_tensor(b, 2, sd));
+        scores = bb_add(b, scores, mask, 2, sd);
+        uint32_t softmax_in[] = {scores, temperature};
+        uint32_t weights = no_softmax ? scores
+            : bb_op(b, ANEURALNETWORKS_SOFTMAX, 2, softmax_in, bb_tensor(b, 2, sd));
+        uint32_t vh = bb_attention_head(b, values, h, kvh, slots, hd);
+        uint32_t transpose_in[] = {vh, perm};
+        uint32_t vt = bb_op(b, ANEURALNETWORKS_TRANSPOSE, 2, transpose_in, bb_tensor(b, 2, td));
+        uint32_t value_in[] = {weights, vt, value_bias, activation};
+        uint32_t result = bb_op(b, ANEURALNETWORKS_FULLY_CONNECTED, 4, value_in, bb_tensor(b, 2, od));
+        if (!h) { mixed = result; }
+        else {
+            uint32_t joined[] = {(h + 1) * group, hd};
+            uint32_t concat_in[] = {mixed, result, bb_int(b, 0)};
+            mixed = bb_op(b, ANEURALNETWORKS_CONCATENATION, 3, concat_in, bb_tensor(b, 2, joined));
+        }
+    }
+    return bb_reshape(b, mixed, 3, qd);
 }
 
 // ---- the pieces of a layer
@@ -609,7 +680,6 @@ static uint32_t bb_layer(BlockBuilder* b, BlockGraph* bg, Transformer* t, int l,
     uint32_t qd[] = {KVH, G, HD};      // the queries, grouped by the key head they share
     uint32_t kd[] = {KVH, 1, HD};      // the key (or value) of this position
     uint32_t alld[] = {KVH, T + 1, HD}; // and with the ones before
-    uint32_t attd[] = {KVH, G, T + 1};
     uint32_t alpha = *scale, one = 1;
     MatmulGraph* m = &nn.graphs[blk.first_matrix + BLOCK_MATRICES * l]; // wq, wk, wv, wo, w1, w3, w2
     // the scores are divided by sqrt(head_size): done on the queries, that is the same and keeps the products smaller
@@ -662,13 +732,8 @@ static uint32_t bb_layer(BlockBuilder* b, BlockGraph* bg, Transformer* t, int l,
         uint32_t maskd[] = {1, 1, T + 1};
         mask = bb_mul(b, mask, bb_number(b, score_gain), 3, maskd);
     }
-    uint32_t scores = bb_matmul(b, q, keys, true, attd);
-    scores = bb_add(b, scores, mask, 3, attd);
     // Restore the temperature inside stable SOFTMAX; masked logits scale too.
-    uint32_t softmax_in[] = {scores, bb_float(b, 1.0f / score_gain)}; // beta
-    uint32_t weights = blk.ablate && strchr(blk.ablate, 'm') ? scores
-                     : bb_op(b, ANEURALNETWORKS_SOFTMAX, 2, softmax_in, bb_tensor(b, 3, attd));
-    uint32_t mixed = bb_matmul(b, weights, values, false, qd);
+    uint32_t mixed = bb_attention_mix(b, q, keys, values, mask, KVH, G, HD, T + 1, 1.0f / score_gain);
     mixed = bb_reshape(b, mixed, 2, xd);
     // 'a': the queries in place of what the attention mixed; the scores and softmax go unused
     if (blk.ablate && strchr(blk.ablate, 'a')) { mixed = bb_reshape(b, q, 2, xd); }
@@ -843,13 +908,27 @@ static void blocks_compile(Transformer* t, BlockGraph* bg) {
         // accelerator doesn't take and the whole graph fails. this says which
         const ANeuralNetworksDevice* const one[1] = {nn.device};
         int rejected = 0;
-        if (block_api.Model_getSupportedOperationsForDevices(bg->model, one, 1, takes) == 0) {
+        int support_error = block_api.Model_getSupportedOperationsForDevices(bg->model, one, 1, takes);
+        if (support_error == 0) {
             for (uint32_t i = 0; i < b.n_ops; i++) {
                 if (takes[i]) { continue; }
                 if (rejected++ < 8) {
                     fprintf(stderr, "nnapi: blocks: %s does not take operation %u, a %s\n",
                             nn.device_name, i, block_op_name(b.ops[i]));
                 }
+            }
+        }
+        if (blk.attention_diag) {
+            fprintf(stderr, "nnapi: attention: layers %d..%d mode=%s KVH=%d G=%d HD=%d slots=%d; "
+                    "single device=%s, FLOAT32 with FP16 relaxation (actual internal precision unknown); "
+                    "support_query=%d rejected=%d/%u\n", bg->first, bg->first + bg->count - 1,
+                    blk.attention_fc ? "fc" : "bmm", t->config.n_kv_heads,
+                    t->config.n_heads / t->config.n_kv_heads, t->config.dim / t->config.n_heads,
+                    blk.T + 1, nn.device_name, support_error, rejected, b.n_ops);
+            for (int op = 0; op < 256; op++) {
+                unsigned count = 0;
+                for (uint32_t i = 0; i < b.n_ops; i++) { count += b.ops[i] == op; }
+                if (count) { fprintf(stderr, "nnapi: attention: graph contains %u %s\n", count, block_op_name(op)); }
             }
         }
         if (rejected) { e = -1; }
@@ -956,6 +1035,19 @@ static void blocks_setup_impl(Transformer* t) {
     blk.rescale = rescale && atoi(rescale) != 0 && !blk.renorm;
     const char* probe = getenv("NNAPI_BLOCK_PROBE");
     blk.probe = probe && atoi(probe) == 1 && !blk.rescale;
+    const char* attention = getenv("NNAPI_BLOCK_ATTN");
+    if (attention && *attention && strcmp(attention, "bmm") && strcmp(attention, "fc")) {
+        fprintf(stderr, "nnapi: NNAPI_BLOCK_ATTN must be bmm or fc; blocks disabled\n");
+        return;
+    }
+    blk.attention_fc = attention && strcmp(attention, "fc") == 0;
+    if (blk.attention_fc && !nn.neuron) {
+        fprintf(stderr, "nnapi: NNAPI_BLOCK_ATTN=fc requires Neuron; blocks disabled\n");
+        return;
+    }
+    const char* attention_diag = getenv("NNAPI_BLOCK_ATTN_DIAG");
+    blk.attention_diag = attention_diag && atoi(attention_diag) != 0;
+    if (blk.attention_fc) { fprintf(stderr, "nnapi: attention: experimental FC per KV head, dynamic filters; check support and VERIFY before timing\n"); }
     // letters: n = no rmsnorm, r = no RoPE, a = no attention, s = no SiLU, c = no row corrections,
     // m = no softmax
     blk.ablate = getenv("NNAPI_BLOCK_ABLATE");

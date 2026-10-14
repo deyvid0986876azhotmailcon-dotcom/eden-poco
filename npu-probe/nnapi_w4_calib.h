@@ -180,11 +180,55 @@ static int w4_replay_op(W4Replay* replay, int op, const uint32_t* in, uint32_t o
         for (size_t i = 0; i < z->count; i += width) { softmax(data + i, (int)width); }
     } else if (op == ANEURALNETWORKS_CONCATENATION) {
         W4Operand* b = &o[in[1]];
+        if (!b->data) { return -1; }
+        if (a->rank == 2 && b->rank == 2 && *(const int32_t*)o[in[2]].data == 0
+            && a->dims[1] == b->dims[1] && z->count == a->count + b->count) {
+            memcpy(data, x, a->count * sizeof(float));
+            memcpy(data + a->count, b->data, b->count * sizeof(float));
+            return 0;
+        }
         if (a->rank != 3 || *(const int32_t*)o[in[2]].data != 1) { return -1; }
         size_t ac = (size_t)a->dims[1] * a->dims[2], bc = (size_t)b->dims[1] * b->dims[2];
         for (uint32_t batch = 0; batch < a->dims[0]; batch++) {
             memcpy(data + batch * (ac + bc), x + batch * ac, ac * sizeof(float));
             memcpy(data + batch * (ac + bc) + ac, (const float*)b->data + batch * bc, bc * sizeof(float));
+        }
+    } else if (op == NEURON_SLICE) {
+        // Attention extracts a whole contiguous head, preserving rank 3.
+        const int32_t *begin = o[in[1]].data, *size = o[in[2]].data;
+        if (!begin || !size || a->rank != 3 || z->rank != 3 || begin[0] < 0
+            || (uint32_t)begin[0] >= a->dims[0] || begin[1] || begin[2]
+            || size[0] != 1 || size[1] != (int32_t)a->dims[1] || size[2] != (int32_t)a->dims[2]
+            || z->count != (size_t)a->dims[1] * a->dims[2]) { return -1; }
+        memcpy(data, x + (size_t)begin[0] * z->count, z->count * sizeof(float));
+    } else if (op == ANEURALNETWORKS_TRANSPOSE) {
+        const int32_t* perm = o[in[1]].data;
+        if (!perm || a->rank != 2 || z->rank != 2 || perm[0] != 1 || perm[1] != 0
+            || z->dims[0] != a->dims[1] || z->dims[1] != a->dims[0]) { return -1; }
+        for (uint32_t i = 0; i < a->dims[0]; i++) {
+            for (uint32_t j = 0; j < a->dims[1]; j++) {
+                data[(size_t)j * a->dims[0] + i] = x[(size_t)i * a->dims[1] + j];
+            }
+        }
+    } else if (op == ANEURALNETWORKS_FULLY_CONNECTED) {
+        // Dynamic float filters in attention. Quantized model FCs have their
+        // own replay in bb_linear_gain, including ranges and row correction.
+        W4Operand *w = &o[in[1]], *bias = &o[in[2]];
+        const float *weights = w->data, *offset = bias->data;
+        const int32_t* activation = o[in[3]].data;
+        if (!weights || !offset || !activation || *activation != 0 || a->rank != 2
+            || w->rank != 2 || z->rank != 2 || a->type != ANEURALNETWORKS_TENSOR_FLOAT32
+            || w->type != ANEURALNETWORKS_TENSOR_FLOAT32 || bias->type != ANEURALNETWORKS_TENSOR_FLOAT32
+            || w->dims[1] != a->dims[1] || bias->count != w->dims[0]
+            || z->dims[0] != a->dims[0] || z->dims[1] != w->dims[0]) { return -1; }
+        for (uint32_t row = 0; row < a->dims[0]; row++) {
+            for (uint32_t col = 0; col < w->dims[0]; col++) {
+                double sum = offset[col];
+                for (uint32_t j = 0; j < a->dims[1]; j++) {
+                    sum += (double)x[(size_t)row * a->dims[1] + j] * weights[(size_t)col * a->dims[1] + j];
+                }
+                data[(size_t)row * w->dims[0] + col] = (float)sum;
+            }
         }
     } else if (op == ANEURALNETWORKS_BATCH_MATMUL) {
         W4Operand* b = &o[in[1]];

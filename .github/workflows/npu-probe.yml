@@ -29,6 +29,14 @@ jobs:
           "$CC" -O2 -Wall -DPROBE_EXE -o out/npu_probe npu_probe.c -llog -ldl -lm
           # what the compiler says goes into the artifact: the build log is not readable without a login
           "$CC" -O3 -Wall -o out/run_nnapi run_nnapi.c -llog -ldl -lm 2> out/run_nnapi.build.txt || true
+          # The attention experiment uses the same builder in replay and on the
+          # phone. Run its numerical regression on CI, never on the notebook.
+          gcc -O2 -Wall -o out/run_nnapi_attention_test_host run_nnapi_attention_test.c -ldl -lm -pthread \
+            2> out/attention_host.build.txt
+          ./out/run_nnapi_attention_test_host 2>&1 | tee out/attention_host_test.txt
+          "$CC" -O2 -Wall -o out/run_nnapi_attention_test run_nnapi_attention_test.c -llog -ldl -lm \
+            2> out/attention_android.build.txt
+          cp stage_attention.sh out/
           "$CC" -O2 -Wall -o out/gguf2bin gguf2bin.c -lm
           gcc -O2 -Wall -o out/gguf2bin_host gguf2bin.c -lm
           "$CC" -O2 -Wall -o out/npu_block_probe npu_block_probe.c -llog -ldl -lm
@@ -51,6 +59,7 @@ jobs:
             --out out/npu-probe.apk aligned.apk
 
       - name: Upload probe
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: npu-probe-${{ github.run_number }}
