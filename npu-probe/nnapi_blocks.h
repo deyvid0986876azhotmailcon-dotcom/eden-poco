@@ -764,8 +764,7 @@ static void blocks_setup_impl(Transformer* t) {
     // 2 = the plain graph, with the residual brought back to its length after every layer
     blk.renorm = rescale && atoi(rescale) == 2;
     blk.rescale = rescale && atoi(rescale) != 0 && !blk.renorm;
-    if (blk.renorm) { fprintf(stderr, "nnapi: blocks: residual renormalized after every layer, scale as one more output
-"); }
+    if (blk.renorm) { fprintf(stderr, "nnapi: blocks: residual renormalized after every layer, scale as one more output\n"); }
     blk.scaled_eps = blk.rescale || (scaled_eps && atoi(scaled_eps) != 0);
     blk.norm = norm ? (float)atof(norm) : 64.0f;
     if (!(blk.norm > 0.0f)) { blk.norm = 64.0f; }
