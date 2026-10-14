@@ -16,6 +16,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <pthread.h>
 #include <sched.h>
 #if defined _WIN32
@@ -452,13 +453,15 @@ static void token_end(bool prompt) {
 
 static double token_rate(long n, double ms) { return ms > 0.0 ? n * 1000.0 / ms : 0.0; }
 
+static const char* weight_format = "8-bit";
+
 static void report_speed(void) {
     long n = speed.tokens[0] + speed.tokens[1];
     double ms = speed.ms[0] + speed.ms[1];
     double cpu = speed.cpu[0] + speed.cpu[1], apu = speed.apu[0] + speed.apu[1];
-    fprintf(stderr, "nnapi: speed: %ld tokens in %.3f ms = %.3f tok/s (prompt %ld tokens at %.3f tok/s, generation %ld tokens at %.3f tok/s)\n",
+    fprintf(stderr, "nnapi: speed: %ld tokens in %.3f ms = %.3f tok/s (prompt %ld tokens at %.3f tok/s, generation %ld tokens at %.3f tok/s) weights=%s\n",
             n, ms, token_rate(n, ms), speed.tokens[0], token_rate(speed.tokens[0], speed.ms[0]),
-            speed.tokens[1], token_rate(speed.tokens[1], speed.ms[1]));
+            speed.tokens[1], token_rate(speed.tokens[1], speed.ms[1]), weight_format);
     // Same prefix as throughput: callers filtering "nnapi: speed:" must retain
     // the breakdown too. Both reports are unconditional, including zero tokens.
     fprintf(stderr, "nnapi: speed: time/token: APU graphs %.3f ms, CPU matmul %.3f ms, rest %.3f ms\n",
@@ -710,6 +713,7 @@ typedef struct {
     int n;
     int d;
     void* bias; // FULLY_CONNECTED requires a bias: all zeros
+    int w4_id; // layer * 7 + matrix, or layer_count * 7 + head chunk
     ANeuralNetworksModel* model; // has to outlive the compilation
     ANeuralNetworksCompilation* compilation; // NULL if the device rejected it: this matrix stays on the CPU
     // the rest is only for a graph with 8-bit weights
@@ -858,8 +862,14 @@ static void weights_files_setup(void) {
     nn.weights_from.checkpoint_mtime = st.st_mtime;
     nn.weights_from.group_size = GS;
     strcpy(nn.weights_path, path);
-    fprintf(stderr, "nnapi: 8-bit weights in %s.<matrix>\n", path);
+    if (strcmp(weight_format, "8-bit") == 0) {
+        fprintf(stderr, "nnapi: 8-bit weights in %s.<matrix>\n", path);
+    } else {
+        fprintf(stderr, "nnapi: %s weights in %s.w4.<matrix>\n", weight_format, path);
+    }
 }
+
+static bool w4_options(void);
 
 static void nnapi_setup_impl(void) {
     // the accelerators NNAPI lists on the Dimensity 8300; the MDLA (the APU itself) goes first
@@ -870,6 +880,7 @@ static void nnapi_setup_impl(void) {
     nn.state = -1;
     const char* backend = getenv("NNAPI_BACKEND");
     nn.neuron = backend && strcmp(backend, "neuron") == 0;
+    if (!w4_options()) { return; }
     if (want && strcmp(want, "off") == 0) { return; }
     if (nn.neuron) {
         fprintf(stderr, "nnapi: blocks: backend neuron, compiling each startup (no compilation cache)\n");
@@ -921,6 +932,7 @@ static void nnapi_setup_impl(void) {
     const char* q8 = getenv("NNAPI_Q8");
     int mode = q8 ? atoi(q8) : 0;
     nn.q8 = mode == 2 ? Q8_IO : (GS != 0 || mode == 1) ? Q8_DEQUANT : Q8_OFF;
+    if (nn.q8 == Q8_OFF) { weight_format = "fp32 (relaxed fp16)"; }
     if (nn.q8) { weights_files_setup(); }
 
     const char* verify = getenv("NNAPI_VERIFY");
@@ -1079,6 +1091,8 @@ static int prepare_weights_8bit(MatmulGraph* g) {
     close(fd);
     return e;
 }
+
+#include "nnapi_w4.h"
 
 static int add_operand(ANeuralNetworksModel* m, int32_t type, uint32_t rank, const uint32_t* dims,
                        float scale, int32_t zero) {
@@ -1392,8 +1406,8 @@ void report_matmul() {
         if (nn.graphs[i].compilation) { compiled++; }
     }
     if (nn.q8) {
-        fprintf(stderr, "nnapi: 8-bit weights made ready in %.0f ms, kept in %s\n",
-                nn.weights_ms, nn.weights_path[0] != '\0' ? "the weights files" : "RAM");
+        fprintf(stderr, "nnapi: %s weights made ready in %.0f ms, kept in %s\n",
+                weight_format, nn.weights_ms, nn.weights_path[0] != '\0' ? "the weights files" : "RAM");
     }
     fprintf(stderr, "nnapi: %d of %d matmul graphs compiled for %s in %.0f ms\n",
             compiled, nn.n_graphs, nn.device_name, nn.compile_ms);
@@ -1430,6 +1444,7 @@ void free_matmul() {
         free(g->out);
     }
     free(nn.graphs);
+    free(w4.ranges);
     if (neuron_lib) { dlclose(neuron_lib); neuron_lib = NULL; }
 }
 
@@ -1608,6 +1623,7 @@ float* forward(Transformer* transformer, int token, int pos) {
     if (!head_forward(transformer, x, s->logits, pos)) {
         matmul(s->logits, x, w->wcls, p->dim, p->vocab_size);
     }
+    w4_calib_token();
     return s->logits;
 }
 
@@ -2205,6 +2221,10 @@ void error_usage() {
     fprintf(stderr, "  NNAPI_BLOCK_PROBE  1 = CPU range replay of single-layer graphs (RESCALE=0/2); includes raw FC outputs, slows execution\n");
     fprintf(stderr, "  NNAPI_CPU_THREADS  CPU matmul threads, 1-8, default 4; cores 4-7, caller included\n");
     fprintf(stderr, "  NNAPI_HEAD_CHUNK  classifier rows per FC in one Neuron graph, default 0 (off)\n");
+    fprintf(stderr, "  NNAPI_WEIGHT_BITS  8 (default) or 4 (Neuron blocks and optional head)\n");
+    fprintf(stderr, "  NNAPI_W4_MODE     hybrid (default) or island (FLOAT32/A16W4/FLOAT32)\n");
+    fprintf(stderr, "  NNAPI_W4_CALIB    island range file; missing file collects CPU ranges then saves\n");
+    fprintf(stderr, "  NNAPI_W4_CALIB_TOKENS  CPU tokens to calibrate, default 8; margin NNAPI_W4_MARGIN=2\n");
     exit(EXIT_FAILURE);
 }
 
@@ -2273,6 +2293,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "unknown mode: %s\n", mode);
         error_usage();
     }
+    w4_calib_save(); // Also keep a complete calibration from a short prompt.
     report_speed();
     report_matmul();
     if (nn.verify) { fprintf(stderr, "nnapi: speed includes CPU verification work\n"); }
