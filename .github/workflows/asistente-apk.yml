@@ -3,8 +3,6 @@ on:
   push:
     branches: [main]
     paths: ['asistente_apk/**', '.github/workflows/asistente-apk.yml']
-  pull_request:
-    paths: ['asistente_apk/**', '.github/workflows/asistente-apk.yml']
   workflow_dispatch:
 
 permissions:
@@ -16,16 +14,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      # The runner already has the Android SDK and Gradle, as chat-apk.yml relies on.
+      - uses: actions/setup-java@v3
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.7'
-      - name: Install SDK
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
       - name: JVM tests and APK
         working-directory: asistente_apk
         run: gradle --no-daemon test assembleDebug
