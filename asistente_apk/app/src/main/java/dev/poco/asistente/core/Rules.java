@@ -52,7 +52,7 @@ public final class Rules {
         // Exact local commands also make CRUD possible without a Gemini key.
         m = Pattern.compile("borrar ([a-f0-9-]{36})").matcher(text);
         if (m.matches()) return Result.call("borrar_registro", Json.object("id", m.group(1)));
-        m = Pattern.compile("corregir ([a-f0-9-]{36}) (\\{.*})", Pattern.DOTALL).matcher(raw.trim());
+        m = Pattern.compile("corregir ([a-f0-9-]{36}) (\\{.*\\})", Pattern.DOTALL).matcher(raw.trim());
         if (m.matches()) {
             try { return Result.call("corregir_registro", Json.object("id", m.group(1), "cambios", new JSONObject(m.group(2)))); }
             catch (Exception e) { return Result.ask("Revisá el JSON: corregir ID {\"centavos\":350000}."); }

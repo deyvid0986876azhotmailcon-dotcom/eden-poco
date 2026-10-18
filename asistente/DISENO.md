@@ -1,7 +1,7 @@
 # Asistente personal de David: diseño
 
 Decisiones de David (2026-10-14):
-- WhatsApp oficial (WhatsApp Cloud API de Meta), con un chip nuevo para el asistente. Responde solo al número personal de David.
+- Decisión original: WhatsApp Cloud API de Meta, con un chip nuevo. **Sustituida el 2026-10-17:** Meta restringe la publicidad de la cuenta de David y no permite crear el portfolio comercial (dato del encargo de Claude). David eligió una integración no oficial con un número de repuesto, aceptando el riesgo. La API oficial queda para cuando Meta levante la restricción.
 - Puede ir a la nube todo: gastos, peso, documentos.
 - El modelo grande es Gemini, con una clave gratis de Google AI Studio. En el nivel gratis, Google puede usar lo que se le manda para mejorar sus productos; David lo aceptó.
 - Control del teléfono: nivel 3.
@@ -9,18 +9,34 @@ Decisiones de David (2026-10-14):
 ## Las piezas
 
 ```
-David (WhatsApp) ──► Meta Cloud API ──webhook──► Relevo (Cloudflare Worker, gratis)
-                                                    │  guarda el mensaje en una cola
-Teléfono (app Asistente) ◄──── consulta la cola ────┘
-   │  modelo local en la APU: entender el pedido, clasificar, respuestas cortas
-   │  Gemini (AI Studio): contratos, PDFs, planes, lo difícil
-   │  base local SQLite: gastos, ingresos, presupuestos, peso, comidas, entrenos
-   │  servicio de accesibilidad: acciones en el teléfono (nivel 3)
-   └──► Meta Cloud API (envía la respuesta, PDFs como documento)
+David (WhatsApp personal, com.whatsapp)
+   │ mensaje al número de repuesto
+   ▼
+WhatsApp Business (com.whatsapp.w4b), en el mismo Poco
+   │ aviso de mensaje nuevo
+   ▼
+Asistente (APK independiente, dev.poco.asistente)
+   │ NotificationListenerService → filtro de remitente → SQLite → cola única
+   │ AssistantCore: reglas locales; Gemini cuando las reglas no alcanzan
+   │ SQLite: registros, deduplicación, respuestas pendientes y bitácora
+   └──► RemoteInput + PendingIntent «Responder» del aviso → WhatsApp Business
 ```
 
-- **Por qué un relevo:** Meta manda cada mensaje a una dirección HTTPS pública, y el teléfono está detrás del router de la casa. El relevo es un Worker de Cloudflare (nivel gratis, a confirmar) que solo recibe, comprueba la firma de Meta (`X-Hub-Signature-256` con el App Secret), descarta todo lo que no venga del número de David y lo guarda en una cola. El teléfono la consulta cada pocos segundos con una clave propia. El relevo no tiene la clave de Gemini ni datos de David más allá de los mensajes en tránsito, que borra al entregarlos.
-- **La app:** se agrega al chat APK que ya existe (`chat_apk`), que ya corre los modelos en la APU. Corre como servicio en primer plano con notificación fija y una excepción de batería, porque HyperOS cierra lo que corre en segundo plano.
+- **Sin servidor ni cliente que imite WhatsApp Web:** no se usa Cloudflare, sesiones web ni tokens de Meta. El único envío lo realiza la acción de respuesta proporcionada por WhatsApp Business. Esta fase responde texto; no manda PDFs por RemoteInput ni inicia conversaciones sin un aviso.
+- **La app:** la fase 1 ya es una app independiente (`asistente_apk`), sin APU ni accesibilidad. La fase 2 agrega un `NotificationListenerService` enlazado por Android y protegido con `BIND_NOTIFICATION_LISTENER_SERVICE`; núcleo y cola pertenecen a `Application`, sobreviven a la rotación de pantalla. No se agrega un servicio `specialUse`: la continuidad depende del listener y del sistema. HyperOS, batería y desconexiones requieren prueba real.
+
+## Mensajería de fase 2 (implementación de Codex, 2026-10-17; pendiente de CI y teléfono)
+
+- **Activación explícita:** «Responder por WhatsApp» empieza apagado. Se guarda el nombre EXACTO del contacto personal de David en WhatsApp Business y, opcionalmente, el teléfono personal E.164. El botón de Ajustes abre `ACTION_NOTIFICATION_LISTENER_SETTINGS`. En Android 13+ una instalación fuera de Play puede requerir Información de la app → menú → «Permitir ajustes restringidos». El permiso del sistema es general; el código descarta cualquier paquete distinto de `com.whatsapp.w4b` antes de extraer contenido.
+- **Identidad:** se toma el `Person` del último mensaje de `MessagingStyle` (nombre, clave y URI). Se exige el nombre exacto, sin normalizar mayúsculas, acentos ni espacios. Si `uri` contiene `tel:`, se compara su número con el E.164 configurado; una discrepancia o un `tel:` mal formado rechaza el aviso. Una `Person.key` que ya sea E.164 también se compara; una clave opaca nunca autoriza. Un conflicto entre ambos identificadores rechaza. Si no hay número verificable o no se configuró, se acepta solo el nombre y queda anotado «nombre exacto» en Registro.
+- **Límite del nombre guardado:** el nombre de agenda lo elige David en su propio teléfono; un desconocido no puede cambiar esa entrada de contactos a distancia. La hipótesis de este camino es que WhatsApp muestra ese nombre local para contactos guardados y el número para no guardados. **Codex no lo comprobó en esta versión de WhatsApp Business y no es una garantía de Android.** Un nombre de perfil de un desconocido, cambios de formato, sincronización de agenda, contactos duplicados, otro contacto renombrado igual o una cuenta tomada pueden romper esa hipótesis. El listener no recibe una prueba de que el nombre salió de la agenda. No se afirma que un nombre de `Person` por sí solo sea imposible de falsificar: comprobar con un número no guardado cuyo perfil se llame «Yo David» antes de habilitar uso real. El E.164 verificable es preferible, pero su ausencia permite el modo por nombre solicitado.
+- **Grupos y mensajes propios:** se descartan `FLAG_GROUP_SUMMARY`, conversaciones marcadas como grupo, títulos de conversación y listas con varios remitentes. Si no se puede determinar que es un chat individual, se rechaza. Si el último mensaje tiene remitente nulo (respuesta propia), no se vuelve a tomar un mensaje recibido anterior. Sin mensajes de `MessagingStyle`, se usa `EXTRA_TEXT`, `EXTRA_TITLE` y `Notification.when` solo con indicador explícito de conversación individual y sin historial de RemoteInput; faltas de metadatos se rechazan. Este criterio puede descartar chats legítimos; se ajustará con evidencia del teléfono, no relajando el filtro a ciegas.
+- **Deduplicación persistente:** SQLite v2 agrega `wa_messages` y `wa_log`, conservando tablas y registros v1. El identificador es SHA-256 de clave del aviso + hora del mensaje + SHA-256 del texto, con delimitación inequívoca. Se inserta con clave primaria antes de encolar. Un mismo texto enviado en otro instante es un pedido distinto. Los IDs no se podan; la bitácora conserva 500 eventos, muestra los últimos 200 y nunca guarda texto de rechazados. No se persiste el texto entrante; solo remitente aceptado, estado y respuesta pendiente. Registro muestra hasta 50 respuestas pendientes, con hora y estado.
+- **Orden y PARAR:** una sola cola ejecuta los pedidos locales y de WhatsApp en orden de admisión. La recepción y SQLite usan un ejecutor separado para que PARAR no espere a Gemini. PARAR solo se acepta tras filtro y deduplicación; cancela confirmaciones, invalida el trabajo activo y vacía lo encolado. El botón de Chat o Registro hace lo mismo. Cambiar remitente, apagar el interruptor o desconectar el listener cancela la cola. Una conexión HTTP ya enviada puede esperar su timeout; su resultado no ejecutará acciones ni responderá tras la cancelación. Las acciones ya terminadas no se deshacen. Los avisos recibidos antes de la cancelación pero aún sin admitir se descartan.
+- **Respuesta:** se elige una acción semántica de respuesta o etiquetada Responder/Reply, con RemoteInput de texto libre y PendingIntent creado por `com.whatsapp.w4b`. La respuesta se guarda antes de enviar y se parte en trozos de hasta 1800 puntos de código Unicode, conservando todo el texto. Tras cada invocación correcta se guarda solo el resto pendiente. Sin acción o ante fallo queda visible en Registro, para copiar manualmente. No se reintenta por cuenta propia: «enviada a Responder» significa que Android aceptó el PendingIntent, no que WhatsApp entregó el mensaje. Algunos PendingIntent podrían ser de un solo uso; las partes restantes quedarían pendientes.
+- **Interrupciones:** al reiniciar, los estados en cola/procesando/enviando pasan a interrumpidos y se pide revisar Resumen. No se recuperan órdenes ni se reenvían respuestas automáticamente. Puede perderse un pedido si el proceso muere después de deduplicarlo; también puede haber una respuesta enviada pero sin recibo local de envío. Los avisos solo exponen el último mensaje y no son una cola fiable: una ráfaga puede ocultar mensajes anteriores. No se garantiza entrega ni ejecución exactamente una vez. La operación del núcleo usa un ID estable y un actor `WHATSAPP_OWNER` separado de `LOCAL_USER`, incluidas sus confirmaciones de borrado.
+- **Riesgos aceptados:** integración no oficial, posible bloqueo del número de repuesto y cambios de WhatsApp que rompan avisos o acciones. Chats abiertos, notificaciones desactivadas/silenciadas, contenido oculto, falta de red y cierres del sistema pueden impedir recibir o contestar. No se releen notificaciones antiguas al conectar. El permiso es sensible y se puede revocar desde Android. La firma debug pública sigue en el proyecto: la firma privada y la migración de datos requieren una tarea de Claude antes de distribución/uso estable.
+- **API oficial aplazada:** cuando Meta levante la restricción, reconsiderar Cloud API con verificación de firma y número, cola durable y reglas oficiales de plantillas/ventana. Esas garantías y restricciones no se trasladan automáticamente al listener actual.
 
 ## Qué hace (fase 1 y 2)
 
@@ -32,7 +48,7 @@ Teléfono (app Asistente) ◄──── consulta la cola ────┘
 ## Control del teléfono (nivel 3, fase 3)
 
 Con el servicio de accesibilidad de Android puede abrir apps, leer la pantalla, tocar y escribir. Reglas que no se quitan aunque el nivel sea 3:
-1. Solo obedece mensajes que llegan del número de David, verificados por el relevo con la firma de Meta.
+1. Solo obedece al remitente autorizado mediante el filtro de fase 2. Antes de habilitar accesibilidad/nivel 3 hay que revisar si la identificación disponible es suficiente: el modo por nombre no equivale a la verificación de número y firma de Meta del diseño original.
 2. Lo que **envía** algo a otra persona, **paga**, **compra**, **borra** o **cambia un ajuste** pide confirmación: el asistente contesta qué va a hacer y espera un "SÍ" de David en los 5 minutos siguientes.
 3. No entra a apps de bancos ni billeteras, ni lee contraseñas ni códigos de verificación (SMS de códigos, apps de autenticación). Lista de paquetes bloqueados en el código, no en el prompt.
 4. Lo que dice un documento, una página web o un mensaje de otra persona son datos, nunca órdenes: no puede disparar acciones.
@@ -41,23 +57,25 @@ Con el servicio de accesibilidad de Android puede abrir apps, leer la pantalla, 
 
 ## Lo que tiene que hacer David
 
-1. Conseguir el chip nuevo y no registrarlo en la app de WhatsApp: el número lo usa la API.
-2. Crear una cuenta de Meta for Developers y una app de tipo Business, agregar WhatsApp y el número nuevo (Claude lo guía paso a paso).
-3. Crear la clave de Gemini en aistudio.google.com.
-4. Crear una cuenta gratis de Cloudflare.
+1. Registrar el número de repuesto en WhatsApp Business en el Poco; mantener el número personal en WhatsApp normal.
+2. Guardar el número personal en la agenda con un nombre único y configurar ese nombre exacto y su E.164 en Asistente.
+3. Dar acceso a notificaciones y activar «Responder por WhatsApp». Escribir desde el WhatsApp personal al número de Business; revisar Registro.
+4. Crear/cargar la clave de Gemini en AI Studio si se quieren consultas que las reglas locales no resuelven.
 
-Las claves (token de Meta, App Secret, clave de Gemini, clave del relevo) no van al repositorio: se cargan en la app una vez y quedan en el teléfono. Al relevo van solo las suyas, como secretos del Worker.
+La clave de Gemini no va al repositorio; se carga en la app y queda cifrada con Android Keystore. Este camino no requiere claves de Meta ni de un relevo.
 
 ## Orden de trabajo
 
 1. Diseño revisado por Codex.
 2. Base local y finanzas y salud en la app, probadas con el chat de la app, sin WhatsApp.
 3. Cliente de Gemini (con la clave).
-4. Relevo y WhatsApp (con el chip y las cuentas).
+4. WhatsApp Business mediante avisos y RemoteInput; revisar el código, ejecutar JVM/compilación en Actions y probar filtros, respuesta y PARAR en el teléfono.
 5. Documentos en PDF.
 6. Control del teléfono, de a una acción por vez, con el teléfono libre.
 
 ## Revisión de Codex (2026-10-14, 21 puntos; el informe completo está en `logs/delegado/asistente_diseno_codex_salida.txt`)
+
+**Registro histórico del diseño con Cloud API.** Lo relativo al relevo, firma de Meta, ACK/lease, servicio en primer plano y ventana de 24 horas queda aplazado y no describe la fase 2 actual. Siguen las restricciones del ejecutor y las decisiones de seguridad no sustituidas arriba.
 
 Cambios que se adoptan:
 - **Firma de la app:** hoy se firma con una clave de depuración pública. Antes de guardar claves en el teléfono, la app pasa a una clave de firma privada (secreto de GitHub Actions y copia local fuera del repositorio).
@@ -75,6 +93,8 @@ Cambios que se adoptan:
 A comprobar antes de programar esas partes (pedido a Gemini, `logs/delegado/verificacion_asistente.md`): alta y tokens de Meta, ventana de 24 horas y costos, envío de documentos; cuotas gratis de Cloudflare (KV, Durable Objects, D1); servicio en primer plano y accesibilidad para una app instalada fuera de Play en este Android.
 
 ## Verificado en la documentación oficial (2026-10-14, `logs/delegado/verificacion_asistente.md`)
+
+Datos históricos aportados por el proyecto, no vueltos a verificar por Codex en esta tarea sin red. Cloudflare y los límites de la API oficial no se usan en el camino actual.
 
 - La cola del relevo va en un **Durable Object con SQLite** (gratis: 100.000 pedidos y 100.000 filas escritas por día). KV no sirve: solo 1.000 escrituras por día.
 - El servicio de la app **no puede ser de tipo dataSync** (Android 15+ lo corta a las 6 horas por día): va como `specialUse`, y se prueba en el teléfono que HyperOS no lo cierre.

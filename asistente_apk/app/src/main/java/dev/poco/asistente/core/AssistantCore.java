@@ -9,9 +9,9 @@ import java.util.function.LongSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Reusable without Activity/Service. Phase 2 must authenticate remote input before adding an adapter. */
+/** Reusable without Activity/Service. Only the notification boundary may assert WHATSAPP_OWNER. */
 public final class AssistantCore {
-    public enum Source { LOCAL_USER, UNTRUSTED_DATA }
+    public enum Source { LOCAL_USER, WHATSAPP_OWNER, UNTRUSTED_DATA }
     public interface Settings {
         String apiKey() throws Exception;
         String model();
@@ -41,8 +41,8 @@ public final class AssistantCore {
     public String receive(String text, Source source, String requestId) {
         return receive(text, source, requestId, generation.get());
     }
-    private String receive(String text, Source source, String requestId, long ticket) {
-        if (source != Source.LOCAL_USER) return "Los documentos y mensajes de terceros son datos, no órdenes. No ejecuté nada.";
+    public String receive(String text, Source source, String requestId, long ticket) {
+        if (source != Source.LOCAL_USER && source != Source.WHATSAPP_OWNER) return "Los documentos y mensajes de terceros son datos, no órdenes. No ejecuté nada.";
         if (text == null || text.trim().isEmpty()) return "Escribí un pedido.";
         if (text.length() > 4000) return "El mensaje es demasiado largo (máximo 4000 caracteres).";
         if (requestId == null || !requestId.matches("[A-Za-z0-9_-]{1,120}")) return "ID de mensaje inválido.";
@@ -50,7 +50,8 @@ public final class AssistantCore {
         if (normalized.equals("parar")) return stop(); // independent of an in-flight network request
         synchronized (requestGate) {
             if (ticket != generation.get()) return "Pedido cancelado antes de empezar.";
-            String operation = "local:" + requestId;
+            String actor = source == Source.LOCAL_USER ? "local" : "whatsapp";
+            String operation = actor + ":" + requestId;
             try {
                 String receipt = store.receipt(operation);
                 if (receipt != null) return receipt;
@@ -58,7 +59,7 @@ public final class AssistantCore {
                 if (confirmation.matches()) {
                     synchronized (actionGate) {
                         if (ticket != generation.get()) return "Pedido cancelado.";
-                        return executor.confirm("local", operation, confirmation.group(1).toUpperCase(Locale.ROOT));
+                        return executor.confirm(actor, operation, confirmation.group(1).toUpperCase(Locale.ROOT));
                     }
                 }
                 if (normalized.equals("si") || normalized.startsWith("si "))
@@ -75,7 +76,7 @@ public final class AssistantCore {
                     if (fixed.question != null) return fixed.question;
                     synchronized (actionGate) {
                         if (ticket != generation.get()) return "Pedido cancelado.";
-                        return executor.execute("local", operation, fixed.tool, fixed.args);
+                        return executor.execute(actor, operation, fixed.tool, fixed.args);
                     }
                 }
                 String key;
@@ -89,7 +90,7 @@ public final class AssistantCore {
                     if (ticket != generation.get()) return "Pedido cancelado. No ejecuté la respuesta de Gemini.";
                     String notice = reply.notice == null ? "" : reply.notice;
                     if (reply.tool == null) return notice + reply.text;
-                    return notice + executor.execute("local", operation, reply.tool, reply.args);
+                    return notice + executor.execute(actor, operation, reply.tool, reply.args);
                 }
             } catch (IllegalArgumentException e) {
                 return e.getMessage(); // only local validation/network messages, never raw server bodies

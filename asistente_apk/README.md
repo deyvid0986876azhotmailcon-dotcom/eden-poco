@@ -1,8 +1,9 @@
-# Asistente — fase 1
+# Asistente — fases 1 y 2
 
 App independiente, `dev.poco.asistente`, Java, Android 8/API 26 o posterior,
 target/compile SDK 35. No utiliza modelos locales, `chat_apk`, motores NPU,
-WhatsApp ni accesibilidad. Interfaz nativa: Chat, Resumen y Ajustes.
+accesibilidad. Fase 2 integra los avisos de WhatsApp Business y su acción Responder,
+sin servidor ni cliente WhatsApp Web. Interfaz nativa: Chat, Resumen, Registro y Ajustes.
 
 ## Compilación y pruebas
 
@@ -19,7 +20,10 @@ en `testImplementation`; producción usa las clases JSON de Android y
 `HttpURLConnection`, sin dependencias externas de red. Las pruebas cubren reglas,
 validación/CRUD, códigos de borrado, cancelación, idempotencia, resumen, armado y
 lectura del JSON de Gemini y fallback HTTP con transporte simulado. No usan red.
-No prueban SQLite Android, Keystore ni la Activity: requieren prueba en teléfono.
+También cubren extracción desde datos simples, filtro de remitente/grupos,
+deduplicación con un ledger simulado, división Unicode, orden/cancelación de cola
+y separación del actor WhatsApp. No prueban SQLite Android, Keystore, extracción
+del Bundle real, PendingIntent ni la Activity: requieren prueba en teléfono.
 
 Artefactos: `asistente-debug-<run_number>` y `asistente-tests-<run_number>`.
 El flujo se dispara por push a main, PR que toque las rutas de esta app o ejecución
@@ -52,8 +56,8 @@ local produce la confirmación de un cambio en la base.
 
 - `AssistantCore`: recibe texto, valida origen, resuelve comandos locales,
   reglas y Gemini. No depende de Activity, Context ni Service. `Source.UNTRUSTED_DATA`
-  nunca llega al modelo como orden ni al ejecutor. Solo existe el adaptador local;
-  fase 2 deberá agregar el origen remoto después de autenticarlo.
+  nunca llega al modelo como orden ni al ejecutor. `WHATSAPP_OWNER` se usa solo
+  después del filtro de notificaciones, con sus confirmaciones separadas de `LOCAL_USER`.
 - `ToolExecutor`: lista cerrada de nueve herramientas, tipos estrictos,
   sin coerción de strings a números, campos desconocidos rechazados y validación
   completa también al corregir. Montos: 1 a 99.999.999.999 centavos; monedas
@@ -91,10 +95,11 @@ local produce la confirmación de un cambio en la base.
   PARAR impide pedidos encolados, nuevos intentos y escrituras; la conexión ya enviada puede esperar
   su timeout (conexión 15 s, lectura 30 s). No se usan respuestas HTTP de error
   como texto para el usuario ni se registra la clave en logs.
-- `AssistantApplication`: dueño del núcleo y del worker único. Rotar la Activity
-  no repite un envío. Una caída del proceso antes de guardar pierde la petición
-  pendiente, no deja escrituras parciales. La entrega durable de mensajes remotos
-  es trabajo de fase 2.
+- `AssistantApplication`: dueño del núcleo y la cola única de mensajes. Rotar la
+  Activity no repite un envío. Otro ejecutor atiende avisos/registro para que PARAR
+  no espere a Gemini. Las respuestas pendientes y la deduplicación son persistentes;
+  una caída del proceso no reejecuta los mensajes: se marcan interrumpidos para
+  revisión manual. No se promete entrega durable a partir de notificaciones.
 - `KeyVault`: AES-256-GCM con clave no exportable de Android Keystore, IV nuevo
   y AAD fijo por cifrado. SharedPreferences contiene solo ciphertext e IV.
   Clave Gemini en cabecera HTTPS, nunca en URL ni SQLite. Backups y transferencia
@@ -104,15 +109,39 @@ local produce la confirmación de un cambio en la base.
 ## Firma y pendientes
 
 Por instrucción del 17/10 se copia la **clave debug pública** de `chat_apk`.
-Esto sustituye, solo para esta fase, el orden anterior de DISENO.md que exigía
-firma privada antes de guardar credenciales. Keystore no evita una actualización
-maliciosa firmada con esa misma clave pública. Antes de fase 2 se necesita firma
-privada y un plan de migración que conserve los datos (no desinstalar a ciegas).
+Keystore no evita una actualización maliciosa firmada con esa misma clave pública.
+La fase 2 conserva la firma de desarrollo para permitir actualización y migración
+SQLite v1→v2 sin perder datos. La firma privada y el plan de migración siguen
+pendientes de Claude antes de distribución/uso estable (no desinstalar a ciegas).
 
-Fase 2: servicio en primer plano `specialUse`, relevo WhatsApp con autenticación
-de Meta y número de David, cola durable con ACK/lease, persistencia del mensaje
-entrante y requestId estable, reanudación y deduplicación de entregas, verificación
-de HyperOS y ventana de 24 horas. No convertir datos remotos en `LOCAL_USER`.
+Fase 2 implementada, pendiente de validación: `NotificationListenerService` con
+`BIND_NOTIFICATION_LISTENER_SERVICE`, solo `com.whatsapp.w4b`, mensajes individuales
+y nombre exacto configurado; si hay E.164 verificable se exige coincidencia con el
+número configurado. El modo solo nombre se registra y tiene límites: ver
+`../asistente/DISENO.md`. Los IDs se reclaman en SQLite antes de encolar, sin podarlos.
+Las respuestas se guardan antes de invocar RemoteInput y se dividen a 1800 puntos
+de código. Sin acción de respuesta, o ante fallo, quedan en Registro para copiar.
+El PendingIntent no da confirmación de entrega y nunca se reintenta automáticamente.
+Cloud API queda aplazada por la restricción de Meta; no hay servidor ni `specialUse`.
+
+Para usarlo: configurar nombre exacto y E.164 del número personal, dar acceso a
+notificaciones desde Ajustes y activar el interruptor (apagado inicialmente).
+En Android 13+ una instalación externa puede necesitar «Permitir ajustes
+restringidos» en Información de la app. Escribir desde WhatsApp personal al número
+de repuesto en WhatsApp Business. Hay riesgo de bloqueo del número y de cambios
+incompatibles de WhatsApp. El nombre local de agenda no equivale a una identidad
+verificada por Meta; comprobar un desconocido con el mismo nombre de perfil.
+
+Validación de fase 2 para Claude, después de revisar y ejecutar CI:
+- Instalar sobre v1 y comprobar conservación de registros y deduplicación al reiniciar.
+- Avisos individuales, grupos y resúmenes; desconocido con nombre de perfil igual,
+  nombre parecido, `tel:` distinto y mensajes personales `com.whatsapp`.
+- Respuesta propia/actualizaciones repetidas; ráfaga de mensajes; acción ausente
+  o invalidada, respuesta larga de varias partes y proceso cerrado durante envío.
+- PARAR durante Gemini y con pedidos en cola; apagar/cambiar remitente/revocar
+  permiso; comprobar que no salen respuestas posteriores al cancelado.
+- Contenido oculto, chat abierto, pantalla bloqueada e HyperOS en segundo plano.
+- Confirmaciones de borrado independientes entre chat local y WhatsApp.
 
 Fase 3: accesibilidad habilitada desde el teléfono con autenticación local,
 lista explícita de apps/acciones permitidas, exclusión de bancos/credenciales,

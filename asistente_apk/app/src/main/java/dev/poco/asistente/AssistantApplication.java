@@ -8,16 +8,23 @@ import dev.poco.asistente.core.AssistantCore;
 import dev.poco.asistente.data.AppSettings;
 import dev.poco.asistente.data.AssistantDb;
 import dev.poco.asistente.net.GeminiClient;
+import dev.poco.asistente.messaging.MessageQueue;
+import dev.poco.asistente.messaging.WhatsAppBridge;
 import java.time.Clock;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Process-scoped core survives Activity rotation; phase 2 can reuse it from a foreground service. */
+/** Process-scoped core and ordered queue shared by the Activity and notification listener. */
 public final class AssistantApplication extends Application {
     public AssistantCore core;
     public AppSettings settings;
+    public AssistantDb db;
+    public WhatsAppBridge whatsapp;
+    public final Object controlGate = new Object();
     public final ExecutorService worker = Executors.newSingleThreadExecutor();
+    public final ExecutorService io = Executors.newSingleThreadExecutor();
+    public final MessageQueue messages = new MessageQueue(worker);
     public final Handler main = new Handler(Looper.getMainLooper());
     private final CopyOnWriteArrayList<Runnable> listeners = new CopyOnWriteArrayList<>();
     private String chat = "Asistente listo. Podés usar las reglas sin clave. Escribí «ayuda» para ver ejemplos.\n";
@@ -25,7 +32,9 @@ public final class AssistantApplication extends Application {
     @Override public void onCreate() {
         super.onCreate();
         settings = new AppSettings(this);
-        core = new AssistantCore(new AssistantDb(this), settings, new GeminiClient(), Clock.systemDefaultZone(), SystemClock::elapsedRealtime);
+        db = new AssistantDb(this);
+        core = new AssistantCore(db, settings, new GeminiClient(), Clock.systemDefaultZone(), SystemClock::elapsedRealtime);
+        whatsapp = new WhatsAppBridge(this);
     }
     public void listen(Runnable listener) { listeners.addIfAbsent(listener); }
     public void unlisten(Runnable listener) { listeners.remove(listener); }
@@ -35,18 +44,35 @@ public final class AssistantApplication extends Application {
         chat += "\n" + text + "\n";
         if (chat.length() > 32000) chat = "[Conversación anterior recortada; los registros siguen en Resumen]\n" + chat.substring(chat.length() - 30000);
     }
-    private void changed() { main.post(() -> { for (Runnable listener : listeners) listener.run(); }); }
+    public void changed() { main.post(() -> { for (Runnable listener : listeners) listener.run(); }); }
+    public void messagingError() { append("Sistema: falló el almacenamiento de WhatsApp. Revisá Registro y Resumen antes de repetir un pedido."); changed(); }
     public void send(String text) {
         if (dev.poco.asistente.core.Rules.normalize(text).equals("parar")) { stop(); return; }
-        synchronized (this) { if (busy) return; busy = true; }
-        long token = core.cancellationToken();
-        append("David: " + text); changed();
-        worker.execute(() -> {
-            String response = core.receive(text, token);
-            append("Asistente: " + response);
-            synchronized (this) { busy = false; }
-            changed();
-        });
+        synchronized (controlGate) {
+            synchronized (this) { if (busy) return; busy = true; }
+            long token = core.cancellationToken();
+            append("David: " + text); changed();
+            messages.add(() -> {
+                try { append("Asistente: " + core.receive(text, token)); }
+                finally {
+                    synchronized (controlGate) {
+                        if (token == core.cancellationToken()) synchronized (this) { busy = false; }
+                    }
+                    changed();
+                }
+            });
+        }
     }
-    public void stop() { append("Asistente: " + core.stop()); changed(); }
+    public void stop() {
+        synchronized (controlGate) {
+            append("Asistente: " + core.stop()); messages.clear();
+            synchronized (this) { busy = false; }
+            try { db.cancelNotices(); db.messagingLog("Sistema", "PARAR: cola vaciada; no se deshacen acciones ya terminadas."); }
+            catch (RuntimeException e) { messagingError(); }
+        }
+        changed();
+    }
+    public void configureWhatsapp(boolean enabled, String name, String phone) {
+        synchronized (controlGate) { settings.saveWhatsapp(enabled, name, phone); stop(); }
+    }
 }

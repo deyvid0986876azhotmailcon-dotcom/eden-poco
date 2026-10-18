@@ -14,16 +14,62 @@ import org.json.JSONObject;
 
 /** Validated typed records share one table; payload is JSON, never contains credentials. */
 public final class AssistantDb extends SQLiteOpenHelper implements Store {
-    public AssistantDb(Context context) { super(context, "asistente.db", null, 1); }
+    public AssistantDb(Context context) { super(context, "asistente.db", null, 2); }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE registros (id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('movimiento','peso','comida','entreno','presupuesto','meta')), version INTEGER NOT NULL, payload TEXT NOT NULL, budget_key TEXT UNIQUE)");
         db.execSQL("CREATE INDEX registros_kind ON registros(kind)");
         db.execSQL("CREATE TABLE operaciones (id TEXT PRIMARY KEY, fecha TEXT NOT NULL, instante INTEGER NOT NULL, accion TEXT NOT NULL, registro_id TEXT NOT NULL, resultado TEXT NOT NULL)");
         db.execSQL("CREATE INDEX operaciones_fecha ON operaciones(fecha)");
+        createMessaging(db);
     }
     @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        // Never silently destroy David's data on an upgrade.
-        throw new IllegalStateException("Falta una migración de la base de datos.");
+        if (oldVersion == 1 && newVersion == 2) createMessaging(db);
+        else throw new IllegalStateException("Falta una migración de la base de datos.");
+    }
+    private void createMessaging(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE wa_messages (id TEXT PRIMARY KEY NOT NULL, sender TEXT NOT NULL, state TEXT NOT NULL, response TEXT NOT NULL DEFAULT '', updated INTEGER NOT NULL)");
+        db.execSQL("CREATE TABLE wa_log (id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, sender TEXT NOT NULL, event TEXT NOT NULL)");
+    }
+    /** Atomic persistent claim. Never prune these IDs: old updates must not repeat a financial action. */
+    public synchronized boolean claimNotice(String id, String sender) {
+        ContentValues values = new ContentValues();
+        values.put("id", id); values.put("sender", sender); values.put("state", "en cola"); values.put("updated", System.currentTimeMillis());
+        return getWritableDatabase().insertWithOnConflict("wa_messages", null, values, SQLiteDatabase.CONFLICT_IGNORE) != -1;
+    }
+    public synchronized void noticeState(String id, String state, String remaining) {
+        ContentValues values = new ContentValues(); values.put("state", state); values.put("updated", System.currentTimeMillis());
+        if (remaining != null) values.put("response", remaining);
+        getWritableDatabase().update("wa_messages", values, "id=?", new String[]{id});
+    }
+    public synchronized void messagingLog(String sender, String event) {
+        SQLiteDatabase db = getWritableDatabase();
+        ContentValues values = new ContentValues(); values.put("time", System.currentTimeMillis()); values.put("sender", sender); values.put("event", event);
+        db.insertOrThrow("wa_log", null, values);
+        db.execSQL("DELETE FROM wa_log WHERE id NOT IN (SELECT id FROM wa_log ORDER BY id DESC LIMIT 500)");
+    }
+    public synchronized void cancelNotices() {
+        getWritableDatabase().execSQL("UPDATE wa_messages SET state='cancelado' WHERE state IN ('en cola','procesando')");
+    }
+    public synchronized void recoverNotices() {
+        SQLiteDatabase db = getWritableDatabase();
+        ContentValues values = new ContentValues(); values.put("state", "interrumpido; revisar Resumen antes de repetir");
+        int count = db.update("wa_messages", values, "state IN ('en cola','procesando','enviando')", null);
+        if (count > 0) messagingLog("Sistema", "Proceso reiniciado: " + count + " pedidos interrumpidos. No se reejecutan; revisar Resumen y respuestas pendientes.");
+    }
+    public synchronized String messagingHistory() {
+        StringBuilder out = new StringBuilder("Respuestas pendientes (sin reenvío automático):\n");
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT sender,state,response,updated FROM wa_messages WHERE response<>'' ORDER BY updated DESC LIMIT 50", null)) {
+            while (c.moveToNext()) out.append(logTime(c.getLong(3))).append(" · ").append(c.getString(0)).append(" · ")
+                    .append(c.getString(1)).append('\n').append(c.getString(2)).append("\n\n");
+        }
+        out.append("\nRegistro (últimos 200):\n");
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT time,sender,event FROM wa_log ORDER BY id DESC LIMIT 200", null)) {
+            while (c.moveToNext()) out.append(logTime(c.getLong(0))).append(" · ").append(c.getString(1)).append(" · ").append(c.getString(2)).append('\n');
+        }
+        return out.toString();
+    }
+    private String logTime(long time) {
+        return Instant.ofEpochMilli(time).atZone(ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("dd/MM HH:mm:ss"));
     }
     @Override public synchronized List<Row> rows() throws Exception {
         List<Row> rows = new ArrayList<>();

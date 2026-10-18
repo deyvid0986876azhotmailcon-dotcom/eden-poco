@@ -70,4 +70,21 @@ public class CoreTest {
         assertTrue(store.rows().isEmpty());
         assertTrue(core.receive("gaste 3500 en super").startsWith("Guardado"));
     }
+    @Test public void authenticatedWhatsappIsIdempotentAndUsesSeparateConfirmationActor() throws Exception {
+        AssistantCore core = new AssistantCore(store, settings(""), (key, model, body) -> { throw new AssertionError(); }, clock);
+        String first = core.receive("gaste 3500 en super", AssistantCore.Source.WHATSAPP_OWNER, "wa1");
+        assertEquals(first, core.receive("gaste 3500 en super", AssistantCore.Source.WHATSAPP_OWNER, "wa1"));
+        assertEquals(1, store.rows().size());
+        String proposal = core.receive("borrar " + store.rows().get(0).id, AssistantCore.Source.WHATSAPP_OWNER, "wa2");
+        String code = proposal.substring(proposal.indexOf("escribí SÍ ") + 11, proposal.indexOf(". PARAR"));
+        assertTrue(core.receive("SÍ " + code).contains("no corresponde")); assertEquals(1, store.rows().size());
+        assertTrue(core.receive("SÍ " + code, AssistantCore.Source.WHATSAPP_OWNER, "wa3").startsWith("Borrado"));
+        assertTrue(store.rows().isEmpty());
+    }
+    @Test public void staleWhatsappTokenCannotMutateAfterStop() {
+        AssistantCore core = new AssistantCore(store, settings(""), (key, model, body) -> { throw new AssertionError(); }, clock);
+        long token = core.cancellationToken(); core.stop();
+        assertTrue(core.receive("gaste 3500 en super", AssistantCore.Source.WHATSAPP_OWNER, "wa1", token).contains("cancelado antes"));
+        assertTrue(store.rows().isEmpty());
+    }
 }
