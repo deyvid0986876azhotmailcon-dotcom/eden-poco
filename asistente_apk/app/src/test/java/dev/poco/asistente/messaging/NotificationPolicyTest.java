@@ -34,7 +34,8 @@ public class NotificationPolicyTest {
     }
     @Test public void restrictsPackageSummaryGroupsAndConversationTitle() {
         List<Message> messages = Collections.singletonList(new Message(david, "resumen", 100));
-        assertFalse(evaluate(notice("com.whatsapp", false, false, "Yo David", "", messages), "Yo David", "").accepted());
+        // plain WhatsApp is accepted too (the bot number lives in the Second Space); other apps are not
+        assertFalse(evaluate(notice("org.telegram.messenger", false, false, "Yo David", "", messages), "Yo David", "").accepted());
         assertFalse(evaluate(notice(PACKAGE, true, false, "Yo David", "", messages), "Yo David", "").accepted());
         assertFalse(evaluate(notice(PACKAGE, false, true, "Yo David", "", messages), "Yo David", "").accepted());
         assertFalse(evaluate(notice(PACKAGE, false, false, "Yo David", "Familia", messages), "Yo David", "").accepted());
