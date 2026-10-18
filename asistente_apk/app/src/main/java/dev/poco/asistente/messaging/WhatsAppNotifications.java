@@ -43,21 +43,23 @@ public final class WhatsAppNotifications extends NotificationListenerService {
     private static String text(CharSequence value) { return value == null ? "" : value.toString(); }
     static NotificationPolicy.Notice snapshot(StatusBarNotification sbn) {
         Notification n = sbn.getNotification(); Bundle extras = n.extras == null ? new Bundle() : n.extras;
-        Notification.MessagingStyle style = Notification.MessagingStyle.extractMessagingStyleFromNotification(n);
         List<NotificationPolicy.Message> messages = new ArrayList<>();
         Boolean group = extras.containsKey(Notification.EXTRA_IS_GROUP_CONVERSATION)
                 ? extras.getBoolean(Notification.EXTRA_IS_GROUP_CONVERSATION) : null;
         String conversation = text(extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE));
-        if (style != null) {
-            if (Build.VERSION.SDK_INT >= 28) group = style.isGroupConversation() || Boolean.TRUE.equals(group);
-            if (style.getConversationTitle() != null) conversation = style.getConversationTitle().toString();
-            for (Notification.MessagingStyle.Message m : style.getMessages()) {
+        // The platform keeps MessagingStyle.extractMessagingStyleFromNotification hidden, so the messages
+        // are read from the bundles MessagingStyle writes in EXTRA_MESSAGES: "text", "time", "sender" and,
+        // from Android 9, "sender_person".
+        android.os.Parcelable[] bundles = extras.getParcelableArray(Notification.EXTRA_MESSAGES);
+        if (bundles != null) {
+            for (android.os.Parcelable item : bundles) {
+                if (!(item instanceof Bundle)) continue;
+                Bundle m = (Bundle) item;
                 NotificationPolicy.Sender sender = null;
-                if (Build.VERSION.SDK_INT >= 28) {
-                    Person person = m.getSenderPerson();
-                    if (person != null) sender = new NotificationPolicy.Sender(text(person.getName()), person.getKey(), person.getUri());
-                } else if (m.getSender() != null) sender = new NotificationPolicy.Sender(text(m.getSender()), "", "");
-                messages.add(new NotificationPolicy.Message(sender, text(m.getText()), m.getTimestamp()));
+                Person person = Build.VERSION.SDK_INT >= 28 ? m.getParcelable("sender_person") : null;
+                if (person != null) sender = new NotificationPolicy.Sender(text(person.getName()), person.getKey(), person.getUri());
+                else if (m.getCharSequence("sender") != null) sender = new NotificationPolicy.Sender(text(m.getCharSequence("sender")), "", "");
+                messages.add(new NotificationPolicy.Message(sender, text(m.getCharSequence("text")), m.getLong("time")));
             }
         }
         return new NotificationPolicy.Notice(sbn.getPackageName(), sbn.getKey(), (n.flags & Notification.FLAG_GROUP_SUMMARY) != 0,
