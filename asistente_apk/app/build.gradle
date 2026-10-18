@@ -1,0 +1,33 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'dev.poco.asistente'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'dev.poco.asistente'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    // Public debug key copied from chat_apk ONLY for phase 1.
+    // Replace with a private signing key before phase 2 (plan data migration first).
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    // Android supplies org.json in production; JVM tests need its real implementation.
+    testImplementation 'org.json:json:20240303'
+}
