@@ -21,7 +21,11 @@ jobs:
           java-version: '17'
       - name: JVM tests and APK
         working-directory: asistente_apk
-        run: gradle --no-daemon test assembleDebug
+        # the log goes into the reports artifact: the Actions log is not readable without a login
+        run: |
+          set -o pipefail
+          mkdir -p app/build/reports/tests
+          gradle --no-daemon test assembleDebug 2>&1 | tee app/build/reports/tests/gradle.log
       - name: Test reports
         if: always()
         uses: actions/upload-artifact@v4
