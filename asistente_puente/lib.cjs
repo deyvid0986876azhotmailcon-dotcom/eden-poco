@@ -51,7 +51,9 @@ function candidate(message, type, owner, connectedAt, now = Date.now()) {
   const timestamp = Number(message.messageTimestamp?.toString());
   if (type !== 'notify' || !connectedAt || !Number.isSafeInteger(timestamp)
       || timestamp < connectedAt || timestamp > Math.floor(now / 1000) + 30) return { reason: 'mensaje antiguo o de historial', id: key.id };
-  return { id: key.id, text };
+  // the reply goes to the same chat (the LID one when that is how WhatsApp named it): sending to the
+  // phone number of a LID chat arrives as "waiting for this message", it cannot be decrypted
+  return { id: key.id, text, chat: key.remoteJid };
 }
 class Ledger {
   constructor(filename) {

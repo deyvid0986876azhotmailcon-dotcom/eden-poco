@@ -19,7 +19,7 @@ const queue = new DeliveryQueue(async (message, current) => {
   if (!session?.opened) { log('Fallido: sin conexión para entregar; no se reintenta'); return; }
   for (const text of split(response)) {
     if (!current() || connection !== session || !session.opened) return;
-    await session.socket.sendMessage(config.remitente, { text });
+    await session.socket.sendMessage(message.chat || config.remitente, { text });
   }
   log('Aceptado: respuesta enviada a WhatsApp');
 }, () => log('Fallido: envío interrumpido; revisar Resumen antes de repetir'));
