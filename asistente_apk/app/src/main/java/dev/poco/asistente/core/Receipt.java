@@ -88,13 +88,13 @@ public final class Receipt {
         switch (kind) {
             case "movimiento":
                 options = d.optString("tipo").equals("ingreso")
-                        ? new String[]{"¡Iporã! A cuidar esa plata, che.", "Bien ahí, che.", "Aguyje, que siga entrando."}
-                        : new String[]{"Listo, che.", "Upéicha, ya quedó.", "Anotado, cuidá la billetera."};
+                        ? new String[]{"¡Bien ahí! A cuidar esa plata.", "Re bien, che.", "Dale, que siga entrando."}
+                        : new String[]{"Listo, che.", "Ya quedó.", "Anotado, cuidá la billetera luego."};
                 break;
-            case "peso": options = new String[]{"Seguimos sumando, jaha.", "Iporã, a seguir comiendo bien.", "Paso a paso, che."}; break;
-            case "entreno": options = new String[]{"¡Eso, che! Buen entreno.", "Iporã, músculo en camino.", "Jaha, a seguir así."}; break;
-            case "comida": options = new String[]{"Buen provecho, che.", "Iporã, a comer bien.", "Eso suma, che."}; break;
-            default: options = new String[]{"Listo, lo vamos siguiendo de cerca.", "Upéicha, quedó anotado."};
+            case "peso": options = new String[]{"Seguimos sumando.", "Re bien, a seguir comiendo.", "Paso a paso, che."}; break;
+            case "entreno": options = new String[]{"¡Eso! Re buen entreno.", "Bien ahí, posta.", "Dale que se nota."}; break;
+            case "comida": options = new String[]{"Buen provecho, che.", "Re bien, a comer rico.", "Eso suma."}; break;
+            default: options = new String[]{"Listo, lo vamos siguiendo de cerca.", "Ya quedó anotado."};
         }
         return options[Math.floorMod(id.hashCode(), options.length)];
     }

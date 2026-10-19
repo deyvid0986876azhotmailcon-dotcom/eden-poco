@@ -108,7 +108,7 @@ public final class AssistantCore {
         catch (Exception e) { return "No pude leer el resumen local."; }
     }
     public static String help() {
-        return "Upéicha, así me podés escribir (andan aunque no haya internet):\nGasté 35000 en super\nCobré 3500000 de sueldo\nPeso 58,4\nHice sentadilla 3x10 con 40\n"
+        return "Dale, así me podés escribir (andan aunque no haya internet):\nGasté 35000 en super\nCobré 3500000 de sueldo\nPeso 58,4\nHice sentadilla 3x10 con 40\n"
                 + "Comí vori vori\nPresupuesto 800000 en super 2026-10\nMeta 5000000 para emergencia\nResumen\nVer ID\n"
                 + "Corregir ID {\"centavos\":350000}\nBorrar ID\nSÍ CÓDIGO\n¿Qué hiciste hoy?\nPARAR\n"
                 + "Usá el ID completo. Para corregir, escribí «corregir» en minúsculas y un objeto JSON con los campos. "
