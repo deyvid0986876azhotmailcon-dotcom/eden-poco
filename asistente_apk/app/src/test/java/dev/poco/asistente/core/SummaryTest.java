@@ -20,8 +20,8 @@ public class SummaryTest {
         rows.add(row("entreno", Json.object("fecha", "2026-10-12", "series", 3)));
         rows.add(row("entreno", Json.object("fecha", "2026-10-11", "series", 4)));
         String summary = Summary.render(rows, LocalDate.of(2026, 10, 17), false);
-        assertTrue(summary.contains("Saldo: ARS 200,00")); assertTrue(summary.contains("Saldo: USD -1,00"));
-        assertTrue(summary.contains("quedan ARS 200,00")); assertTrue(summary.contains("80 %"));
+        assertTrue(summary.contains("Saldo: $ 200")); assertTrue(summary.contains("Saldo: -US$ 1"));
+        assertTrue(summary.contains("quedan $ 200")); assertTrue(summary.contains("80 %"));
         assertTrue(summary.contains("1 ejercicios registrados, 3 series"));
     }
     @Test public void trendUsesLatestDateAndPreviousDistinctDay() throws Exception {

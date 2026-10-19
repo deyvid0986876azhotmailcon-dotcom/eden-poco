@@ -45,7 +45,7 @@ public final class ToolExecutor {
             StringBuilder code = new StringBuilder();
             for (byte b : bytes) code.append(String.format(java.util.Locale.ROOT, "%02X", b & 255));
             pending.put(actor, new Pending(code.toString(), row, elapsedMillis.getAsLong() + TTL));
-            return "Voy a borrar " + row.kind + " " + row.id + ": " + row.data
+            return "Voy a borrar " + Receipt.describe(row.kind, row.data, LocalDate.now(clock)) + " (ref. " + Receipt.ref(row.id) + ")"
                     + ". Para confirmar en 5 minutos escribí SÍ " + code + ". PARAR cancela.";
         }
         if (tool.equals("corregir_registro")) {
@@ -60,7 +60,7 @@ public final class ToolExecutor {
             Store.Row after = new Store.Row(before.id, before.kind, before.version + 1,
                     Validation.record(before.kind, merged, LocalDate.now(clock)));
             unique(after);
-            String result = "Corregido " + after.kind + " ID " + after.id + ": " + after.data;
+            String result = "Corregí " + Receipt.describe(after.kind, after.data, LocalDate.now(clock)) + " (ref. " + Receipt.ref(after.id) + ").";
             return store.mutate(operationId, before, after, result, clock.millis());
         }
         String kind;
@@ -75,7 +75,7 @@ public final class ToolExecutor {
         }
         Store.Row row = new Store.Row(UUID.randomUUID().toString(), kind, 1, Validation.record(kind, args, LocalDate.now(clock)));
         unique(row);
-        String result = "Guardado " + kind + " ID " + row.id + ": " + row.data;
+        String result = "Anoté " + Receipt.describe(kind, row.data, LocalDate.now(clock)) + ". (ref. " + Receipt.ref(row.id) + ")";
         if (kind.equals("comida") && (row.data.has("calorias") || row.data.has("proteina"))) result += " (nutrientes estimados)";
         return store.mutate(operationId, null, row, result, clock.millis());
     }
@@ -90,7 +90,7 @@ public final class ToolExecutor {
         Store.Row current = store.find(p.row.id);
         if (current == null || current.version != p.row.version)
             return "El registro cambió o ya no existe. Pedí el borrado otra vez.";
-        return store.mutate(operationId, p.row, null, "Borrado " + p.row.kind + " ID " + p.row.id + ".", clock.millis());
+        return store.mutate(operationId, p.row, null, "Borré " + Receipt.describe(p.row.kind, p.row.data, LocalDate.now(clock)) + ".", clock.millis());
     }
     public synchronized void cancel() { pending.clear(); }
     private Store.Row requireRow(String id) throws Exception {

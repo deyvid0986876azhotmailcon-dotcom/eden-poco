@@ -2,17 +2,19 @@ package dev.poco.asistente;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.graphics.drawable.GradientDrawable;
 import android.provider.Settings;
 import android.os.Bundle;
 import android.os.Build;
 import android.text.InputFilter;
 import android.text.InputType;
+import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.view.WindowInsets;
 import android.view.inputmethod.EditorInfo;
 import android.widget.ArrayAdapter;
-import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -23,46 +25,56 @@ import dev.poco.asistente.core.GeminiProtocol;
 import dev.poco.asistente.core.Validation;
 import dev.poco.asistente.bridge.BridgeService;
 import dev.poco.asistente.data.AppSettings;
+import dev.poco.asistente.ui.Icons;
+import dev.poco.asistente.ui.Palette;
+import dev.poco.asistente.ui.Views;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
-/** Native views only. Notification access is granted separately by Android. */
+/**
+ * Native views only. Notification access is granted separately by Android.
+ * Look: logs/delegado/diseno_asistente.md (Gemini), Font Awesome Free icons, pieces in ui/Views.
+ */
 public final class MainActivity extends Activity {
+    private static final String[] SCREENS = {"Chat", "Resumen", "Registro", "Ajustes"};
+    private static final String[] SCREEN_ICONS = {Icons.COMMENTS, Icons.CHART_PIE, Icons.CLOCK, Icons.GEAR};
     private AssistantApplication app;
-    private LinearLayout body;
-    private TextView transcript, progress;
+    private Views ui;
+    private Palette color;
+    private LinearLayout body, tabs, bubbles;
+    private TextView progress;
     private ScrollView chatScroll;
     private EditText input;
-    private Button send;
+    private TextView send;
     private TextView messagingLog;
     private boolean readingLog;
     private Switch bridgeToggle, noticeToggle;
-    private String screen = "Chat", draft = "";
+    private String screen = "Chat", draft = "", shownChat = null;
     private final Runnable observer = this::refreshChat;
     @Override public void onCreate(Bundle savedState) {
         super.onCreate(savedState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         app = (AssistantApplication) getApplication();
+        ui = new Views(this); color = ui.palette;
+        getWindow().setStatusBarColor(color.background); getWindow().setNavigationBarColor(color.surface);
         LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(12), dp(8), dp(12), dp(8));
+        root.setBackgroundColor(color.background);
         // Android 15/target 35 enforces edge-to-edge; consume status/navigation/IME insets.
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             if (Build.VERSION.SDK_INT >= 30) {
                 android.graphics.Insets safe = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.ime() | WindowInsets.Type.displayCutout());
-                v.setPadding(dp(12) + safe.left, dp(8) + safe.top, dp(12) + safe.right, dp(8) + safe.bottom);
-            } else v.setPadding(dp(12) + insets.getSystemWindowInsetLeft(), dp(8) + insets.getSystemWindowInsetTop(),
-                        dp(12) + insets.getSystemWindowInsetRight(), dp(8) + insets.getSystemWindowInsetBottom());
+                v.setPadding(safe.left, safe.top, safe.right, safe.bottom);
+            } else v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                        insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
             return insets.consumeSystemWindowInsets();
         });
-        LinearLayout tabs = new LinearLayout(this);
-        for (String name : new String[]{"Chat", "Resumen", "Registro", "Ajustes"}) {
-            Button button = new Button(this); button.setText(name); button.setAllCaps(false);
-            button.setTextSize(12); button.setPadding(0, 0, 0, 0); button.setMinWidth(0);
-            button.setOnClickListener(v -> show(name));
-            tabs.addView(button, new LinearLayout.LayoutParams(0, -2, 1));
-        }
-        root.addView(tabs);
         body = new LinearLayout(this); body.setOrientation(LinearLayout.VERTICAL);
         root.addView(body, new LinearLayout.LayoutParams(-1, 0, 1));
+        View line = new View(this); line.setBackgroundColor(color.divider);
+        root.addView(line, new LinearLayout.LayoutParams(-1, ui.dp(1)));
+        tabs = new LinearLayout(this); tabs.setBackgroundColor(color.surface);
+        root.addView(tabs, new LinearLayout.LayoutParams(-1, ui.dp(56)));
         setContentView(root); root.requestApplyInsets();
         if (savedState != null) screen = savedState.getString("screen", "Chat");
         show(screen);
@@ -76,53 +88,142 @@ public final class MainActivity extends Activity {
     @Override protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state); state.putString("screen", screen); // no key or chat copied to Bundle
     }
-    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+
+    // ---- small pieces in the colors of the app
+
     private TextView label(String text) {
-        TextView view = new TextView(this); view.setTextSize(16); view.setText(text); view.setPadding(0, dp(8), 0, dp(8)); return view;
+        TextView view = ui.text(text, 14, color.muted, false); view.setPadding(0, ui.dp(4), 0, ui.dp(4)); return view;
     }
-    private Button button(String text, Runnable action) {
-        Button b = new Button(this); b.setText(text); b.setAllCaps(false); b.setOnClickListener(v -> action.run()); return b;
+    /** A 48dp button: filled in the brand color, or outlined for secondary actions. */
+    private TextView button(String text, boolean primary, Runnable action) {
+        TextView b = ui.text(text, 15, primary ? color.onBrand : color.brand, true);
+        b.setGravity(Gravity.CENTER);
+        GradientDrawable shape = ui.rounded(primary ? color.brand : color.surface, 24);
+        if (!primary) shape.setStroke(ui.dp(1), color.brand);
+        b.setBackground(shape);
+        b.setOnClickListener(v -> action.run());
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, ui.dp(48));
+        params.topMargin = ui.dp(8);
+        b.setLayoutParams(params);
+        return b;
     }
+    private EditText field(String hint) {
+        EditText e = new EditText(this);
+        e.setHint(hint); e.setTextColor(color.text); e.setHintTextColor(color.muted); e.setTextSize(15);
+        GradientDrawable shape = ui.rounded(color.background, 12); shape.setStroke(ui.dp(1), color.divider);
+        e.setBackground(shape); e.setPadding(ui.dp(12), ui.dp(10), ui.dp(12), ui.dp(10));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.topMargin = ui.dp(8);
+        e.setLayoutParams(params);
+        return e;
+    }
+    private Switch toggle(String text) {
+        Switch s = new Switch(this); s.setText(text); s.setTextColor(color.text); s.setTextSize(15);
+        s.setPadding(0, ui.dp(8), 0, ui.dp(8)); return s;
+    }
+    private ScrollView page(LinearLayout content) {
+        ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true);
+        content.setOrientation(LinearLayout.VERTICAL); content.setPadding(ui.dp(12), ui.dp(12), ui.dp(12), ui.dp(12));
+        scroll.addView(content); body.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1)); return scroll;
+    }
+    private TextView title(String text) {
+        TextView t = ui.text(text, 20, color.text, true); t.setPadding(ui.dp(16), ui.dp(14), ui.dp(16), ui.dp(6)); return t;
+    }
+
     private void show(String name) {
         if (input != null) draft = input.getText().toString();
-        screen = name; body.removeAllViews(); input = null; transcript = null; messagingLog = null; bridgeToggle = null; noticeToggle = null;
+        screen = name; body.removeAllViews(); input = null; bubbles = null; shownChat = null; messagingLog = null; bridgeToggle = null; noticeToggle = null;
+        tabs.removeAllViews();
+        for (int i = 0; i < SCREENS.length; i++) {
+            String target = SCREENS[i];
+            tabs.addView(ui.tab(SCREEN_ICONS[i], target, target.equals(name), v -> show(target)), new LinearLayout.LayoutParams(0, -1, 1));
+        }
         if (name.equals("Chat")) chat(); else if (name.equals("Resumen")) summary();
         else if (name.equals("Registro")) messaging(); else settings();
     }
+
+    // ---- Chat: bubbles, "pensando…", rounded input and a round send button
+
     private void chat() {
-        transcript = label(app.chat()); transcript.setTextIsSelectable(true);
-        chatScroll = new ScrollView(this); chatScroll.setFillViewport(true); chatScroll.addView(transcript);
+        body.addView(title("Asistente"));
+        bubbles = new LinearLayout(this); bubbles.setOrientation(LinearLayout.VERTICAL);
+        bubbles.setPadding(ui.dp(12), ui.dp(4), ui.dp(12), ui.dp(4));
+        chatScroll = new ScrollView(this); chatScroll.setFillViewport(true); chatScroll.addView(bubbles);
         body.addView(chatScroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        progress = label(""); body.addView(progress);
-        input = new EditText(this); input.setHint("Gasté 3500 en super"); input.setMinLines(1); input.setMaxLines(4);
+        progress = ui.text("", 13, color.muted, false);
+        progress.setPadding(ui.dp(16), 0, ui.dp(16), ui.dp(4));
+        body.addView(progress);
+
+        LinearLayout bar = new LinearLayout(this); bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(ui.dp(8), ui.dp(6), ui.dp(8), ui.dp(8));
+        TextView stop = ui.icon(Icons.STOP, 14, color.negative, false);
+        stop.setOnClickListener(v -> app.stop()); stop.setContentDescription("Parar");
+        bar.addView(stop, new LinearLayout.LayoutParams(ui.dp(40), ui.dp(40)));
+        input = new EditText(this); input.setHint("Escribí un gasto, tu peso o una pregunta…");
+        input.setTextColor(color.text); input.setHintTextColor(color.muted); input.setTextSize(15);
+        input.setMinLines(1); input.setMaxLines(4);
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         input.setFilters(new InputFilter[]{new InputFilter.LengthFilter(4000)}); input.setText(draft); input.setSaveEnabled(false);
-        body.addView(input);
-        LinearLayout controls = new LinearLayout(this);
-        send = button("Enviar", () -> {
+        GradientDrawable shape = ui.rounded(color.surface, 24); shape.setStroke(ui.dp(1), color.divider);
+        input.setBackground(shape); input.setPadding(ui.dp(14), ui.dp(10), ui.dp(14), ui.dp(10));
+        LinearLayout.LayoutParams inputParams = new LinearLayout.LayoutParams(0, -2, 1);
+        inputParams.leftMargin = ui.dp(4); inputParams.rightMargin = ui.dp(8);
+        bar.addView(input, inputParams);
+        send = ui.roundButton(Icons.PAPER_PLANE, v -> {
             String message = input.getText().toString().trim();
             if (message.isEmpty() || app.busy()) return;
             input.setText(""); draft = ""; app.send(message);
-        });
-        controls.addView(send, new LinearLayout.LayoutParams(0, -2, 1));
-        controls.addView(button("PARAR", app::stop), new LinearLayout.LayoutParams(0, -2, 1));
-        body.addView(controls); refreshChat();
+        }, "Enviar");
+        bar.addView(send, new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)));
+        body.addView(bar);
+        refreshChat();
+    }
+    /** The transcript is "David: …", "Asistente: …" and "Sistema: …" entries, each starting a line. */
+    private static List<String[]> entries(String transcript) {
+        List<String[]> list = new ArrayList<>();
+        for (String line : transcript.split("\n", -1)) {
+            String who = line.startsWith("David: ") ? "David" : line.startsWith("Asistente: ") ? "Asistente"
+                    : line.startsWith("Sistema: ") ? "Sistema" : null;
+            if (who != null) list.add(new String[]{who, line.substring(who.length() + 2)});
+            else if (!list.isEmpty()) list.get(list.size() - 1)[1] += "\n" + line;
+            else if (!line.trim().isEmpty()) list.add(new String[]{"Sistema", line});
+        }
+        for (String[] e : list) e[1] = e[1].trim();
+        return list;
     }
     private void refreshChat() {
         if (bridgeToggle != null) bridgeToggle.setChecked(app.settings.bridgeEnabled());
         if (noticeToggle != null) noticeToggle.setChecked(app.settings.whatsappEnabled());
         if (screen.equals("Registro")) { refreshMessaging(); return; }
-        if (!screen.equals("Chat") || transcript == null) return;
-        transcript.setText(app.chat()); send.setEnabled(!app.busy());
-        progress.setText(app.busy() ? "Procesando… Si hay fallos de red, probar los otros modelos puede tardar. PARAR cancela la acción." : "");
-        chatScroll.post(() -> { if (chatScroll != null) chatScroll.fullScroll(View.FOCUS_DOWN); });
+        if (!screen.equals("Chat") || bubbles == null) return;
+        String transcript = app.chat();
+        if (!transcript.equals(shownChat)) {
+            shownChat = transcript; bubbles.removeAllViews();
+            int width = chatScroll.getWidth() > 0 ? chatScroll.getWidth() : getResources().getDisplayMetrics().widthPixels;
+            for (String[] e : entries(transcript)) {
+                if (e[1].isEmpty()) continue;
+                if (e[0].equals("Sistema")) {
+                    TextView note = ui.text(e[1], 12, color.muted, false); note.setGravity(Gravity.CENTER);
+                    note.setPadding(ui.dp(24), ui.dp(6), ui.dp(24), ui.dp(6)); bubbles.addView(note);
+                } else bubbles.addView(ui.bubble(e[1], null, e[0].equals("David"), width));
+            }
+            chatScroll.post(() -> { if (chatScroll != null) chatScroll.fullScroll(View.FOCUS_DOWN); });
+        }
+        send.setEnabled(!app.busy()); send.setAlpha(app.busy() ? 0.4f : 1f);
+        progress.setText(app.busy() ? "Gemini está pensando…" : "");
     }
+
+    // ---- Registro
+
     private void messaging() {
-        body.addView(button("PARAR: vaciar cola", app::stop));
-        body.addView(button("Actualizar registro", this::refreshMessaging));
-        ScrollView scroll = new ScrollView(this); messagingLog = label("Leyendo registro…");
-        messagingLog.setTextIsSelectable(true); scroll.addView(messagingLog);
-        body.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1)); refreshMessaging();
+        body.addView(title("Registro de WhatsApp"));
+        LinearLayout content = new LinearLayout(this); page(content);
+        LinearLayout card = ui.card(); content.addView(card);
+        card.addView(ui.cardTitle(Icons.WHATSAPP, "Mensajes y puente", true));
+        messagingLog = ui.text("Leyendo registro…", 13, color.text, false);
+        messagingLog.setTextIsSelectable(true); card.addView(messagingLog);
+        content.addView(button("Actualizar registro", false, this::refreshMessaging));
+        content.addView(button("Parar y vaciar la cola", false, app::stop));
+        refreshMessaging();
     }
     private void refreshMessaging() {
         if (messagingLog == null || readingLog) return;
@@ -139,15 +240,75 @@ public final class MainActivity extends Activity {
             });
         });
     }
+
+    // ---- Resumen: the summary text, sorted into cards
+
     private void summary() {
-        body.addView(button("Actualizar", () -> show("Resumen")));
-        ScrollView scroll = new ScrollView(this); TextView text = label("Leyendo datos locales…");
-        text.setTextIsSelectable(true); scroll.addView(text); body.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        body.addView(title("Resumen"));
+        LinearLayout content = new LinearLayout(this); page(content);
+        content.addView(label("Leyendo datos locales…"));
         app.worker.execute(() -> {
             String result = app.core.summary();
-            app.main.post(() -> { if (!isDestroyed() && text.isAttachedToWindow()) text.setText(result); });
+            app.main.post(() -> { if (!isDestroyed() && content.isAttachedToWindow()) summaryCards(content, result); });
         });
     }
+    private static long amount(String text) {
+        // "₲ 25.000" or "$ 3.500,50": the whole part, enough to size the bars
+        String whole = text.contains(",") ? text.substring(0, text.lastIndexOf(',')) : text;
+        String digits = whole.replaceAll("[^0-9]", "");
+        try { return digits.isEmpty() ? 0 : Long.parseLong(digits); } catch (NumberFormatException e) { return 0; }
+    }
+    private void summaryCards(LinearLayout content, String text) {
+        content.removeAllViews();
+        List<String> money = new ArrayList<>(), spending = new ArrayList<>(), budgets = new ArrayList<>(),
+                weight = new ArrayList<>(), training = new ArrayList<>(), goals = new ArrayList<>(), other = new ArrayList<>();
+        for (String line : text.split("\n")) {
+            String l = line.trim();
+            if (l.isEmpty() || l.startsWith("Registros recientes")) continue;
+            if (l.startsWith("Saldo") || l.startsWith("Sin movimientos")) money.add(l);
+            else if (l.startsWith("Gasto / ")) spending.add(l.substring(8));
+            else if (l.startsWith("Presupuesto") || l.startsWith("Sin presupuestos")) budgets.add(l.replace("Presupuesto / ", ""));
+            else if (l.contains("peso")) weight.add(l);
+            else if (l.startsWith("Entrenos")) training.add(l);
+            else if (l.startsWith("Meta")) goals.add(l.replace("Meta: ", ""));
+            else other.add(l);
+        }
+        card(content, Icons.WALLET, "Finanzas del mes", money, color.text);
+        if (!spending.isEmpty()) {
+            LinearLayout c = ui.card(); content.addView(c);
+            c.addView(ui.cardTitle(Icons.ARROW_DOWN, "Gastos por categoría", false));
+            long top = 1;
+            for (String s : spending) top = Math.max(top, amount(s.substring(s.indexOf(':') + 1)));
+            for (String s : spending) {
+                int colon = s.indexOf(':');
+                LinearLayout row = new LinearLayout(this);
+                TextView name = ui.text(s.substring(0, colon), 14, color.text, false);
+                row.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+                row.addView(ui.text(s.substring(colon + 1).trim(), 14, color.text, true));
+                c.addView(row);
+                View bar = ui.bar(amount(s.substring(colon + 1)) / (float) top, color.negative);
+                LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, ui.dp(8));
+                p.topMargin = ui.dp(4); p.bottomMargin = ui.dp(10); c.addView(bar, p);
+            }
+        }
+        card(content, Icons.PIGGY_BANK, "Presupuestos", budgets, color.text);
+        card(content, Icons.WEIGHT_SCALE, "Peso", weight, color.text);
+        card(content, Icons.DUMBBELL, "Entrenos de la semana", training, color.text);
+        if (!goals.isEmpty()) card(content, Icons.BULLSEYE, "Metas", goals, color.text);
+        if (!other.isEmpty()) card(content, Icons.INFO, "Más", other, color.muted);
+        content.addView(button("Actualizar", false, () -> show("Resumen")));
+    }
+    private void card(LinearLayout content, String icon, String title, List<String> lines, int textColor) {
+        LinearLayout c = ui.card(); content.addView(c);
+        c.addView(ui.cardTitle(icon, title, false));
+        if (lines.isEmpty()) { c.addView(ui.text("Sin datos todavía.", 14, color.muted, false)); return; }
+        for (String l : lines) {
+            TextView t = ui.text(l, 15, textColor, false); t.setPadding(0, ui.dp(2), 0, ui.dp(2)); c.addView(t);
+        }
+    }
+
+    // ---- Ajustes in cards
+
     private Spinner spinner(String[] values, String selected) {
         Spinner spinner = new Spinner(this);
         ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, values);
@@ -155,37 +316,46 @@ public final class MainActivity extends Activity {
         spinner.setSelection(Math.max(0, Arrays.asList(values).indexOf(selected))); return spinner;
     }
     private void settings() {
-        ScrollView scroll = new ScrollView(this); LinearLayout form = new LinearLayout(this); form.setOrientation(LinearLayout.VERTICAL);
-        scroll.addView(form); body.addView(scroll);
-        form.addView(label("Gemini recibe tu mensaje y un resumen local. En la cuota gratis Google puede usar esos datos para mejorar sus productos. Las reglas funcionan sin clave."));
-        form.addView(label("Esta compilación conserva la firma debug pública. La firma privada y la migración de datos siguen pendientes."));
-        TextView status = label(app.settings.vault.hasKey() ? "Clave cifrada guardada." : "Sin clave guardada."); form.addView(status);
-        EditText key = new EditText(this); key.setHint("Pegá la clave de AI Studio"); key.setSingleLine(true);
+        body.addView(title("Ajustes"));
+        LinearLayout form = new LinearLayout(this); page(form);
+
+        LinearLayout gemini = ui.card(); form.addView(gemini);
+        gemini.addView(ui.cardTitle(Icons.KEY, "Clave de Gemini", false));
+        TextView status = ui.text(app.settings.vault.hasKey() ? "Clave cifrada guardada." : "Sin clave guardada.", 14, color.text, false);
+        gemini.addView(status);
+        EditText key = field("Pegá la clave de AI Studio"); key.setSingleLine(true);
         key.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         key.setImeOptions(EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
         key.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
-        key.setSaveEnabled(false); key.setFilters(new InputFilter[]{new InputFilter.LengthFilter(200)}); form.addView(key);
-        form.addView(button("Guardar clave", () -> {
+        key.setSaveEnabled(false); key.setFilters(new InputFilter[]{new InputFilter.LengthFilter(200)}); gemini.addView(key);
+        gemini.addView(button("Guardar clave", true, () -> {
             String value = key.getText().toString().trim(); key.setText("");
             try { app.settings.vault.save(value); status.setText("Clave cifrada guardada."); }
             catch (Exception e) { status.setText("No pude guardar la clave. Revisá el formato y volvé a pegarla."); }
         }));
-        form.addView(button("Borrar clave", () -> {
+        gemini.addView(button("Borrar clave", false, () -> {
             app.stop(); key.setText("");
             try { app.settings.vault.clear(); status.setText("Clave borrada. Las reglas locales siguen disponibles."); }
             catch (Exception e) { status.setText("No pude completar el borrado de la clave."); }
         }));
-        form.addView(label("Modelo preferido (los demás se prueban si hay errores de red, 429 o 503)"));
-        Spinner model = spinner(GeminiProtocol.MODELS, app.settings.model()); form.addView(model);
-        form.addView(label("Moneda predeterminada")); Spinner currency = spinner(Validation.CURRENCIES, app.settings.currency()); form.addView(currency);
-        form.addView(button("Guardar ajustes", () -> {
+
+        LinearLayout prefs = ui.card(); form.addView(prefs);
+        prefs.addView(ui.cardTitle(Icons.MICROCHIP, "Modelo y moneda", false));
+        prefs.addView(label("Modelo preferido (los demás se prueban si hay errores de red, 429 o 503)"));
+        Spinner model = spinner(GeminiProtocol.MODELS, app.settings.model()); prefs.addView(model);
+        prefs.addView(label("Moneda predeterminada"));
+        Spinner currency = spinner(Validation.CURRENCIES, app.settings.currency()); prefs.addView(currency);
+        prefs.addView(button("Guardar ajustes", true, () -> {
             try { app.settings.save((String) model.getSelectedItem(), (String) currency.getSelectedItem()); status.setText("Modelo y moneda guardados."); }
             catch (Exception e) { status.setText("No pude guardar los ajustes."); }
         }));
-        form.addView(label("WhatsApp por dispositivo vinculado: iniciá el puente en Termux y escaneá el QR con el WhatsApp del Segundo espacio. Solo se acepta el remitente configurado en Termux."));
-        TextView bridgeStatus = label(""); form.addView(bridgeStatus);
-        bridgeToggle = new Switch(this); bridgeToggle.setText("Puente de WhatsApp");
-        bridgeToggle.setChecked(app.settings.bridgeEnabled()); form.addView(bridgeToggle);
+
+        LinearLayout whatsapp = ui.card(); form.addView(whatsapp);
+        whatsapp.addView(ui.cardTitle(Icons.WHATSAPP, "WhatsApp (puente QR)", true));
+        whatsapp.addView(label("Termux corre el puente vinculado por QR al WhatsApp del Segundo espacio. Solo se acepta el remitente configurado en Termux."));
+        TextView bridgeStatus = ui.text("", 14, color.text, false); whatsapp.addView(bridgeStatus);
+        bridgeToggle = toggle("Puente de WhatsApp");
+        bridgeToggle.setChecked(app.settings.bridgeEnabled()); whatsapp.addView(bridgeToggle);
         bridgeToggle.setOnCheckedChangeListener((view, checked) -> {
             if (checked == app.settings.bridgeEnabled()) return;
             try {
@@ -205,7 +375,7 @@ public final class MainActivity extends Activity {
                 view.setChecked(false); bridgeStatus.setText("No pude iniciar el puente. Revisá Registro.");
             }
         });
-        form.addView(button("Copiar configuración del puente", () -> {
+        whatsapp.addView(button("Copiar configuración del puente", false, () -> {
             try {
                 String configuration = new org.json.JSONObject().put("puerto", AppSettings.BRIDGE_PORT).put("token", app.settings.bridgeToken()).toString();
                 android.content.ClipData clip = android.content.ClipData.newPlainText("Configuración privada del puente", configuration);
@@ -217,16 +387,17 @@ public final class MainActivity extends Activity {
                 bridgeStatus.setText("Copiado: pegá puerto y token en config.json de Termux y agregá tu remitente autorizado.");
             } catch (Exception e) { bridgeStatus.setText("No pude copiar la configuración cifrada."); }
         }));
-        form.addView(label("Lector de avisos anterior (apagado por defecto). No recibe mensajes en segundo plano en el Segundo espacio. No lo uses junto al puente QR."));
-        form.addView(label("WhatsApp Business: guardá tu número personal como contacto con nombre único y escribí ese nombre EXACTO aquí. Solo se leen avisos nuevos."));
-        EditText owner = new EditText(this); owner.setSingleLine(true); owner.setHint("Nombre exacto, por ejemplo Yo David");
-        owner.setText(app.settings.whatsappName()); owner.setFilters(new InputFilter[]{new InputFilter.LengthFilter(100)}); form.addView(owner);
-        EditText phone = new EditText(this); phone.setSingleLine(true); phone.setHint("Número personal E.164 (opcional): +595…");
-        phone.setInputType(InputType.TYPE_CLASS_PHONE); phone.setText(app.settings.whatsappPhone()); form.addView(phone);
-        form.addView(label("Si el aviso incluye un número, se compara con el configurado. Si solo trae nombre, se exige coincidencia exacta y se anota en Registro. Un nombre no es una prueba criptográfica de identidad. Evitá contactos con nombres duplicados."));
-        TextView whatsappStatus = label(""); form.addView(whatsappStatus);
-        Switch enabled = new Switch(this); noticeToggle = enabled;
-        enabled.setText("Responder desde avisos (anterior)"); enabled.setChecked(app.settings.whatsappEnabled()); form.addView(enabled);
+
+        LinearLayout notices = ui.card(); form.addView(notices);
+        notices.addView(ui.cardTitle(Icons.SHIELD, "Lector de avisos (anterior)", false));
+        notices.addView(label("Apagado por defecto. No recibe mensajes en segundo plano en el Segundo espacio. No lo uses junto al puente QR."));
+        EditText owner = field("Nombre exacto del contacto, por ejemplo Yo David"); owner.setSingleLine(true);
+        owner.setText(app.settings.whatsappName()); owner.setFilters(new InputFilter[]{new InputFilter.LengthFilter(100)}); notices.addView(owner);
+        EditText phone = field("Número personal E.164 (opcional): +595…"); phone.setSingleLine(true);
+        phone.setInputType(InputType.TYPE_CLASS_PHONE); phone.setText(app.settings.whatsappPhone()); notices.addView(phone);
+        TextView whatsappStatus = ui.text("", 14, color.text, false); notices.addView(whatsappStatus);
+        Switch enabled = toggle("Responder desde avisos (anterior)"); noticeToggle = enabled;
+        enabled.setChecked(app.settings.whatsappEnabled()); notices.addView(enabled);
         enabled.setOnCheckedChangeListener((view, checked) -> {
             if (checked == app.settings.whatsappEnabled()) return;
             if (checked && app.settings.bridgeEnabled()) { view.setChecked(false); whatsappStatus.setText("Apagá primero el puente QR."); return; }
@@ -237,17 +408,27 @@ public final class MainActivity extends Activity {
                 whatsappStatus.setText(checked ? "Respuestas habilitadas. Falta conceder el acceso si aún no lo diste." : "Respuestas desactivadas; cola cancelada.");
             } catch (Exception e) { enabled.setChecked(app.settings.whatsappEnabled()); whatsappStatus.setText(e.getMessage()); }
         });
-        form.addView(button("Guardar remitente de WhatsApp", () -> {
+        notices.addView(button("Guardar remitente de WhatsApp", false, () -> {
             try {
                 app.configureWhatsapp(enabled.isChecked(), owner.getText().toString(), phone.getText().toString().trim());
                 whatsappStatus.setText("Remitente guardado. Se cancelaron los pedidos anteriores.");
             } catch (Exception e) { whatsappStatus.setText(e.getMessage()); }
         }));
-        form.addView(button("Dar acceso a notificaciones", () -> {
+        notices.addView(button("Dar acceso a notificaciones", false, () -> {
             try { startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)); }
             catch (RuntimeException e) { whatsappStatus.setText("Abrí Ajustes del sistema → Acceso a notificaciones → Asistente."); }
         }));
-        form.addView(label("En Android 13 o posterior, si instalaste la app fuera de Play, puede aparecer «Ajuste restringido». Abrí Información de la app → menú ⋮ → Permitir ajustes restringidos, y volvé a dar acceso a notificaciones. Android concede acceso general; Asistente filtra por WhatsApp Business."));
-        form.addView(label("Integración no oficial: puede romperse si WhatsApp cambia sus avisos y existe riesgo de bloqueo del número de repuesto. Solo funciona cuando llega una notificación legible; chats abiertos, silenciados o avisos ocultos pueden impedirlo. Registro muestra respuestas pendientes y fallos. «Enviada a Responder» no confirma entrega al destinatario."));
+
+        LinearLayout privacy = ui.card(); form.addView(privacy);
+        privacy.addView(ui.cardTitle(Icons.SHIELD, "Privacidad", false));
+        privacy.addView(label("Gemini recibe tu mensaje y un resumen local. En la cuota gratis Google puede usar esos datos para mejorar sus productos. Las reglas funcionan sin clave."));
+        privacy.addView(label("WhatsApp por QR es una integración no oficial: puede romperse si WhatsApp cambia, y existe riesgo de bloqueo del número del bot."));
+
+        LinearLayout about = ui.card(); form.addView(about);
+        about.addView(ui.cardTitle(Icons.INFO, "Acerca de", false));
+        String version = "";
+        try { version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception ignored) { }
+        about.addView(label("Asistente " + version + " — firma de depuración pública; la firma privada sigue pendiente."));
+        about.addView(label(Icons.CREDIT));
     }
 }

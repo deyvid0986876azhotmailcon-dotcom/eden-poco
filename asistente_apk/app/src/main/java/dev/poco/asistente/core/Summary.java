@@ -15,7 +15,7 @@ import java.util.TreeMap;
 public final class Summary {
     private Summary() {}
     public static String money(long cents, String currency) {
-        return currency + " " + BigDecimal.valueOf(cents, 2).toPlainString().replace('.', ',');
+        return Receipt.money(cents, currency);
     }
     public static String render(List<Store.Row> rows, LocalDate today, boolean includeIds) throws Exception {
         String month = YearMonth.from(today).toString();

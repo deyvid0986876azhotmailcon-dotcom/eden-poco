@@ -64,8 +64,8 @@ public class ExecutorTest {
         assertEquals(16, code.length()); assertNotNull(store.find(id));
         executor.confirm("other", "c1", code); assertNotNull(store.find(id));
         executor.confirm("david", "c2", "0000"); assertNotNull(store.find(id));
-        assertTrue(executor.confirm("david", "c3", code).startsWith("Borrado")); assertNull(store.find(id));
-        assertFalse(executor.confirm("david", "c4", code).startsWith("Borrado"));
+        assertTrue(executor.confirm("david", "c3", code).startsWith("Borré")); assertNull(store.find(id));
+        assertFalse(executor.confirm("david", "c4", code).startsWith("Borré"));
     }
     @Test public void expirationAndModifiedSnapshotInvalidateDeletion() throws Exception {
         String id = create(), code = propose(id);

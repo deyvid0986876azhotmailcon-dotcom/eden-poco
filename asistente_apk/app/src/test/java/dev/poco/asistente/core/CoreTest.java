@@ -23,9 +23,9 @@ public class CoreTest {
             public String currency() { return "ARS"; }
         };
         AssistantCore core = new AssistantCore(store, unavailableVault, (key, model, body) -> { throw new AssertionError("No network"); }, clock);
-        assertTrue(core.receive("gasté 3500 en super").startsWith("Guardado"));
+        assertTrue(core.receive("gasté 3500 en super").startsWith("Anoté"));
         assertEquals(1, store.rows().size());
-        assertTrue(core.receive("resumen").contains("ARS -3500,00"));
+        assertTrue(core.receive("resumen").contains("-$ 3.500"));
     }
     @Test public void missingKeyAndExternalDataCannotMutate() {
         AssistantCore core = new AssistantCore(store, settings(""), (key, model, body) -> { throw new AssertionError("No network"); }, clock);
@@ -60,7 +60,7 @@ public class CoreTest {
         String proposal = core.receive("borrar " + id);
         String code = proposal.substring(proposal.indexOf("escribí SÍ ") + 11, proposal.indexOf(". PARAR"));
         core.receive("sí"); assertEquals(1, store.rows().size());
-        assertTrue(core.receive("SÍ " + code).startsWith("Borrado")); assertTrue(store.rows().isEmpty());
+        assertTrue(core.receive("SÍ " + code).startsWith("Borré")); assertTrue(store.rows().isEmpty());
     }
     @Test public void stopAlsoCancelsQueuedWork() {
         AssistantCore core = new AssistantCore(store, settings(""), (key, model, body) -> { throw new AssertionError(); }, clock);
@@ -68,7 +68,7 @@ public class CoreTest {
         core.stop();
         assertTrue(core.receive("gaste 3500 en super", token).contains("cancelado antes"));
         assertTrue(store.rows().isEmpty());
-        assertTrue(core.receive("gaste 3500 en super").startsWith("Guardado"));
+        assertTrue(core.receive("gaste 3500 en super").startsWith("Anoté"));
     }
     @Test public void authenticatedWhatsappIsIdempotentAndUsesSeparateConfirmationActor() throws Exception {
         AssistantCore core = new AssistantCore(store, settings(""), (key, model, body) -> { throw new AssertionError(); }, clock);
@@ -78,7 +78,7 @@ public class CoreTest {
         String proposal = core.receive("borrar " + store.rows().get(0).id, AssistantCore.Source.WHATSAPP_OWNER, "wa2");
         String code = proposal.substring(proposal.indexOf("escribí SÍ ") + 11, proposal.indexOf(". PARAR"));
         assertTrue(core.receive("SÍ " + code).contains("no corresponde")); assertEquals(1, store.rows().size());
-        assertTrue(core.receive("SÍ " + code, AssistantCore.Source.WHATSAPP_OWNER, "wa3").startsWith("Borrado"));
+        assertTrue(core.receive("SÍ " + code, AssistantCore.Source.WHATSAPP_OWNER, "wa3").startsWith("Borré"));
         assertTrue(store.rows().isEmpty());
     }
     @Test public void staleWhatsappTokenCannotMutateAfterStop() {

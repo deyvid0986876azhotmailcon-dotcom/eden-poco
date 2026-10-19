@@ -31,7 +31,7 @@ public class BridgeInboxTest {
         queue.add(() -> core.receive("gasté 2 en local"));
         CompletableFuture<String> response = inbox.accept("one", "gasté 3 en puente");
         assertEquals(1, scheduled.size()); assertFalse(response.isDone()); scheduled.remove().run();
-        assertTrue(response.join().startsWith("Guardado")); assertEquals(2, store.rows().size());
+        assertTrue(response.join().startsWith("Anoté")); assertEquals(2, store.rows().size());
         assertTrue(inbox.accept("one", "gasté 3 en puente").join().contains("repetido")); assertEquals(2, store.rows().size());
     }
     @Test public void stopBypassesQueueAndCompletesCancelledWaiters() {
@@ -50,15 +50,15 @@ public class BridgeInboxTest {
         String proposal = receive("two", "borrar " + store.rows().get(0).id);
         String code = proposal.substring(proposal.indexOf("escribí SÍ ") + 11, proposal.indexOf(". PARAR"));
         assertTrue(core.receive("SÍ " + code).contains("no corresponde"));
-        assertTrue(receive("three", "SÍ " + code).startsWith("Borrado")); assertTrue(store.rows().isEmpty());
+        assertTrue(receive("three", "SÍ " + code).startsWith("Borré")); assertTrue(store.rows().isEmpty());
         receive("four", "gasté 3500 en super");
         proposal = receive("five", "borrar " + store.rows().get(0).id);
         code = proposal.substring(proposal.indexOf("escribí SÍ ") + 11, proposal.indexOf(". PARAR"));
-        receive("six", "PARAR"); assertFalse(receive("seven", "SÍ " + code).startsWith("Borrado"));
+        receive("six", "PARAR"); assertFalse(receive("seven", "SÍ " + code).startsWith("Borré"));
         assertEquals(1, store.rows().size());
     }
     @Test public void maximumInputIdStillFitsCoreIdAfterNamespacing() {
-        assertTrue(receive("x".repeat(120), "gasté 3500 en super").startsWith("Guardado"));
+        assertTrue(receive("x".repeat(120), "gasté 3500 en super").startsWith("Anoté"));
     }
     @Test public void stopAlsoRejectsAnOlderConnectionThatWasStillReadingItsBody() {
         long arrival = core.cancellationToken(); stop();
