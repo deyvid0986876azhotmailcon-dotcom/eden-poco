@@ -29,7 +29,19 @@ function isStop(text) {
 }
 function candidate(message, type, owner, connectedAt, now = Date.now()) {
   const key = message?.key;
-  if (!key || key.fromMe !== false || key.participant || key.remoteJid !== owner) return { reason: 'origen no autorizado' };
+  // WhatsApp now names most private chats by a LID (…@lid) instead of the phone number. Such a
+  // message is the owner's only when the phone number WhatsApp's server sends along with it
+  // (remoteJidAlt, or senderPn in older builds) is the owner's; Baileys 6.7.22+ stopped letting
+  // a sender forge that mapping (the spoofing fixed after 6.7.18).
+  const lid = typeof key?.remoteJid === 'string' && /^[0-9]+@lid$/.test(key.remoteJid);
+  const fromOwner = key?.remoteJid === owner || (lid && (key.remoteJidAlt === owner || key.senderPn === owner));
+  if (!key || key.fromMe !== false || key.participant || !fromOwner) {
+    // the log says which kind of id came, never the text or the number
+    const kind = !key?.remoteJid ? 'sin id' : key.remoteJid.endsWith('@g.us') ? 'grupo'
+      : key.remoteJid.endsWith('@broadcast') ? 'difusion/estado' : lid ? `lid sin numero del dueno (alt=${key.remoteJidAlt ? 'otro' : 'falta'})`
+      : key.remoteJid.endsWith('@s.whatsapp.net') ? 'otro numero' : 'otro tipo';
+    return { reason: `origen no autorizado (${kind})` };
+  }
   if (typeof key.id !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(key.id)) return { reason: 'id inválido' };
   let content = message.message;
   // Ephemeral TEXT is allowed; media captions, protocol edits, reactions and quoted text are not orders.
