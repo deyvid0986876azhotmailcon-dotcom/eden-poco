@@ -75,7 +75,8 @@ public final class ToolExecutor {
         }
         Store.Row row = new Store.Row(UUID.randomUUID().toString(), kind, 1, Validation.record(kind, args, LocalDate.now(clock)));
         unique(row);
-        String result = "Anoté " + Receipt.describe(kind, row.data, LocalDate.now(clock)) + ". (ref. " + Receipt.ref(row.id) + ")";
+        String result = "Anoté " + Receipt.describe(kind, row.data, LocalDate.now(clock)) + ". " + Receipt.closer(kind, row.data, row.id)
+                + " (ref. " + Receipt.ref(row.id) + ")";
         if (kind.equals("comida") && (row.data.has("calorias") || row.data.has("proteina"))) result += " (nutrientes estimados)";
         return store.mutate(operationId, null, row, result, clock.millis());
     }

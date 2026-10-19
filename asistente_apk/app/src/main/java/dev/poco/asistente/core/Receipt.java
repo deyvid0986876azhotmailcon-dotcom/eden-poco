@@ -79,6 +79,26 @@ public final class Receipt {
         }
     }
 
+    /**
+     * A short friendly closing in Paraguayan Spanish after a saved record, picked by the record's id so the
+     * same receipt always reads the same. Never carries numbers: those are in the sentence before.
+     */
+    public static String closer(String kind, JSONObject d, String id) {
+        String[] options;
+        switch (kind) {
+            case "movimiento":
+                options = d.optString("tipo").equals("ingreso")
+                        ? new String[]{"¡Iporã! A cuidar esa plata, che.", "Bien ahí, che.", "Aguyje, que siga entrando."}
+                        : new String[]{"Listo, che.", "Upéicha, ya quedó.", "Anotado, cuidá la billetera."};
+                break;
+            case "peso": options = new String[]{"Seguimos sumando, jaha.", "Iporã, a seguir comiendo bien.", "Paso a paso, che."}; break;
+            case "entreno": options = new String[]{"¡Eso, che! Buen entreno.", "Iporã, músculo en camino.", "Jaha, a seguir así."}; break;
+            case "comida": options = new String[]{"Buen provecho, che.", "Iporã, a comer bien.", "Eso suma, che."}; break;
+            default: options = new String[]{"Listo, lo vamos siguiendo de cerca.", "Upéicha, quedó anotado."};
+        }
+        return options[Math.floorMod(id.hashCode(), options.length)];
+    }
+
     /** Keep the complete ID: local correction/deletion commands require a full UUID. */
     public static String ref(String id) { return id; }
 }

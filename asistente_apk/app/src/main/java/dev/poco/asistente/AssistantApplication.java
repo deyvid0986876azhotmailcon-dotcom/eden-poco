@@ -29,7 +29,7 @@ public final class AssistantApplication extends Application {
     public final MessageQueue messages = new MessageQueue(worker);
     public final Handler main = new Handler(Looper.getMainLooper());
     private final CopyOnWriteArrayList<Runnable> listeners = new CopyOnWriteArrayList<>();
-    private String chat = "Asistente listo. Podés usar las reglas sin clave. Escribí «ayuda» para ver ejemplos.\n";
+    private String chat = "Asistente: ¡Mba'éichapa, che! Contame un gasto, tu peso o cómo te fue en el gimnasio. Si querés ejemplos, escribí «ayuda».\n";
     private boolean busy;
     @Override public void onCreate() {
         super.onCreate();
