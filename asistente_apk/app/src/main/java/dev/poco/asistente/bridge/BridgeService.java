@@ -62,21 +62,6 @@ public final class BridgeService extends Service {
         return START_STICKY;
     }
     private void serve() {
-        // TEMPORARY diagnosis (Claude, 2026-10-19): the server answers one connection and then stops
-        // accepting. Every 15 s the stack of this thread goes to logcat (tag AsistenteDiag).
-        Thread serving = Thread.currentThread();
-        deadlines.scheduleWithFixedDelay(() -> {
-            StringBuilder trace = new StringBuilder("serve ").append(serving.getState());
-            for (StackTraceElement frame : serving.getStackTrace()) trace.append("\n  at ").append(frame);
-            for (java.util.Map.Entry<Thread, StackTraceElement[]> entry : Thread.getAllStackTraces().entrySet()) {
-                String name = entry.getKey().getName();
-                if (!name.startsWith("pool-")) continue;
-                trace.append("\n").append(name).append(' ').append(entry.getKey().getState());
-                StackTraceElement[] frames = entry.getValue();
-                for (int i = 0; i < Math.min(6, frames.length); i++) trace.append("\n  at ").append(frames[i]);
-            }
-            android.util.Log.w("AsistenteDiag", trace.toString());
-        }, 15, 15, TimeUnit.SECONDS);
         try (ServerSocket socket = new ServerSocket()) {
             server = socket;
             if (closed) return;

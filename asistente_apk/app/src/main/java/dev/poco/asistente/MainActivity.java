@@ -303,7 +303,8 @@ public final class MainActivity extends Activity {
         c.addView(ui.cardTitle(icon, title, false));
         if (lines.isEmpty()) { c.addView(ui.text("Sin datos todavía.", 14, color.muted, false)); return; }
         for (String l : lines) {
-            TextView t = ui.text(l, 15, textColor, false); t.setPadding(0, ui.dp(2), 0, ui.dp(2)); c.addView(t);
+            TextView t = ui.text(l, 15, textColor, false); t.setTextIsSelectable(true);
+            t.setPadding(0, ui.dp(2), 0, ui.dp(2)); c.addView(t);
         }
     }
 

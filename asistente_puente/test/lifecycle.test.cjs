@@ -74,6 +74,25 @@ test('QR terminal/PNG, authenticated delivery and persistent dedup use the real 
     for (const privateValue of ['PRIVATE_TEXT', 'PRIVATE_ID', h.config.remitente, h.config.token]) assert.ok(!h.logs.join('\n').includes(privateValue));
   } finally { await h.close(); }
 });
+test('owner LID replies stay in that chat; unrelated chats and payload aliases are rejected', async () => {
+  const h = await harness();
+  try {
+    const socket = h.sockets[0];
+    socket.ev.emit('connection.update', { connection: 'open' }); await h.hooks.session().events;
+    const message = { key: { fromMe: false, id: 'LID_1', remoteJid: '123@lid', remoteJidAlt: h.config.remitente },
+      messageTimestamp: Math.floor(Date.now() / 1000), message: { conversation: 'Hola' } };
+    socket.ev.emit('messages.upsert', { type: 'notify', messages: [message,
+      { ...message, key: { ...message.key, id: 'LID_2', remoteJidAlt: '2222222222@s.whatsapp.net' } },
+      { ...message, key: { ...message.key, id: 'GROUP', remoteJid: '123@g.us' } },
+      { ...message, key: { fromMe: false, id: 'PAYLOAD', remoteJid: '456@lid' },
+        message: { extendedTextMessage: { text: 'Hola', contextInfo: { remoteJidAlt: h.config.remitente, senderPn: h.config.remitente } } } }
+    ] });
+    await h.hooks.queue();
+    assert.equal(h.posts.length, 1); assert.equal(socket.sent.length, 1);
+    assert.equal(socket.sent[0].jid, '123@lid'); assert.deepEqual(h.exits, []);
+  } finally { await h.close(); }
+});
+
 test('loggedOut removes only auth and reconnects with increasing delays until a new QR', async () => {
   const h = await harness();
   try {

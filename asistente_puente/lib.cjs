@@ -37,7 +37,7 @@ function candidate(message, type, owner, connectedAt, now = Date.now()) {
   const fromOwner = key?.remoteJid === owner || (lid && (key.remoteJidAlt === owner || key.senderPn === owner));
   if (!key || key.fromMe !== false || key.participant || !fromOwner) {
     // the log says which kind of id came, never the text or the number
-    const kind = !key?.remoteJid ? 'sin id' : key.remoteJid.endsWith('@g.us') ? 'grupo'
+    const kind = typeof key?.remoteJid !== 'string' || !key.remoteJid ? 'sin id' : key.remoteJid.endsWith('@g.us') ? 'grupo'
       : key.remoteJid.endsWith('@broadcast') ? 'difusion/estado' : lid ? `lid sin numero del dueno (alt=${key.remoteJidAlt ? 'otro' : 'falta'})`
       : key.remoteJid.endsWith('@s.whatsapp.net') ? 'otro numero' : 'otro tipo';
     return { reason: `origen no autorizado (${kind})` };

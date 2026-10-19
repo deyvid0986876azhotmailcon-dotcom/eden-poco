@@ -23,4 +23,11 @@ public class ReceiptTest {
         assertEquals("el entreno: sentadilla 3×10 con 40 kg (17/10)", Receipt.describe("entreno", new JSONObject()
                 .put("ejercicio", "sentadilla").put("series", 3).put("repeticiones", 10).put("kg", 40).put("fecha", "2026-10-17"), today));
     }
+    @Test public void receiptsKeepUsableIdsAndUnambiguousValues() throws Exception {
+        String id = "12345678-1234-4234-8234-123456789abc";
+        assertEquals(id, Validation.id(new JSONObject().put("id", Receipt.ref(id))));
+        assertEquals("19/10/2025", Receipt.day("2025-10-19", today));
+        assertEquals("la comida «arroz» (hoy), unas 12,5 kcal", Receipt.describe("comida",
+                new JSONObject().put("descripcion", "arroz").put("fecha", "2026-10-19").put("calorias", 12.5), today));
+    }
 }

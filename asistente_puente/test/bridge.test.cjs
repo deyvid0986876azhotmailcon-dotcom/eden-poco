@@ -20,7 +20,7 @@ test('only fresh private text from the exact allowlisted JID is accepted', () =>
   for (const key of [{ fromMe: true }, { remoteJid: 'status@broadcast' }, { remoteJid: 'test@g.us' },
     { remoteJid: '123@lid' }, { remoteJid: '123@lid', remoteJidAlt: '2'.repeat(10) + '@s.whatsapp.net' },
     { remoteJid: 'test@lid', remoteJidAlt: owner }, { remoteJid: '2'.repeat(10) + '@s.whatsapp.net' },
-    { participant: owner }, { id: '../../bad' }]) {
+    { remoteJid: 123 }, { participant: owner }, { id: '../../bad' }]) {
     assert.ok(candidate({ ...message, key: { ...message.key, ...key } }, 'notify', owner, 100, 100000).reason);
   }
   // a LID chat counts as the owner's only with the owner's number from WhatsApp's server

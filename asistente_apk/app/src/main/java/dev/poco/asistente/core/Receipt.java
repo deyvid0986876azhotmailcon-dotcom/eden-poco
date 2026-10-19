@@ -40,7 +40,7 @@ public final class Receipt {
         LocalDate d = LocalDate.parse(date);
         if (d.equals(today)) return "hoy";
         if (d.equals(today.minusDays(1))) return "ayer";
-        return d.format(DateTimeFormatter.ofPattern("dd/MM"));
+        return d.format(DateTimeFormatter.ofPattern(d.getYear() == today.getYear() ? "dd/MM" : "dd/MM/yyyy"));
     }
 
     private static String number(JSONObject d, String key) {
@@ -58,7 +58,7 @@ public final class Receipt {
             case "peso": return "tu peso: " + number(d, "kg") + " kg" + at;
             case "comida": {
                 String text = "la comida «" + d.optString("descripcion") + "»" + at;
-                if (d.has("calorias")) text += ", unas " + d.optLong("calorias") + " kcal";
+                if (d.has("calorias")) text += ", unas " + number(d, "calorias") + " kcal";
                 if (d.has("proteina")) text += ", " + number(d, "proteina") + " g de proteína";
                 return text;
             }
@@ -79,6 +79,6 @@ public final class Receipt {
         }
     }
 
-    /** The first 8 characters of the id, enough to tell records apart when David asks to fix one. */
-    public static String ref(String id) { return id.length() > 8 ? id.substring(0, 8) : id; }
+    /** Keep the complete ID: local correction/deletion commands require a full UUID. */
+    public static String ref(String id) { return id; }
 }
