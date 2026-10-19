@@ -45,7 +45,7 @@ public final class GeminiProtocol {
                 "contents", new JSONArray().put(Json.object("role", "user", "parts", new JSONArray().put(Json.object("text", message)))),
                 "tools", new JSONArray().put(Json.object("functionDeclarations", declarations())),
                 "toolConfig", Json.object("functionCallingConfig", Json.object("mode", "AUTO")),
-                "generationConfig", Json.object("temperature", 0.6, "maxOutputTokens", 1024));
+                "generationConfig", Json.object("temperature", 0.4, "maxOutputTokens", 1024));
     }
     public static JSONArray declarations() throws Exception {
         JSONArray declarations = new JSONArray();

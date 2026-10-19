@@ -173,3 +173,18 @@ QR/PNG, persistencia y cierre remoto de sesión, mensaje real del dueño/tercero
 reconexión sin reproducir pedidos antiguos, confirmación con código, PARAR durante
 Gemini, timeout y uso con pantalla bloqueada. No dar esos puntos por verificados
 con los tests simulados.
+
+## Arranque automático al prender el teléfono
+
+La versión de Termux de Google Play ejecuta en segundo plano los scripts de `~/.termux/boot/` al
+recibir BOOT_COMPLETED (TermuxBootReceiver, en termux-play-store/termux-apps). En Termux:
+
+```sh
+mkdir -p ~/.termux/boot
+cp ~/asistente_puente/arranque_boot.sh ~/.termux/boot/asistente.sh
+chmod 700 ~/.termux/boot/asistente.sh
+```
+
+La app Asistente vuelve a levantar su servicio del puente al prender el teléfono si estaba encendido.
+En Xiaomi/HyperOS hay que permitir "Inicio automático" a Termux y a Asistente, y dejar su batería
+"Sin restricciones". El registro queda en `~/.asistente_puente/puente.log`.
