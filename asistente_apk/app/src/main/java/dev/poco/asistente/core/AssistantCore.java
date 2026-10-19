@@ -9,7 +9,7 @@ import java.util.function.LongSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Reusable without Activity/Service. Only the notification boundary may assert WHATSAPP_OWNER. */
+/** Reusable without Activity/Service. Only authenticated WhatsApp adapters may assert WHATSAPP_OWNER. */
 public final class AssistantCore {
     public enum Source { LOCAL_USER, WHATSAPP_OWNER, UNTRUSTED_DATA }
     public interface Settings {

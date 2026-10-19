@@ -10,17 +10,19 @@ import dev.poco.asistente.data.AssistantDb;
 import dev.poco.asistente.net.GeminiClient;
 import dev.poco.asistente.messaging.MessageQueue;
 import dev.poco.asistente.messaging.WhatsAppBridge;
+import dev.poco.asistente.bridge.BridgeInbox;
 import java.time.Clock;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Process-scoped core and ordered queue shared by the Activity and notification listener. */
+/** Process-scoped core and ordered queue shared by the chat and both WhatsApp adapters. */
 public final class AssistantApplication extends Application {
     public AssistantCore core;
     public AppSettings settings;
     public AssistantDb db;
     public WhatsAppBridge whatsapp;
+    public BridgeInbox bridge;
     public final Object controlGate = new Object();
     public final ExecutorService worker = Executors.newSingleThreadExecutor();
     public final ExecutorService io = Executors.newSingleThreadExecutor();
@@ -35,6 +37,10 @@ public final class AssistantApplication extends Application {
         db = new AssistantDb(this);
         core = new AssistantCore(db, settings, new GeminiClient(), Clock.systemDefaultZone(), SystemClock::elapsedRealtime);
         whatsapp = new WhatsAppBridge(this);
+        bridge = new BridgeInbox(core, messages, controlGate, settings::bridgeEnabled, id -> {
+            if (!db.claimNotice(id, "Puente")) return false;
+            db.noticeState(id, "recibido por puente", null); return true;
+        }, this::bridgeLog, this::stop);
     }
     public void listen(Runnable listener) { listeners.addIfAbsent(listener); }
     public void unlisten(Runnable listener) { listeners.remove(listener); }
@@ -46,6 +52,11 @@ public final class AssistantApplication extends Application {
     }
     public void changed() { main.post(() -> { for (Runnable listener : listeners) listener.run(); }); }
     public void messagingError() { append("Sistema: falló el almacenamiento de WhatsApp. Revisá Registro y Resumen antes de repetir un pedido."); changed(); }
+    public void bridgeLog(String event) {
+        try { db.messagingLog("Puente", event); }
+        catch (RuntimeException e) { messagingError(); }
+        changed();
+    }
     public void send(String text) {
         if (dev.poco.asistente.core.Rules.normalize(text).equals("parar")) { stop(); return; }
         synchronized (controlGate) {
@@ -66,6 +77,7 @@ public final class AssistantApplication extends Application {
     public void stop() {
         synchronized (controlGate) {
             append("Asistente: " + core.stop()); messages.clear();
+            if (bridge != null) bridge.cancelPending();
             synchronized (this) { busy = false; }
             try { db.cancelNotices(); db.messagingLog("Sistema", "PARAR: cola vaciada; no se deshacen acciones ya terminadas."); }
             catch (RuntimeException e) { messagingError(); }
@@ -73,6 +85,9 @@ public final class AssistantApplication extends Application {
         changed();
     }
     public void configureWhatsapp(boolean enabled, String name, String phone) {
-        synchronized (controlGate) { settings.saveWhatsapp(enabled, name, phone); stop(); }
+        synchronized (controlGate) {
+            if (enabled && settings.bridgeEnabled()) throw new IllegalStateException("Apagá primero el puente QR.");
+            settings.saveWhatsapp(enabled, name, phone); stop();
+        }
     }
 }

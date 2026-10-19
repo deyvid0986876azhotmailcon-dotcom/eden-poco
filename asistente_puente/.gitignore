@@ -1,0 +1,8 @@
+node_modules/
+.npm-cache/
+config.json
+auth/
+*.png
+*.log
+*.ids
+.asistente_puente/

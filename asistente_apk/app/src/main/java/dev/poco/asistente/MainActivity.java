@@ -21,6 +21,8 @@ import android.widget.Switch;
 import android.widget.TextView;
 import dev.poco.asistente.core.GeminiProtocol;
 import dev.poco.asistente.core.Validation;
+import dev.poco.asistente.bridge.BridgeService;
+import dev.poco.asistente.data.AppSettings;
 import java.util.Arrays;
 
 /** Native views only. Notification access is granted separately by Android. */
@@ -33,6 +35,7 @@ public final class MainActivity extends Activity {
     private Button send;
     private TextView messagingLog;
     private boolean readingLog;
+    private Switch bridgeToggle, noticeToggle;
     private String screen = "Chat", draft = "";
     private final Runnable observer = this::refreshChat;
     @Override public void onCreate(Bundle savedState) {
@@ -63,6 +66,10 @@ public final class MainActivity extends Activity {
         setContentView(root); root.requestApplyInsets();
         if (savedState != null) screen = savedState.getString("screen", "Chat");
         show(screen);
+        if (app.settings.bridgeEnabled()) {
+            try { startForegroundService(new Intent(this, BridgeService.class)); }
+            catch (RuntimeException e) { app.settings.setBridgeEnabled(false); app.bridgeLog("Fallido: no se pudo iniciar el servicio"); }
+        }
     }
     @Override protected void onStart() { super.onStart(); app.listen(observer); refreshChat(); }
     @Override protected void onStop() { app.unlisten(observer); super.onStop(); }
@@ -78,7 +85,7 @@ public final class MainActivity extends Activity {
     }
     private void show(String name) {
         if (input != null) draft = input.getText().toString();
-        screen = name; body.removeAllViews(); input = null; transcript = null; messagingLog = null;
+        screen = name; body.removeAllViews(); input = null; transcript = null; messagingLog = null; bridgeToggle = null; noticeToggle = null;
         if (name.equals("Chat")) chat(); else if (name.equals("Resumen")) summary();
         else if (name.equals("Registro")) messaging(); else settings();
     }
@@ -102,6 +109,8 @@ public final class MainActivity extends Activity {
         body.addView(controls); refreshChat();
     }
     private void refreshChat() {
+        if (bridgeToggle != null) bridgeToggle.setChecked(app.settings.bridgeEnabled());
+        if (noticeToggle != null) noticeToggle.setChecked(app.settings.whatsappEnabled());
         if (screen.equals("Registro")) { refreshMessaging(); return; }
         if (!screen.equals("Chat") || transcript == null) return;
         transcript.setText(app.chat()); send.setEnabled(!app.busy());
@@ -173,16 +182,54 @@ public final class MainActivity extends Activity {
             try { app.settings.save((String) model.getSelectedItem(), (String) currency.getSelectedItem()); status.setText("Modelo y moneda guardados."); }
             catch (Exception e) { status.setText("No pude guardar los ajustes."); }
         }));
-        form.addView(label("WhatsApp Business (número de repuesto). Guardá tu número personal como un contacto con nombre único y escribí ese nombre EXACTO aquí. Solo se leen los avisos nuevos de WhatsApp Business."));
+        form.addView(label("WhatsApp por dispositivo vinculado: iniciá el puente en Termux y escaneá el QR con el WhatsApp del Segundo espacio. Solo se acepta el remitente configurado en Termux."));
+        TextView bridgeStatus = label(""); form.addView(bridgeStatus);
+        bridgeToggle = new Switch(this); bridgeToggle.setText("Puente de WhatsApp");
+        bridgeToggle.setChecked(app.settings.bridgeEnabled()); form.addView(bridgeToggle);
+        bridgeToggle.setOnCheckedChangeListener((view, checked) -> {
+            if (checked == app.settings.bridgeEnabled()) return;
+            try {
+                if (checked) {
+                    app.settings.bridgeToken();
+                    app.configureWhatsapp(false, app.settings.whatsappName(), app.settings.whatsappPhone());
+                    app.settings.setBridgeEnabled(true);
+                    startForegroundService(new Intent(this, BridgeService.class));
+                    if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+                        requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 42);
+                } else {
+                    app.settings.setBridgeEnabled(false); app.stop(); stopService(new Intent(this, BridgeService.class));
+                }
+                bridgeStatus.setText(checked ? "Puente habilitado. Consultá Registro para comprobar el inicio." : "Puente apagado; cola y confirmaciones canceladas.");
+            } catch (Exception e) {
+                app.settings.setBridgeEnabled(false); stopService(new Intent(this, BridgeService.class));
+                view.setChecked(false); bridgeStatus.setText("No pude iniciar el puente. Revisá Registro.");
+            }
+        });
+        form.addView(button("Copiar configuración del puente", () -> {
+            try {
+                String configuration = new org.json.JSONObject().put("puerto", AppSettings.BRIDGE_PORT).put("token", app.settings.bridgeToken()).toString();
+                android.content.ClipData clip = android.content.ClipData.newPlainText("Configuración privada del puente", configuration);
+                if (Build.VERSION.SDK_INT >= 33) {
+                    android.os.PersistableBundle extras = new android.os.PersistableBundle();
+                    extras.putBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE, true); clip.getDescription().setExtras(extras);
+                }
+                getSystemService(android.content.ClipboardManager.class).setPrimaryClip(clip);
+                bridgeStatus.setText("Copiado: pegá puerto y token en config.json de Termux y agregá tu remitente autorizado.");
+            } catch (Exception e) { bridgeStatus.setText("No pude copiar la configuración cifrada."); }
+        }));
+        form.addView(label("Lector de avisos anterior (apagado por defecto). No recibe mensajes en segundo plano en el Segundo espacio. No lo uses junto al puente QR."));
+        form.addView(label("WhatsApp Business: guardá tu número personal como contacto con nombre único y escribí ese nombre EXACTO aquí. Solo se leen avisos nuevos."));
         EditText owner = new EditText(this); owner.setSingleLine(true); owner.setHint("Nombre exacto, por ejemplo Yo David");
         owner.setText(app.settings.whatsappName()); owner.setFilters(new InputFilter[]{new InputFilter.LengthFilter(100)}); form.addView(owner);
         EditText phone = new EditText(this); phone.setSingleLine(true); phone.setHint("Número personal E.164 (opcional): +595…");
         phone.setInputType(InputType.TYPE_CLASS_PHONE); phone.setText(app.settings.whatsappPhone()); form.addView(phone);
         form.addView(label("Si el aviso incluye un número, se compara con el configurado. Si solo trae nombre, se exige coincidencia exacta y se anota en Registro. Un nombre no es una prueba criptográfica de identidad. Evitá contactos con nombres duplicados."));
         TextView whatsappStatus = label(""); form.addView(whatsappStatus);
-        Switch enabled = new Switch(this); enabled.setText("Responder por WhatsApp"); enabled.setChecked(app.settings.whatsappEnabled()); form.addView(enabled);
+        Switch enabled = new Switch(this); noticeToggle = enabled;
+        enabled.setText("Responder desde avisos (anterior)"); enabled.setChecked(app.settings.whatsappEnabled()); form.addView(enabled);
         enabled.setOnCheckedChangeListener((view, checked) -> {
             if (checked == app.settings.whatsappEnabled()) return;
+            if (checked && app.settings.bridgeEnabled()) { view.setChecked(false); whatsappStatus.setText("Apagá primero el puente QR."); return; }
             try {
                 // Turning off always works, even if an unfinished field is currently invalid.
                 app.configureWhatsapp(checked, checked ? owner.getText().toString() : app.settings.whatsappName(),

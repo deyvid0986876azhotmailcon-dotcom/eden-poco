@@ -1,9 +1,45 @@
-# Asistente — fases 1 y 2
+# Asistente — chat, lector de avisos y puente QR
 
 App independiente, `dev.poco.asistente`, Java, Android 8/API 26 o posterior,
 target/compile SDK 35. No utiliza modelos locales, `chat_apk`, motores NPU,
 accesibilidad. Fase 2 integra los avisos de WhatsApp Business y su acción Responder,
-sin servidor ni cliente WhatsApp Web. Interfaz nativa: Chat, Resumen, Registro y Ajustes.
+apagada por defecto. La versión 0.3 agrega un servidor HTTP de loopback para el
+puente QR en Termux. Interfaz nativa: Chat, Resumen, Registro y Ajustes.
+
+## Puente por dispositivo vinculado (0.3)
+
+Decisión del 17/10: usar QR porque el WhatsApp del Segundo espacio no recibe
+avisos en segundo plano. Ver [instalación y estado del puente](../asistente_puente/README.md).
+**El lockfile de Node y las pruebas reales de Termux/WhatsApp siguen pendientes.**
+No se necesita dar acceso a notificaciones para el puente QR.
+
+En Ajustes, «Copiar configuración del puente» copia `{puerto, token}` al
+portapapeles marcado sensible; «Puente de WhatsApp» inicia/para un servicio
+`specialUse`, no exportado, con su permiso y subtipo declarados. Se pide el
+permiso de notificación normal para mostrar su estado y el botón de apagar.
+El token se genera con 32 bytes aleatorios y tiene su propio alias y preferencias
+cifradas en Keystore: borrar la clave Gemini no lo borra. No hay migración SQLite.
+
+El servidor escucha solo en `127.0.0.1:8765`, sin bibliotecas externas. Acepta
+solo `POST /mensaje`, Bearer exacto comparado mediante hashes de longitud fija
+y `MessageDigest.isEqual`, JSON `{id,texto}`, cuerpo de hasta 16384 bytes y
+cabeceras de hasta 8192 bytes. Rechaza cabeceras duplicadas, transferencias chunked,
+Expect, UTF-8 inválido y tipos no JSON; cierra la conexión tras una respuesta.
+Hay ocho manejadores como máximo, lectura con timeout y cierre absoluto a 100 s.
+
+Los pedidos pasan por `BridgeInbox` a la cola de `AssistantApplication`, con
+deduplicación persistente y el actor `WHATSAPP_OWNER`. PARAR evita la cola y
+resuelve también las esperas HTTP canceladas. La espera del núcleo vence a
+85 s: cancela la generación compartida (incluido el chat local) para impedir
+escrituras tardías de Gemini; no revierte acciones que ya terminaron. El cliente
+Termux espera como máximo 90 s. Registro guarda hora/aceptado/fallido, sin texto
+ni respuesta del puente. La base de datos conserva los registros normales.
+
+Activar el puente desactiva el lector anterior; no se permite habilitar ambos.
+Al cerrar la Activity, el servicio continúa. Android puede reiniciar el servicio
+si mata el proceso; después de un reinicio del teléfono hay que abrir Asistente.
+Al apagarlo se cancelan la cola y confirmaciones pendientes. Termux se detiene
+por separado. No se ha probado aún la supervivencia bajo HyperOS.
 
 ## Compilación y pruebas
 
@@ -22,7 +58,10 @@ validación/CRUD, códigos de borrado, cancelación, idempotencia, resumen, arma
 lectura del JSON de Gemini y fallback HTTP con transporte simulado. No usan red.
 También cubren extracción desde datos simples, filtro de remitente/grupos,
 deduplicación con un ledger simulado, división Unicode, orden/cancelación de cola
-y separación del actor WhatsApp. No prueban SQLite Android, Keystore, extracción
+y separación del actor WhatsApp. `BridgeHttpTest` agrega análisis HTTP, límites
+en bytes, autenticación, framing, UTF-8 y esquema; `BridgeInboxTest` cubre cola
+compartida, deduplicación, PARAR, vencimiento y confirmaciones. No prueban
+SQLite Android, sockets reales, servicio en primer plano, Keystore, extracción
 del Bundle real, PendingIntent ni la Activity: requieren prueba en teléfono.
 
 Artefactos: `asistente-debug-<run_number>` y `asistente-tests-<run_number>`.
@@ -57,7 +96,9 @@ local produce la confirmación de un cambio en la base.
 - `AssistantCore`: recibe texto, valida origen, resuelve comandos locales,
   reglas y Gemini. No depende de Activity, Context ni Service. `Source.UNTRUSTED_DATA`
   nunca llega al modelo como orden ni al ejecutor. `WHATSAPP_OWNER` se usa solo
-  después del filtro de notificaciones, con sus confirmaciones separadas de `LOCAL_USER`.
+  después del filtro de notificaciones o del Bearer del puente local, con sus
+  confirmaciones separadas de `LOCAL_USER`. El puente Termux es responsable de
+  autenticar el JID antes de enviar el POST.
 - `ToolExecutor`: lista cerrada de nueve herramientas, tipos estrictos,
   sin coerción de strings a números, campos desconocidos rechazados y validación
   completa también al corregir. Montos: 1 a 99.999.999.999 centavos; monedas
@@ -122,7 +163,8 @@ número configurado. El modo solo nombre se registra y tiene límites: ver
 Las respuestas se guardan antes de invocar RemoteInput y se dividen a 1800 puntos
 de código. Sin acción de respuesta, o ante fallo, quedan en Registro para copiar.
 El PendingIntent no da confirmación de entrega y nunca se reintenta automáticamente.
-Cloud API queda aplazada por la restricción de Meta; no hay servidor ni `specialUse`.
+Cloud API queda aplazada por la restricción de Meta. El servidor y `specialUse`
+de 0.3 son exclusivos del puente QR; el lector de avisos permanece disponible.
 
 Para usarlo: configurar nombre exacto y E.164 del número personal, dar acceso a
 notificaciones desde Ajustes y activar el interruptor (apagado inicialmente).

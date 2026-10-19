@@ -11,7 +11,24 @@ import java.util.Arrays;
 public final class AppSettings implements AssistantCore.Settings {
     private final SharedPreferences prefs;
     public final KeyVault vault;
-    public AppSettings(Context context) { prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE); vault = new KeyVault(context); }
+    private final KeyVault bridgeVault;
+    public static final int BRIDGE_PORT = 8765;
+    public AppSettings(Context context) {
+        prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE); vault = new KeyVault(context);
+        bridgeVault = new KeyVault(context, "bridge_vault", "dev.poco.asistente.bridge.v1");
+    }
+    public boolean bridgeEnabled() { return prefs.getBoolean("bridge_enabled", false); }
+    public void setBridgeEnabled(boolean enabled) {
+        if (!prefs.edit().putBoolean("bridge_enabled", enabled).commit()) throw new IllegalStateException("No se guardó el estado del puente.");
+    }
+    public synchronized String bridgeToken() throws Exception {
+        if (!bridgeVault.hasKey()) {
+            byte[] bytes = new byte[32]; new java.security.SecureRandom().nextBytes(bytes);
+            bridgeVault.save(android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP | android.util.Base64.URL_SAFE | android.util.Base64.NO_PADDING));
+            Arrays.fill(bytes, (byte) 0);
+        }
+        return bridgeVault.load();
+    }
     @Override public String apiKey() throws Exception { return vault.load(); }
     @Override public String model() { return prefs.getString("model", GeminiProtocol.MODELS[0]); }
     @Override public String currency() { return prefs.getString("currency", "PYG"); }

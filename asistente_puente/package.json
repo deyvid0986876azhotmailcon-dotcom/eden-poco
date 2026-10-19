@@ -1,0 +1,16 @@
+{
+  "name": "asistente-puente",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Puente local de WhatsApp vinculado hacia Asistente en Termux",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node index.cjs",
+    "test": "node --test test/*.test.cjs"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "6.7.18",
+    "pino": "9.6.0",
+    "qrcode": "1.5.4"
+  }
+}
