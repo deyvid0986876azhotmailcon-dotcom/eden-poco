@@ -7,10 +7,17 @@ aceptada por David: WhatsApp puede cambiar el protocolo o bloquear el número de
 
 ## Estado de esta entrega
 
-**Falta generar y revisar `package-lock.json` antes de instalar.** La programación
-se hizo sin red. `npm install --package-lock-only --ignore-scripts --offline`
-falló con `ENOTCACHED` para Baileys; no se inventó un lockfile incompleto.
-Claude debe completar, en una máquina con red, dentro de esta carpeta:
+**No instalar la dependencia actual: requiere actualización de seguridad.**
+Claude agregó `package-lock.json`, con dependencias Git por HTTPS. En su entrada
+de Baileys 6.7.18, el campo `deprecated` advierte de falsificación de mensajes y
+exige 6.7.22 o posterior, o 7.0.0-rc12 o posterior (aviso
+[GHSA-qvv5-jq5g-4cgg](https://github.com/WhiskeySockets/Baileys/security/advisories/GHSA-qvv5-jq5g-4cgg)).
+Codex comprobó ese campo localmente el 2026-10-19; no verificó el aviso por red
+ni reprodujo la vulnerabilidad. El filtro de remitente no sustituye el arreglo
+de autenticación de la biblioteca.
+
+Claude debe elegir y fijar una versión corregida exacta, regenerar y revisar el
+lockfile con red y validar la API y la conexión real. Después, dentro de esta carpeta:
 
 ```sh
 npm install --package-lock-only --ignore-scripts --no-audit --no-fund
@@ -24,10 +31,11 @@ pueden intentar compilar. La prueba final de `npm ci` corresponde a Termux arm64
 Las dependencias directas están fijadas: Baileys **6.7.18**, pino **9.6.0**,
 qrcode **1.5.4**. Se eligió una versión publicada de la línea 6.7, con API CommonJS
 y autenticación multifichero conocidas, sin adoptar una versión candidata de 7.
-No se verificaron por red su vigencia, seguridad ni compatibilidad con el WhatsApp
-actual; no es una afirmación de que sea la versión estable más reciente.
+La versión elegida inicialmente tiene el aviso de seguridad anterior. No se
+verificó su compatibilidad con el WhatsApp actual; las pruebas simuladas no
+demuestran que pueda vincularse ni recibir mensajes reales.
 
-## Instalación en Termux (cuando esté disponible el lockfile)
+## Instalación en Termux (después de actualizar y validar Baileys)
 
 1. Instalar/abrir Termux **en el espacio principal**. En su terminal:
 

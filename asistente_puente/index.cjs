@@ -122,6 +122,11 @@ function shutdown(code = 0) {
     process.exit(code);
   });
 }
+// require() loads ES modules from Node 22.12 on; import() covers an older Node or a module with top-level await.
+async function loadBaileys() {
+  try { return require('@whiskeysockets/baileys'); }
+  catch (e) { if (e.code !== 'ERR_REQUIRE_ESM' && e.code !== 'ERR_REQUIRE_ASYNC_MODULE') throw e; return import('@whiskeysockets/baileys'); }
+}
 function fatal() { log('Fallido: error local; revisar configuración, dependencias y permisos. No se continúa para evitar duplicados'); shutdown(1); }
 async function main() {
   privateDirectory(root);
@@ -130,7 +135,8 @@ async function main() {
   const filename = path.join(root, 'config.json'); fs.chmodSync(filename, 0o600);
   config = configuration(JSON.parse(fs.readFileSync(filename, 'utf8')));
   ledger = new Ledger(path.join(root, 'seen.ids'));
-  ({ default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys'));
+  // Baileys 6.7.22+ is an ES module (6.7.18 and older let messages be spoofed: do not go back)
+  ({ default: makeWASocket, useMultiFileAuthState, DisconnectReason } = await loadBaileys());
   logger = require('pino')({ level: 'silent' }); QRCode = require('qrcode');
   process.on('SIGINT', () => shutdown()); process.on('SIGTERM', () => shutdown());
   await connect();
