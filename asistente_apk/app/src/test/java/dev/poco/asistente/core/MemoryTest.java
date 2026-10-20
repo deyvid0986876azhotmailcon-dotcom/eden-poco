@@ -68,4 +68,11 @@ public class MemoryTest {
         assertTrue(core.receive("olvidá la conversación").contains("Olvidé")); assertTrue(store.conversation().isEmpty());
         assertEquals(1, store.rows().size());
     }
+    @Test public void dictatedNotesGetACategory() {
+        org.junit.Assert.assertEquals("gustos", Memory.guessCategory("no me gusta el mondongo"));
+        org.junit.Assert.assertEquals("salud", Memory.guessCategory("soy alergico al mani"));
+        org.junit.Assert.assertEquals("finanzas", Memory.guessCategory("cobro el 5 de cada mes"));
+        org.junit.Assert.assertEquals("rutina", Memory.guessCategory("voy al gimnasio los lunes"));
+        org.junit.Assert.assertEquals("otro", Memory.guessCategory("mi perro se llama toby"));
+    }
 }

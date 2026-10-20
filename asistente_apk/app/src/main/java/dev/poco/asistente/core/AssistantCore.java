@@ -92,7 +92,18 @@ public final class AssistantCore {
                         store.clearConversation(); return "Olvidé la conversación. La libreta y tus registros se conservan.";
                     }
                 }
-                if (normalized.equals("que sabes de mi") || normalized.equals("que sabes de mi?") || normalized.equals("¿que sabes de mi?")) return Memory.list(store.memories());
+                // «qué sabés de mí», «que sabes sobre mi?», «qué recordás de mí», «qué tenés anotado de mí»
+                if (normalized.replaceAll("[¿?¡!.,]", "").trim().matches("(che )?(que|q) (sabes|recordas|tenes anotado|sabes vos) (de|sobre) mi( vos)?")) return Memory.list(store.memories());
+                // «acordate que…», «anotá que…», «tené en cuenta que…»: straight to the notebook (Gemini sometimes only says it did)
+                java.util.regex.Matcher note = java.util.regex.Pattern.compile("^(?:che,? )?(?:acordate|recorda|anota|no te olvides|tene en cuenta|guarda) (?:de )?que (.{3,200})$").matcher(normalized);
+                if (note.matches()) {
+                    String original = text.trim();
+                    String fact = original.substring(Math.max(0, original.length() - note.group(1).length())).trim();
+                    synchronized (actionGate) {
+                        if (ticket != generation.get()) return "Pedido cancelado.";
+                        return executor.execute(actor, operation, "recordar", Json.object("texto", fact, "categoria", Memory.guessCategory(note.group(1))));
+                    }
+                }
                 if (normalized.startsWith("olvida ")) {
                     synchronized (actionGate) {
                         if (ticket != generation.get()) return "Pedido cancelado.";

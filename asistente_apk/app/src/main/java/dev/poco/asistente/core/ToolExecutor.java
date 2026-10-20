@@ -35,7 +35,8 @@ public final class ToolExecutor {
         if (receipt != null) return receipt;
         if (tool.equals("consultar_resumen")) {
             Validation.keys(args, "");
-            return Summary.render(store.rows(), LocalDate.now(clock), true);
+            // this goes to David as is: no record IDs or JSON (he gets those with «ver ID»)
+            return Summary.render(store.rows(), LocalDate.now(clock), false);
         }
         if (tool.equals("recordar") || tool.equals("programar_recordatorio")) {
             boolean memory = tool.equals("recordar");
@@ -44,7 +45,7 @@ public final class ToolExecutor {
                 throw new IllegalArgumentException(memory ? "La libreta llegó a 100 entradas. Borrá una primero." : "Ya hay 50 recordatorios activos.");
             if (memory) { data.put("fecha", LocalDate.now(clock).toString()); data.put("origen", actor.equals("whatsapp") ? "whatsapp" : "app"); }
             Store.Row row = new Store.Row(UUID.randomUUID().toString(), memory ? "memoria" : "recordatorio", 1, data);
-            return store.mutate(operationId, null, row, (memory ? "Guardé ese dato en la libreta. ID: " : "Programé el recordatorio. ID: ") + row.id, clock.millis());
+            return store.mutate(operationId, null, row, (memory ? "Listo, me lo anoto: «" + data.optString("texto") + "». (ref. " : "Listo, te lo recuerdo. (ref. ") + row.id + ")", clock.millis());
         }
         if (tool.equals("listar_recordatorios")) { Validation.keys(args, ""); return Reminders.list(store.reminders()); }
         if (tool.equals("borrar_registro") || tool.equals("olvidar") || tool.equals("cancelar_recordatorio")) {

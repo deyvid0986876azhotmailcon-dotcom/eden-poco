@@ -26,6 +26,15 @@ public final class Memory {
             throw new IllegalArgumentException("La libreta guarda datos, no instrucciones para la asistente.");
         return Json.object("texto", text, "categoria", category);
     }
+    /** Category for a note David dictates with «acordate que…»; text already normalized (no accents, lower case). */
+    public static String guessCategory(String n) {
+        if (n.matches(".*\\b(alergi\\w*|salud|medic\\w*|enferm\\w*|dolor\\w*|lesion\\w*)\\b.*")) return "salud";
+        if (n.matches(".*\\b(gusta\\w*|como|comer|comida|odio|prefiero|favorit\\w*)\\b.*")) return "gustos";
+        if (n.matches(".*\\b(cobro|cobra\\w*|sueldo|plata|ahorr\\w*|deuda\\w*|pago|pagar|presupuesto)\\b.*")) return "finanzas";
+        if (n.matches(".*\\b(gimnasio|gym|entren\\w*|horario|despierto|duermo|trabajo|lunes|martes|miercoles|jueves|viernes|sabado|domingo)\\b.*")) return "rutina";
+        if (n.matches(".*\\b(hablame|decime|tratame|respuestas|corto|largo)\\b.*")) return "estilo";
+        return "otro";
+    }
     public static String list(List<Store.Row> rows) {
         StringBuilder out = new StringBuilder("Memoria:\n");
         for (Store.Row row : rows) out.append(row.id).append(" · ").append(row.data.optString("categoria"))
