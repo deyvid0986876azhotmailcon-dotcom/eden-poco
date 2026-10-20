@@ -35,7 +35,9 @@ public final class CallActivity extends Activity implements LiveSession.Events {
 
     private AssistantApplication app;
     private Views ui;
-    private TextView status, muteButton;
+    private TextView status, muteButton, speakerButton;
+    private boolean speaker;
+    private android.os.PowerManager.WakeLock ear; // screen off with the phone at the ear, like a call
     private LinearLayout buttons;
     private Ringtone ringtone;
     private Vibrator vibrator;
@@ -85,7 +87,7 @@ public final class CallActivity extends Activity implements LiveSession.Events {
         GradientDrawable circle = new GradientDrawable(); circle.setShape(GradientDrawable.OVAL); circle.setColor(color);
         b.setBackground(circle); b.setContentDescription(label); b.setOnClickListener(v -> action.run());
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(ui.dp(72), ui.dp(72));
-        p.leftMargin = ui.dp(28); p.rightMargin = ui.dp(28);
+        p.leftMargin = ui.dp(16); p.rightMargin = ui.dp(16);
         buttons.addView(b, p);
         return b;
     }
@@ -125,9 +127,33 @@ public final class CallActivity extends Activity implements LiveSession.Events {
         if (key == null || key.isEmpty()) { status.setText("Falta la clave de Gemini en Ajustes."); return; }
         buttons.removeAllViews();
         muteButton = roundAction(Icons.MICROPHONE, ui.palette.surface, "Silenciar", this::toggleMute);
+        speakerButton = roundAction(Icons.VOLUME, ui.palette.surface, "Altavoz", this::toggleSpeaker);
         roundAction(Icons.PHONE_SLASH, ui.palette.negative, "Colgar", () -> { if (session != null) session.hangUp(); else finish(); });
         session = new LiveSession(app.core, getSystemService(AudioManager.class), this);
         session.start(key, reason);
+        earMode(true);
+    }
+
+    private void toggleSpeaker() {
+        speaker = !speaker;
+        if (session != null) session.setSpeaker(speaker);
+        GradientDrawable circle = new GradientDrawable(); circle.setShape(GradientDrawable.OVAL);
+        circle.setColor(speaker ? ui.palette.brand : ui.palette.surface);
+        speakerButton.setBackground(circle);
+        speakerButton.setContentDescription(speaker ? "Altavoz activado" : "Altavoz");
+        earMode(!speaker);
+    }
+
+    /** With the earpiece, the proximity sensor turns the screen off at the ear; with the loudspeaker, not. */
+    private void earMode(boolean on) {
+        android.os.PowerManager power = getSystemService(android.os.PowerManager.class);
+        if (on && ear == null && power.isWakeLockLevelSupported(android.os.PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) {
+            ear = power.newWakeLock(android.os.PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK, "asistente:llamada");
+            ear.acquire(60 * 60 * 1000L);
+        } else if (!on && ear != null) {
+            if (ear.isHeld()) ear.release();
+            ear = null;
+        }
     }
 
     private void toggleMute() {
@@ -155,6 +181,7 @@ public final class CallActivity extends Activity implements LiveSession.Events {
     @Override protected void onDestroy() {
         finished = true;
         stopRinging();
+        earMode(false);
         if (session != null) session.hangUp();
         super.onDestroy();
     }

@@ -52,6 +52,18 @@ public final class LiveSession {
 
     public void setMuted(boolean value) { muted = value; }
 
+    private volatile boolean speakerOn;
+    /** Earpiece (like a phone call) or loudspeaker; can change during the call. */
+    public void setSpeaker(boolean on) {
+        speakerOn = on;
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            int wanted = on ? android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER : android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE;
+            for (android.media.AudioDeviceInfo device : audio.getAvailableCommunicationDevices())
+                if (device.getType() == wanted) { audio.setCommunicationDevice(device); return; }
+        }
+        audio.setSpeakerphoneOn(on);
+    }
+
     private void run(String apiKey, String reason) {
         try {
             events.onState("Conectando…");
@@ -136,7 +148,7 @@ public final class LiveSession {
         if (!running || mic != null) return;
         previousMode = audio.getMode();
         audio.setMode(AudioManager.MODE_IN_COMMUNICATION);
-        audio.setSpeakerphoneOn(true);
+        setSpeaker(speakerOn); // starts on the earpiece, like a phone call
         int inMin = AudioRecord.getMinBufferSize(IN_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
         mic = new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, IN_RATE, AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT, Math.max(inMin, IN_RATE / 5));
@@ -177,7 +189,7 @@ public final class LiveSession {
         if (socket != null) socket.close();
         if (mic != null) { try { mic.stop(); } catch (RuntimeException ignored) { } mic.release(); mic = null; }
         if (speaker != null) { try { speaker.stop(); } catch (RuntimeException ignored) { } speaker.release(); speaker = null; }
-        audio.setSpeakerphoneOn(false);
+        if (android.os.Build.VERSION.SDK_INT >= 31) audio.clearCommunicationDevice(); else audio.setSpeakerphoneOn(false);
         audio.setMode(previousMode);
         events.onEnded(why);
     }
