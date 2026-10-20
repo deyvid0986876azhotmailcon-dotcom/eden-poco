@@ -25,7 +25,7 @@ public final class LiveSession {
 
     static final String HOST = "generativelanguage.googleapis.com";
     static final String MODEL = "models/gemini-3.1-flash-live-preview";
-    static final String[] CALL_TOOLS = {"recordar", "programar_recordatorio", "listar_recordatorios", "registrar_movimiento",
+    public static final String[] CALL_TOOLS = {"recordar", "programar_recordatorio", "listar_recordatorios", "registrar_movimiento",
             "registrar_peso", "registrar_comida", "registrar_entreno", "consultar_resumen"};
     private static final int IN_RATE = 16000, OUT_RATE = 24000;
 
