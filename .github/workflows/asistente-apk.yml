@@ -19,6 +19,37 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Prepare private signing
+        shell: bash
+        env:
+          ASISTENTE_KEYSTORE_B64: ${{ secrets.ASISTENTE_KEYSTORE_B64 }}
+          ASISTENTE_KEYSTORE_PASS: ${{ secrets.ASISTENTE_KEYSTORE_PASS }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import os
+          import tempfile
+          import uuid
+
+          encoded = os.environ.get('ASISTENTE_KEYSTORE_B64', '')
+          password = os.environ.get('ASISTENTE_KEYSTORE_PASS', '')
+          if not encoded or not password:
+              raise SystemExit('Faltan los secretos de firma privada de Asistente.')
+          try:
+              data = base64.b64decode(''.join(encoded.split()), validate=True)
+          except ValueError:
+              raise SystemExit('ASISTENTE_KEYSTORE_B64 no es Base64 valido.') from None
+          if not data:
+              raise SystemExit('El almacen de firma privada esta vacio.')
+          fd, path = tempfile.mkstemp(prefix='asistente-', suffix='.p12', dir=os.environ['RUNNER_TEMP'])
+          with os.fdopen(fd, 'wb') as store:
+              os.fchmod(store.fileno(), 0o600)
+              store.write(data)
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as env:
+              for name, value in [('ASISTENTE_KEYSTORE', path)]:
+                  delimiter = uuid.uuid4().hex
+                  env.write(f'{name}<<{delimiter}\n{value}\n{delimiter}\n')
+          PY
       - name: JVM tests and APK
         working-directory: asistente_apk
         # the log goes into the reports artifact: the Actions log is not readable without a login
@@ -26,6 +57,111 @@ jobs:
           set -o pipefail
           mkdir -p app/build/reports/tests
           gradle --no-daemon test assembleDebug 2>&1 | tee app/build/reports/tests/gradle.log
+      - name: Rotate, sign and verify APK
+        shell: bash
+        env:
+          ASISTENTE_KEYSTORE_PASS: ${{ secrets.ASISTENTE_KEYSTORE_PASS }}
+          DEBUG_KEYSTORE_PASS: android
+        run: |
+          set -euo pipefail
+          apksigner="${ANDROID_SDK_ROOT:-$ANDROID_HOME}/build-tools/35.0.0/apksigner"
+          if [[ ! -x "$apksigner" ]]; then
+            sdkmanager "build-tools;35.0.0"
+          fi
+          test -x "$apksigner"
+          apk=asistente_apk/app/build/outputs/apk/debug/app-debug.apk
+          lineage="$RUNNER_TEMP/asistente.lineage"
+          old=(--ks asistente_apk/app/debug.keystore --ks-key-alias androiddebugkey
+               --ks-pass env:DEBUG_KEYSTORE_PASS --key-pass env:DEBUG_KEYSTORE_PASS)
+          new=(--ks "$ASISTENTE_KEYSTORE" --ks-type PKCS12 --ks-key-alias asistente
+               --ks-pass env:ASISTENTE_KEYSTORE_PASS --key-pass env:ASISTENTE_KEYSTORE_PASS)
+          "$apksigner" rotate --out "$lineage" \
+            --old-signer "${old[@]}" --set-installed-data true \
+            --new-signer "${new[@]}"
+          "$apksigner" sign --out "$RUNNER_TEMP/asistente-rotated.apk" \
+            --lineage "$lineage" --rotation-min-sdk-version 28 \
+            --v1-signing-enabled true --v2-signing-enabled true \
+            --v3-signing-enabled true --v4-signing-enabled false \
+            "${old[@]}" --next-signer "${new[@]}" "$apk"
+          "$apksigner" verify -v --print-certs "$RUNNER_TEMP/asistente-rotated.apk" \
+            | tee "$RUNNER_TEMP/asistente-verify.txt"
+          # verify validates the proof cryptographically, but does not list its ancestors.
+          # Export public certificates only; passwords never become command arguments.
+          keytool -exportcert -keystore asistente_apk/app/debug.keystore \
+            -alias androiddebugkey -storepass:env DEBUG_KEYSTORE_PASS \
+            -file "$RUNNER_TEMP/asistente-old.der"
+          keytool -exportcert -keystore "$ASISTENTE_KEYSTORE" -storetype PKCS12 \
+            -alias asistente -storepass:env ASISTENTE_KEYSTORE_PASS \
+            -file "$RUNNER_TEMP/asistente-new.der"
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import struct
+          from pathlib import Path
+
+          root = Path(os.environ['RUNNER_TEMP'])
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+          def u32(data, offset=0):
+              return struct.unpack_from('<I', data, offset)[0]
+          def lp(data):
+              size = u32(data)
+              require(size <= len(data) - 4, 'Campo truncado en la firma')
+              return data[4:4+size], data[4+size:]
+          def fields(data):
+              while data:
+                  item, data = lp(data)
+                  yield item
+          report = (root / 'asistente-verify.txt').read_text()
+          require('Verified using v3 scheme (APK Signature Scheme v3): true' in report,
+                  'La verificacion no confirma v3')
+          apk = (root / 'asistente-rotated.apk').read_bytes()
+          # Locate the ZIP EOCD, accounting for an optional ZIP comment.
+          eocd = next((i for i in range(len(apk)-22, max(-1, len(apk)-65558), -1)
+                       if apk[i:i+4] == b'PK\x05\x06'
+                       and i+22+struct.unpack_from('<H', apk, i+20)[0] == len(apk)), None)
+          require(eocd is not None, 'Falta EOCD')
+          end = u32(apk, eocd+16)
+          require(apk[end-16:end] == b'APK Sig Block 42', 'Falta APK Signing Block')
+          size = struct.unpack_from('<Q', apk, end-24)[0]
+          start = end-size-8
+          require(start >= 0 and struct.unpack_from('<Q', apk, start)[0] == size,
+                  'Tamano incorrecto del bloque de firma')
+          pairs = apk[start+8:end-24]
+          proofs = []
+          while pairs:
+              size = struct.unpack_from('<Q', pairs)[0]
+              require(4 <= size <= len(pairs)-8, 'Par de firma truncado')
+              block, pairs = pairs[8:8+size], pairs[8+size:]
+              if u32(block) != 0xf05368c0:  # APK Signature Scheme v3
+                  continue
+              signers, rest = lp(block[4:])
+              require(not rest, 'Datos sobrantes en v3')
+              for signer in fields(signers):
+                  signed, _ = lp(signer)
+                  _, signed = lp(signed)  # digests
+                  _, signed = lp(signed)  # certificates
+                  attrs, rest = lp(signed[8:])  # skip min/max SDK
+                  require(not rest, 'Datos sobrantes en signedData')
+                  for attr in fields(attrs):
+                      if u32(attr) != 0x3ba06f8c:  # proof-of-rotation
+                          continue
+                      require(u32(attr, 4) == 1, 'Version de lineage inesperada')
+                      certs = []
+                      for level in fields(attr[8:]):
+                          signed_level, _ = lp(level)
+                          cert, _ = lp(signed_level)
+                          certs.append(cert)
+                      proofs.append(certs)
+          expected = [(root / f'asistente-{name}.der').read_bytes() for name in ('old', 'new')]
+          require(expected[0] != expected[1], 'La clave nueva coincide con la debug')
+          require(proofs == [expected], 'La lineage del APK no contiene exactamente debug -> privada')
+          for name, cert in zip(('debug', 'privada'), expected):
+              print(f'Lineage verificada {name} SHA-256: {hashlib.sha256(cert).hexdigest()}')
+          PY
+          # Only the verified, rotated APK can reach the artifact upload step.
+          mv "$RUNNER_TEMP/asistente-rotated.apk" "$apk"
       - name: Test reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -39,3 +175,17 @@ jobs:
           path: asistente_apk/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
+      - name: Remove temporary signing store
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          path = os.environ.get('ASISTENTE_KEYSTORE')
+          if path:
+              store = Path(path).resolve()
+              if store.parent != Path(os.environ['RUNNER_TEMP']).resolve():
+                  raise SystemExit('El almacen temporal no esta en RUNNER_TEMP.')
+              store.unlink(missing_ok=True)
+          PY
