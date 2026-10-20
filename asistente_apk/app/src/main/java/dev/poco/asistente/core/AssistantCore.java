@@ -94,8 +94,8 @@ public final class AssistantCore {
                 }
                 // «qué sabés de mí», «que sabes sobre mi?», «qué recordás de mí», «qué tenés anotado de mí»
                 if (normalized.replaceAll("[¿?¡!.,]", "").trim().matches("(che )?(que|q) (sabes|recordas|tenes anotado|sabes vos) (de|sobre) mi( vos)?")) return Memory.list(store.memories());
-                // «acordate que…», «anotá que…», «tené en cuenta que…»: straight to the notebook (Gemini sometimes only says it did)
-                java.util.regex.Matcher note = java.util.regex.Pattern.compile("^(?:che,? )?(?:acordate|recorda|anota|no te olvides|tene en cuenta|guarda) (?:de )?que (.{3,200})$").matcher(normalized);
+                // «acordate que…», «no te olvides que…», «tené en cuenta que…» («anotá» is for records: gastos, peso): straight to the notebook (Gemini sometimes only says it did)
+                java.util.regex.Matcher note = java.util.regex.Pattern.compile("^(?:che,? )?(?:acordate|recorda|no te olvides|tene en cuenta) (?:de )?que (.{3,200})$").matcher(normalized);
                 if (note.matches()) {
                     String original = text.trim();
                     String fact = original.substring(Math.max(0, original.length() - note.group(1).length())).trim();
