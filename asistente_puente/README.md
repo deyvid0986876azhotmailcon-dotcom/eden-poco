@@ -245,3 +245,26 @@ chmod 700 ~/.termux/boot/asistente.sh
 La app Asistente vuelve a levantar su servicio del puente al prender el teléfono si estaba encendido.
 En Xiaomi/HyperOS hay que permitir "Inicio automático" a Termux y a Asistente, y dejar su batería
 "Sin restricciones". El registro queda en `~/.asistente_puente/puente.log`.
+
+## Recordatorios y resúmenes salientes
+
+Actualizar también `pendientes.cjs` junto a `index.cjs`, `lib.cjs` y `respaldo.cjs`.
+No cambia `config.json` ni se agregan dependencias. Cada 60 s se consulta
+`GET /pendientes` con el Bearer actual; después de enviar se confirma con
+`POST /pendientes/confirmar` y `{"ids":["ID"]}`. Sin confirmación, la app ofrece
+el mismo ID diez minutos después. `outgoing.ids` impide reenviarlo; un ACK perdido
+se reintenta. `owner-chat.json` conserva el último teléfono/LID autorizado y se
+usa también tras reiniciar. Ambos archivos son privados (600), sin texto de mensajes.
+
+Si el envío a WhatsApp queda incierto por un corte, el puente lo registra por ID
+y no lo reenvía ni lo confirma: Claude debe revisar ese caso. No borrar los ledgers
+para reintentar. PARAR pausa el sondeo hasta otro mensaje autorizado por WhatsApp.
+
+Pruebas sin teléfono ni red: `npm test` desde esta carpeta. Para probar el conjunto,
+Claude debe ejecutar primero `gradle --no-daemon test assembleDebug` en el runner
+de `asistente_apk`, instalar el APK firmado como actualización y actualizar el puente.
+Con el teléfono autorizado: contar un gusto estable, consultar «qué sabés de mí»,
+borrar por ID y código, comprobar el historial tras reiniciar y vaciarlo desde Resumen.
+Pedir un recordatorio para dentro de dos minutos y otro diario; comprobar ID/estado
+en Registro, cancelación con código y PARAR. Activar el resumen con hora próxima,
+probarlo sin clave y con clave; verificar silencio nocturno y su excepción explícita.

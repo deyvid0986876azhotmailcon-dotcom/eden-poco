@@ -8,7 +8,7 @@ import dev.poco.asistente.core.Validation;
 import dev.poco.asistente.messaging.NotificationPolicy;
 import java.util.Arrays;
 
-public final class AppSettings implements AssistantCore.Settings {
+public final class AppSettings implements dev.poco.asistente.core.Proactive.Settings {
     private final SharedPreferences prefs;
     public final KeyVault vault;
     private final KeyVault bridgeVault;
@@ -32,6 +32,14 @@ public final class AppSettings implements AssistantCore.Settings {
     @Override public String apiKey() throws Exception { return vault.load(); }
     @Override public String model() { return prefs.getString("model", GeminiProtocol.MODELS[0]); }
     @Override public String currency() { return prefs.getString("currency", "PYG"); }
+    @Override public boolean dailySummary() { return prefs.getBoolean("summary_daily", false); }
+    @Override public boolean weeklySummary() { return prefs.getBoolean("summary_weekly", false); }
+    @Override public String summaryTime() { return prefs.getString("summary_time", "21:30"); }
+    public void saveSummaries(boolean daily, boolean weekly, String hour) {
+        dev.poco.asistente.core.Reminders.time(hour);
+        if (!prefs.edit().putBoolean("summary_daily", daily).putBoolean("summary_weekly", weekly).putString("summary_time", hour).commit())
+            throw new IllegalStateException("No se guardaron los ajustes del resumen.");
+    }
     public boolean whatsappEnabled() { return prefs.getBoolean("whatsapp_enabled", false); }
     public String whatsappName() { return prefs.getString("whatsapp_name", ""); }
     public String whatsappPhone() { return prefs.getString("whatsapp_phone", ""); }

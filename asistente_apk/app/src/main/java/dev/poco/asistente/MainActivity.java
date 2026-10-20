@@ -296,7 +296,55 @@ public final class MainActivity extends Activity {
         card(content, Icons.DUMBBELL, "Entrenos de la semana", training, color.text);
         if (!goals.isEmpty()) card(content, Icons.BULLSEYE, "Metas", goals, color.text);
         if (!other.isEmpty()) card(content, Icons.INFO, "Más", other, color.muted);
+        memoryCard(content);
         content.addView(button("Actualizar", false, () -> show("Resumen")));
+    }
+    private void memoryCard(LinearLayout content) {
+        LinearLayout card = ui.card(); content.addView(card);
+        card.addView(ui.cardTitle(Icons.INFO, "Memoria", false));
+        TextView loading = label("Leyendo libreta…"); card.addView(loading);
+        app.worker.execute(() -> {
+            try {
+                List<dev.poco.asistente.core.Store.Row> memories = app.db.memories();
+                String reminders = dev.poco.asistente.core.Reminders.list(app.db.reminders());
+                app.main.post(() -> {
+                    if (isDestroyed() || !card.isAttachedToWindow()) return;
+                    card.removeView(loading);
+                    if (memories.isEmpty()) card.addView(label("La libreta está vacía."));
+                    for (dev.poco.asistente.core.Store.Row row : memories) {
+                        TextView text = label(row.data.optString("texto") + "\n" + row.data.optString("categoria") + " · " + row.id);
+                        text.setTextIsSelectable(true); card.addView(text);
+                        card.addView(button("Borrar entrada", false, () -> proposeForget(row.id, row.data.optString("texto"))));
+                    }
+                    card.addView(button("Olvidar conversación", false, () -> new android.app.AlertDialog.Builder(this)
+                            .setTitle("Olvidar conversación").setMessage("Borrar el historial usado por Gemini y el chat visible. La libreta y tus registros se conservan.")
+                            .setNegativeButton("Cancelar", null).setPositiveButton("Borrar", (dialog, which) -> { app.forgetConversation(); show("Resumen"); }).show()));
+                    LinearLayout rc = ui.card(); content.addView(rc); rc.addView(ui.cardTitle(Icons.CLOCK, "Recordatorios", false));
+                    TextView rt = label(reminders); rt.setTextIsSelectable(true); rc.addView(rt);
+                });
+            } catch (Exception e) { app.main.post(() -> loading.setText("No pude leer la memoria.")); }
+        });
+    }
+    private void proposeForget(String id, String text) {
+        long ticket = app.core.cancellationToken();
+        app.worker.execute(() -> {
+            String proposal = app.core.receive("olvidá " + id, ticket);
+            java.util.regex.Matcher code = java.util.regex.Pattern.compile("SÍ ([A-F0-9]{16})").matcher(proposal);
+            String confirm = code.find() ? "SÍ " + code.group(1) : null;
+            app.main.post(() -> {
+                if (isDestroyed()) return;
+                android.app.AlertDialog.Builder dialog = new android.app.AlertDialog.Builder(this).setTitle("Borrar memoria")
+                        .setMessage(text + "\n\n" + proposal).setNegativeButton("Cancelar", (d, w) -> app.stop());
+                if (confirm != null) dialog.setPositiveButton("Confirmar borrado", (d, w) -> {
+                    long confirmationTicket = app.core.cancellationToken();
+                    app.worker.execute(() -> {
+                        String result = app.core.receive(confirm, confirmationTicket);
+                        app.main.post(() -> { if (!isDestroyed()) { new android.app.AlertDialog.Builder(this).setMessage(result).setPositiveButton("Aceptar", null).show(); show("Resumen"); } });
+                    });
+                });
+                dialog.show();
+            });
+        });
     }
     private void card(LinearLayout content, String icon, String title, List<String> lines, int textColor) {
         LinearLayout c = ui.card(); content.addView(c);
@@ -349,6 +397,17 @@ public final class MainActivity extends Activity {
         prefs.addView(button("Guardar ajustes", true, () -> {
             try { app.settings.save((String) model.getSelectedItem(), (String) currency.getSelectedItem()); status.setText("Modelo y moneda guardados."); }
             catch (Exception e) { status.setText("No pude guardar los ajustes."); }
+        }));
+
+        LinearLayout summaries = ui.card(); form.addView(summaries);
+        summaries.addView(ui.cardTitle(Icons.CLOCK, "Resúmenes por WhatsApp", false));
+        Switch daily = toggle("Resumen diario"); daily.setChecked(app.settings.dailySummary()); summaries.addView(daily);
+        Switch weekly = toggle("Resumen semanal los domingos"); weekly.setChecked(app.settings.weeklySummary()); summaries.addView(weekly);
+        EditText hour = field("Hora local HH:mm"); hour.setSingleLine(true); hour.setText(app.settings.summaryTime()); summaries.addView(hour);
+        TextView summaryStatus = label("Hora de Paraguay. Silencio de 23:00 a 07:00, salvo recordatorios que pediste a esa hora."); summaries.addView(summaryStatus);
+        summaries.addView(button("Guardar resúmenes", true, () -> {
+            try { app.settings.saveSummaries(daily.isChecked(), weekly.isChecked(), hour.getText().toString().trim()); summaryStatus.setText("Resúmenes guardados."); }
+            catch (Exception e) { summaryStatus.setText(e.getMessage()); }
         }));
 
         LinearLayout whatsapp = ui.card(); form.addView(whatsapp);
@@ -422,7 +481,7 @@ public final class MainActivity extends Activity {
 
         LinearLayout privacy = ui.card(); form.addView(privacy);
         privacy.addView(ui.cardTitle(Icons.SHIELD, "Privacidad", false));
-        privacy.addView(label("Gemini recibe tu mensaje y un resumen local. En la cuota gratis Google puede usar esos datos para mejorar sus productos. Las reglas funcionan sin clave."));
+        privacy.addView(label("Gemini recibe tu mensaje, los últimos diez intercambios recortados, la libreta y un resumen local. En la cuota gratis Google puede usar esos datos para mejorar sus productos. Las reglas funcionan sin clave."));
         privacy.addView(label("WhatsApp por QR es una integración no oficial: puede romperse si WhatsApp cambia, y existe riesgo de bloqueo del número del bot."));
 
         LinearLayout about = ui.card(); form.addView(about);

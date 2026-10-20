@@ -75,6 +75,25 @@ public class BridgeHttpTest {
     private String backupRequest(String headers) {
         return "GET /respaldo HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nAuthorization: Bearer " + TOKEN + "\r\n" + headers + "\r\n";
     }
+    @Test public void outgoingEndpointsRequireTokenCorrectMethodAndExactSchema() throws Exception {
+        String pending = backupRequest("").replace("/respaldo", "/pendientes");
+        assertTrue(read(pending).pending); assertFalse(read(pending).backup);
+        rejected(401, pending.replace(TOKEN, "wrong"));
+        rejected(405, pending.replace("GET ", "POST "));
+        rejected(404, pending.replace("/pendientes ", "/pendientes?all=true "));
+        rejected(400, pending.replace("\r\n\r\n", "\r\nContent-Length: 2\r\n\r\n{}"));
+        String confirm = request("{\"ids\":[\"r_one_123\",\"d_2026-10-20\"]}").replace("/mensaje", "/pendientes/confirmar");
+        assertTrue(read(confirm).confirm); assertEquals(2, read(confirm).ids.size());
+        rejected(401, confirm.replace(TOKEN, "wrong")); rejected(405, confirm.replace("POST ", "GET "));
+        for (String body : new String[]{"{}", "{\"ids\":[]}", "{\"ids\":\"id\"}", "{\"ids\":[1]}",
+                "{\"ids\":[\"../id\"]}", "{\"ids\":[\"same\",\"same\"]}", "{\"ids\":[\"id\"],\"extra\":true}"})
+            rejected(400, request(body).replace("/mensaje", "/pendientes/confirmar"));
+        StringBuilder tooMany = new StringBuilder("{\"ids\":[");
+        for (int i = 0; i < 21; i++) { if (i > 0) tooMany.append(','); tooMany.append('"').append("id").append(i).append('"'); }
+        rejected(400, request(tooMany + "]}").replace("/mensaje", "/pendientes/confirmar"));
+        String response = new String(BridgeHttp.jsonResponse(200, "[]"), StandardCharsets.UTF_8);
+        assertTrue(response.endsWith("\r\n\r\n[]"));
+    }
     @Test public void backupIsAuthenticatedAndHasNoBody() throws Exception {
         assertTrue(read(backupRequest("")).backup);
         assertTrue(read(backupRequest("Content-Length: 0\r\n")).backup);

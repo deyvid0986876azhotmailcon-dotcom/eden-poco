@@ -3,6 +3,8 @@ process.umask(0o077);
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { OwnerChat, PendingPoller } = require('./pendientes.cjs');
+const { isStop } = require('./lib.cjs');
 const { Backups, signalBackup } = require('./respaldo.cjs');
 const { configuration, split, candidate, Ledger, post, DeliveryQueue, privateDirectory, FALLBACK } = require('./lib.cjs');
 // Do not print library errors, message objects or auth material to logs.
@@ -12,7 +14,7 @@ const auth = path.join(root, 'auth');
 const qrFile = path.join(os.homedir(), 'storage', 'downloads', 'asistente_qr.png');
 let lockOwned = false, exiting = false, connection = null, reconnect = null, attempts = 0;
 let config, ledger, makeWASocket, useMultiFileAuthState, DisconnectReason, logger, QRCode;
-let backups;
+let backups, ownerChat, pending;
 const queue = new DeliveryQueue(async (message, current) => {
   const response = await post(config, message);
   if (!current()) return;
@@ -102,6 +104,8 @@ async function connect() {
         const decision = candidate(message, event.type, config.remitente, session.connectedAt);
         if (decision.id && !ledger.claim(config.remitente, decision.id)) { log('Ignorado: id repetido'); continue; }
         if (decision.reason) { log(`Ignorado: ${decision.reason}`); continue; }
+        ownerChat.accept(message, event.type, session.connectedAt);
+        if (isStop(decision.text)) pending.pause(); else pending.resume();
         log('Aceptado: texto privado del remitente autorizado');
         if (!queue.add(decision)) log('Fallido: cola llena; no se ejecuta ni se reintenta');
       } catch { fatal(); return; }
@@ -110,14 +114,14 @@ async function connect() {
 }
 function shutdown(code = 0) {
   if (exiting) return;
-  exiting = true; queue.cancel(); clearTimeout(reconnect);
+  exiting = true; queue.cancel(); pending?.stop(); clearTimeout(reconnect);
   if (connection) {
     connection.active = false; clearTimeout(connection.stable);
     try { connection.socket?.end(new Error('Cierre local')); } catch { }
   }
   if (lockOwned) clearQr();
   // Wait for auth writes before releasing ownership; SIGKILL leaves a lock for manual inspection.
-  Promise.allSettled([connection?.writes, backups?.stop()]).finally(() => {
+  Promise.allSettled([connection?.writes, backups?.stop(), pending?.running]).finally(() => {
     if (lockOwned) {
       try { fs.unlinkSync(path.join(root, 'running.lock')); } catch { }
     }
@@ -143,6 +147,9 @@ async function main() {
   config = configuration(JSON.parse(fs.readFileSync(filename, 'utf8')));
   ledger = new Ledger(path.join(root, 'seen.ids'));
   backups = new Backups(root, config, log);
+  ownerChat = new OwnerChat(root, config.remitente);
+  pending = new PendingPoller(root, config, ownerChat, () => connection, log);
+  pending.start();
   process.on('SIGUSR1', () => { void backups.request(); });
   process.on('SIGINT', () => shutdown()); process.on('SIGTERM', () => shutdown());
   backups.start();

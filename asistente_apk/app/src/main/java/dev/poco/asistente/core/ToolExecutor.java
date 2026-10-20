@@ -37,9 +37,22 @@ public final class ToolExecutor {
             Validation.keys(args, "");
             return Summary.render(store.rows(), LocalDate.now(clock), true);
         }
-        if (tool.equals("borrar_registro")) {
+        if (tool.equals("recordar") || tool.equals("programar_recordatorio")) {
+            boolean memory = tool.equals("recordar");
+            JSONObject data = memory ? Memory.validate(args) : Reminders.validate(args, clock);
+            if ((memory ? store.memories() : store.reminders()).size() >= (memory ? 100 : 50))
+                throw new IllegalArgumentException(memory ? "La libreta llegó a 100 entradas. Borrá una primero." : "Ya hay 50 recordatorios activos.");
+            if (memory) { data.put("fecha", LocalDate.now(clock).toString()); data.put("origen", actor.equals("whatsapp") ? "whatsapp" : "app"); }
+            Store.Row row = new Store.Row(UUID.randomUUID().toString(), memory ? "memoria" : "recordatorio", 1, data);
+            return store.mutate(operationId, null, row, (memory ? "Guardé ese dato en la libreta. ID: " : "Programé el recordatorio. ID: ") + row.id, clock.millis());
+        }
+        if (tool.equals("listar_recordatorios")) { Validation.keys(args, ""); return Reminders.list(store.reminders()); }
+        if (tool.equals("borrar_registro") || tool.equals("olvidar") || tool.equals("cancelar_recordatorio")) {
             Validation.keys(args, "id");
             Store.Row row = requireRow(Validation.id(args));
+            if ((tool.equals("olvidar") && !row.kind.equals("memoria"))
+                    || (tool.equals("cancelar_recordatorio") && !row.kind.equals("recordatorio")))
+                throw new IllegalArgumentException("El ID no corresponde a esa herramienta.");
             // New proposal replaces the previous one for this actor. Snapshot/version binds its contents.
             byte[] bytes = new byte[8]; random.nextBytes(bytes);
             StringBuilder code = new StringBuilder();
@@ -51,6 +64,7 @@ public final class ToolExecutor {
         if (tool.equals("corregir_registro")) {
             Validation.keys(args, "id,cambios");
             Store.Row before = requireRow(Validation.id(args));
+            if (before.kind.equals("memoria") || before.kind.equals("recordatorio")) throw new IllegalArgumentException("Pedí borrarlo con confirmación y creá uno nuevo.");
             Object raw = args.opt("cambios");
             if (!(raw instanceof JSONObject) || ((JSONObject) raw).length() == 0)
                 throw new IllegalArgumentException("¿Qué campos querés corregir?");

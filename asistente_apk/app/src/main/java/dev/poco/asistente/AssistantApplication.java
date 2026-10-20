@@ -19,6 +19,7 @@ import java.util.concurrent.Executors;
 /** Process-scoped core and ordered queue shared by the chat and both WhatsApp adapters. */
 public final class AssistantApplication extends Application {
     public AssistantCore core;
+    public dev.poco.asistente.core.Proactive proactive;
     public AppSettings settings;
     public AssistantDb db;
     public WhatsAppBridge whatsapp;
@@ -35,7 +36,8 @@ public final class AssistantApplication extends Application {
         super.onCreate();
         settings = new AppSettings(this);
         db = new AssistantDb(this);
-        core = new AssistantCore(db, settings, new GeminiClient(), Clock.systemDefaultZone(), SystemClock::elapsedRealtime);
+        core = new AssistantCore(db, settings, new GeminiClient(), Clock.system(dev.poco.asistente.core.Reminders.ZONE), SystemClock::elapsedRealtime);
+        proactive = new dev.poco.asistente.core.Proactive(db, settings, new GeminiClient(), Clock.system(dev.poco.asistente.core.Reminders.ZONE), core);
         whatsapp = new WhatsAppBridge(this);
         bridge = new BridgeInbox(core, messages, controlGate, settings::bridgeEnabled, id -> {
             if (!db.claimNotice(id, "Puente")) return false;
@@ -79,10 +81,19 @@ public final class AssistantApplication extends Application {
             append("Asistente: " + core.stop()); messages.clear();
             if (bridge != null) bridge.cancelPending();
             synchronized (this) { busy = false; }
-            try { db.cancelNotices(); db.messagingLog("Sistema", "PARAR: cola vaciada; no se deshacen acciones ya terminadas."); }
+            try { db.cancelOutgoing(); db.cancelNotices(); db.messagingLog("Sistema", "PARAR: cola vaciada; no se deshacen acciones ya terminadas."); }
             catch (RuntimeException e) { messagingError(); }
         }
         changed();
+    }
+    public void forgetConversation() {
+        stop();
+        long ticket = core.cancellationToken();
+        worker.execute(() -> {
+            try { if (core.clearConversation(ticket)) synchronized (this) { chat = "Asistente: Olvidé la conversación.\n"; } }
+            catch (Exception e) { append("Sistema: No pude borrar el historial."); }
+            changed();
+        });
     }
     public void configureWhatsapp(boolean enabled, String name, String phone) {
         synchronized (controlGate) {

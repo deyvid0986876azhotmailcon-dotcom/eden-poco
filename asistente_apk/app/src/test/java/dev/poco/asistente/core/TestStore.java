@@ -10,10 +10,16 @@ import java.util.List;
 import java.util.Map;
 
 /** In-memory port for JVM behavior tests; real SQLite/Keystore are checked on Android. */
-final class TestStore implements Store {
+class TestStore implements Store {
     final Map<String, Row> data = new LinkedHashMap<>();
     final Map<String, String> receipts = new LinkedHashMap<>();
-    @Override public List<Row> rows() { return new ArrayList<>(data.values()); }
+    private final Map<String, Memory.Exchange> exchanges = new LinkedHashMap<>();
+    @Override public List<Memory.Exchange> conversation() { return new ArrayList<>(exchanges.values()); }
+    @Override public void exchange(String id, String user, String model) { exchanges.putIfAbsent(id, new Memory.Exchange(user, model)); while (exchanges.size() > 10) exchanges.remove(exchanges.keySet().iterator().next()); }
+    @Override public void clearConversation() { exchanges.clear(); }
+    @Override public List<Row> memories() { List<Row> rows = new ArrayList<>(); for (Row r : data.values()) if (r.kind.equals("memoria")) rows.add(r); return rows; }
+    @Override public List<Row> reminders() { List<Row> rows = new ArrayList<>(); for (Row r : data.values()) if (r.kind.equals("recordatorio") && r.data.optBoolean("activo")) rows.add(r); return rows; }
+    @Override public List<Row> rows() { List<Row> rows = new ArrayList<>(); for (Row r : data.values()) if (!r.kind.equals("memoria") && !r.kind.equals("recordatorio")) rows.add(r); return rows; }
     @Override public Row find(String id) { return data.get(id); }
     @Override public String receipt(String op) { return receipts.get(op); }
     @Override public String mutate(String op, Row before, Row after, String result, long time) throws Exception {

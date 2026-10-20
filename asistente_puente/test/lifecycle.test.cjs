@@ -35,6 +35,13 @@ async function harness(prelocked = false, manual = false) {
         Backups: class { start() { backupCalls.push('start'); } stop() {} request() { backupCalls.push('request'); } },
         signalBackup: directory => backupCalls.push(directory)
       };
+      if (name === './pendientes.cjs') {
+        const pendingModule = require('../pendientes.cjs');
+        return { ...pendingModule, PendingPoller: class extends pendingModule.PendingPoller {
+          start() { this.timer = null; }
+          stop() { return super.stop(); }
+        } };
+      }
       if (name === './lib.cjs') return { ...lib, post: async (_, message) => { posts.push(message); return 'Hecho'; } };
       if (name === 'node:os') return { homedir: () => home };
       if (name === '@whiskeysockets/baileys') return {

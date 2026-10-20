@@ -23,18 +23,22 @@ public final class BridgeHttp {
         public Failure(int status) { super("HTTP " + status); this.status = status; }
     }
     public static final class Request {
-        public final boolean backup;
+        public final boolean backup, pending, confirm;
+        public final java.util.List<String> ids;
         public final String id, text;
-        Request(String id, String text) { this.id = id; this.text = text; this.backup = id == null; }
+        Request(String path, String id, String text, java.util.List<String> ids) {
+            this.id = id; this.text = text; this.ids = ids;
+            backup = path.equals("/respaldo"); pending = path.equals("/pendientes"); confirm = path.equals("/pendientes/confirmar");
+        }
     }
     public static Request read(InputStream input, String token) throws IOException {
         int[] budget = {MAX_HEADERS};
         String[] first = line(input, budget).split(" ", -1);
         if (first.length != 3 || !first[2].equals("HTTP/1.1")) throw new Failure(400);
         if (!first[0].equals("POST") && !first[0].equals("GET")) throw new Failure(405);
-        if (!first[1].equals("/mensaje") && !first[1].equals("/respaldo")) throw new Failure(404);
-        boolean backup = first[1].equals("/respaldo");
-        if (!first[0].equals(backup ? "GET" : "POST")) throw new Failure(405);
+        if (!java.util.Arrays.asList("/mensaje", "/respaldo", "/pendientes", "/pendientes/confirmar").contains(first[1])) throw new Failure(404);
+        boolean readOnly = first[1].equals("/respaldo") || first[1].equals("/pendientes");
+        if (!first[0].equals(readOnly ? "GET" : "POST")) throw new Failure(405);
         Map<String, String> headers = new HashMap<>();
         while (true) {
             String row = line(input, budget);
@@ -48,9 +52,9 @@ public final class BridgeHttp {
                 || headers.containsKey("transfer-encoding") || headers.containsKey("expect")) throw new Failure(400);
         String authorization = headers.getOrDefault("authorization", "");
         if (token == null || token.isEmpty() || !constantEquals("Bearer " + token, authorization)) throw new Failure(401);
-        if (backup) {
+        if (readOnly) {
             if (headers.containsKey("content-length") && !headers.get("content-length").equals("0")) throw new Failure(400);
-            return new Request(null, null);
+            return new Request(first[1], null, null, java.util.Collections.emptyList());
         }
         String type = headers.getOrDefault("content-type", "");
         if (!type.matches("(?i)application/json(?:\\s*;\\s*charset=utf-8)?")) throw new Failure(415);
@@ -78,10 +82,22 @@ public final class BridgeHttp {
             Object parsed = reader.nextValue();
             if (!(parsed instanceof JSONObject) || reader.nextClean() != 0) throw new Failure(400);
             JSONObject object = (JSONObject) parsed;
+            if (first[1].equals("/pendientes/confirmar")) {
+                if (object.length() != 1 || !(object.opt("ids") instanceof org.json.JSONArray)) throw new Failure(400);
+                org.json.JSONArray rawIds = object.getJSONArray("ids");
+                if (rawIds.length() < 1 || rawIds.length() > 20) throw new Failure(400);
+                java.util.List<String> ids = new java.util.ArrayList<>();
+                for (int i = 0; i < rawIds.length(); i++) {
+                    Object value = rawIds.get(i);
+                    if (!(value instanceof String) || !((String)value).matches("[A-Za-z0-9_-]{1,120}") || ids.contains(value)) throw new Failure(400);
+                    ids.add((String)value);
+                }
+                return new Request(first[1], null, null, ids);
+            }
             if (object.length() != 2 || !(object.get("id") instanceof String) || !(object.get("texto") instanceof String)) throw new Failure(400);
             String id = object.getString("id"), text = object.getString("texto");
             if (!id.matches("[A-Za-z0-9_-]{1,120}") || text.trim().isEmpty() || text.length() > 4000) throw new Failure(400);
-            return new Request(id, text);
+            return new Request(first[1], id, text, java.util.Collections.emptyList());
         } catch (org.json.JSONException e) { throw new Failure(400); }
     }
     private static String line(InputStream input, int[] budget) throws IOException {
@@ -109,6 +125,9 @@ public final class BridgeHttp {
         String payload;
         try { payload = new JSONObject().put(status == 200 ? "respuesta" : "error", text).toString(); }
         catch (org.json.JSONException impossible) { throw new AssertionError(impossible); }
+        return jsonResponse(status, payload);
+    }
+    public static byte[] jsonResponse(int status, String payload) {
         byte[] body = payload.getBytes(StandardCharsets.UTF_8);
         byte[] head = ("HTTP/1.1 " + status + " " + (status == 200 ? "OK" : "Error") + "\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: "
                 + body.length + "\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n").getBytes(StandardCharsets.US_ASCII);

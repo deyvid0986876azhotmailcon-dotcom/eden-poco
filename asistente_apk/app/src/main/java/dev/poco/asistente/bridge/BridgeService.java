@@ -98,6 +98,23 @@ public final class BridgeService extends Service {
             try {
                 BridgeHttp.Request request = BridgeHttp.read(client.getInputStream(), token);
                 if (request.backup) { deliverBackup(client); return; }
+                if (request.pending || request.confirm) {
+                    if (!app.settings.bridgeEnabled() || arrivalToken != app.core.cancellationToken()) throw new BridgeHttp.Failure(503);
+                    if (request.confirm) {
+                        app.db.acknowledge(request.ids, System.currentTimeMillis());
+                        client.getOutputStream().write(BridgeHttp.jsonResponse(200, "{}"));
+                    } else {
+                        CompletableFuture<String> outgoing = new CompletableFuture<>();
+                        app.worker.execute(() -> {
+                            try {
+                                if (!app.settings.bridgeEnabled() || arrivalToken != app.core.cancellationToken()) outgoing.complete("[]");
+                                else outgoing.complete(app.proactive.poll().toString());
+                            } catch (Exception e) { outgoing.completeExceptionally(e); }
+                        });
+                        client.getOutputStream().write(BridgeHttp.jsonResponse(200, outgoing.get(85, TimeUnit.SECONDS)));
+                    }
+                    client.getOutputStream().flush(); app.changed(); return;
+                }
                 result = app.bridge.accept(request.id, request.text, arrivalToken);
                 response = result.get(85, TimeUnit.SECONDS);
             } catch (BridgeHttp.Failure failure) {

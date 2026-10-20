@@ -19,4 +19,10 @@ public interface Store {
     // before == null inserts; after == null deletes. Must compare before.version.
     String mutate(String operationId, Row before, Row after, String result, long time) throws Exception;
     String history(String date) throws Exception;
+    default List<Row> memories() throws Exception { return java.util.Collections.emptyList(); }
+    default List<Row> reminders() throws Exception { return java.util.Collections.emptyList(); }
+    default List<Memory.Exchange> conversation() throws Exception { return java.util.Collections.emptyList(); }
+    default void exchange(String id, String user, String model) throws Exception {}
+    default void clearConversation() throws Exception {}
+
 }

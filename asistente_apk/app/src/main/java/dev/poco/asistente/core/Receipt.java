@@ -49,6 +49,8 @@ public final class Receipt {
 
     /** The record in words, without the verb: "un gasto de ₲ 25.000 en almuerzo (hoy)". */
     public static String describe(String kind, JSONObject d, LocalDate today) {
+        if (kind.equals("memoria")) return "la entrada de la libreta";
+        if (kind.equals("recordatorio")) return "el recordatorio";
         String when = day(d.optString("fecha", ""), today);
         String at = when.isEmpty() ? "" : " (" + when + ")";
         switch (kind) {

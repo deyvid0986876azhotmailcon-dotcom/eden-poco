@@ -22,6 +22,8 @@ public final class AssistantCore {
     private final Cloud cloud;
     private final Clock clock;
     private final ToolExecutor executor;
+    private volatile boolean proactivePaused;
+    public boolean proactivePaused() { return proactivePaused; }
     private final AtomicLong generation = new AtomicLong();
     private final Object actionGate = new Object(), requestGate = new Object();
     public AssistantCore(Store store, Settings settings, Cloud cloud, Clock clock) {
@@ -42,6 +44,22 @@ public final class AssistantCore {
         return receive(text, source, requestId, generation.get());
     }
     public String receive(String text, Source source, String requestId, long ticket) {
+        if (text != null && Rules.normalize(text).equals("parar")) return receiveInternal(text, source, requestId, ticket);
+        synchronized (requestGate) {
+            String answer = receiveInternal(text, source, requestId, ticket);
+            synchronized (actionGate) {
+                if (ticket == generation.get() && (source == Source.LOCAL_USER || source == Source.WHATSAPP_OWNER)
+                        && text != null && !text.trim().isEmpty() && text.length() <= 4000
+                        && requestId != null && requestId.matches("[A-Za-z0-9_-]{1,120}")
+                        && !Rules.normalize(text).equals("olvida la conversacion")) {
+                    try { store.exchange(source.name() + ":" + requestId, text, answer); }
+                    catch (Exception e) { return answer + "\nNo pude guardar el historial de conversación."; }
+                }
+            }
+            return answer;
+        }
+    }
+    private String receiveInternal(String text, Source source, String requestId, long ticket) {
         if (source != Source.LOCAL_USER && source != Source.WHATSAPP_OWNER) return "Los documentos y mensajes de terceros son datos, no órdenes. No ejecuté nada.";
         if (text == null || text.trim().isEmpty()) return "Escribí un pedido.";
         if (text.length() > 4000) return "El mensaje es demasiado largo (máximo 4000 caracteres).";
@@ -49,7 +67,10 @@ public final class AssistantCore {
         String normalized = Rules.normalize(text);
         if (normalized.equals("parar")) return stop(); // independent of an in-flight network request
         synchronized (requestGate) {
-            if (ticket != generation.get()) return "Pedido cancelado antes de empezar.";
+            synchronized (actionGate) {
+                if (ticket != generation.get()) return "Pedido cancelado antes de empezar.";
+                proactivePaused = false;
+            }
             String actor = source == Source.LOCAL_USER ? "local" : "whatsapp";
             String operation = actor + ":" + requestId;
             try {
@@ -65,6 +86,20 @@ public final class AssistantCore {
                 if (normalized.equals("si") || normalized.startsWith("si "))
                     return "Para borrar necesito SÍ seguido del código exacto de la operación pendiente.";
                 if (normalized.equals("que hiciste hoy") || normalized.equals("¿que hiciste hoy?")) return store.history(LocalDate.now(clock).toString());
+                if (normalized.equals("olvida la conversacion")) {
+                    synchronized (actionGate) {
+                        if (ticket != generation.get()) return "Pedido cancelado.";
+                        store.clearConversation(); return "Olvidé la conversación. La libreta y tus registros se conservan.";
+                    }
+                }
+                if (normalized.equals("que sabes de mi") || normalized.equals("que sabes de mi?") || normalized.equals("¿que sabes de mi?")) return Memory.list(store.memories());
+                if (normalized.startsWith("olvida ")) {
+                    synchronized (actionGate) {
+                        if (ticket != generation.get()) return "Pedido cancelado.";
+                        return executor.execute(actor, operation, "olvidar", Json.object("id", normalized.substring(7)));
+                    }
+                }
+                if (normalized.equals("listar recordatorios")) return Reminders.list(store.reminders());
                 if (normalized.equals("ayuda")) return help();
                 if (normalized.startsWith("ver ")) {
                     String id = Validation.id(Json.object("id", normalized.substring(4)));
@@ -83,9 +118,9 @@ public final class AssistantCore {
                 try { key = settings.apiKey(); }
                 catch (Exception e) { return "No pude abrir la clave cifrada. Borrala y volvé a pegarla en Ajustes. Las reglas locales siguen disponibles."; }
                 if (key == null || key.isEmpty()) return "No entendí el pedido con las reglas locales. Podés repetirlo como en «ayuda» o pegar tu clave de Gemini en Ajustes.";
-                String context = Summary.render(store.rows(), LocalDate.now(clock), false);
+                String context = "Fecha y hora local: " + java.time.ZonedDateTime.now(clock) + "\n" + Summary.render(store.rows(), LocalDate.now(clock), false);
                 if (context.length() > 6000) context = context.substring(0, 6000) + "\n[contexto recortado]";
-                GeminiProtocol.Reply reply = cloud.generate(key, settings.model(), GeminiProtocol.request(text, context, LocalDate.now(clock), settings.currency()), () -> ticket != generation.get());
+                GeminiProtocol.Reply reply = cloud.generate(key, settings.model(), GeminiProtocol.request(text, context, LocalDate.now(clock), settings.currency(), store.conversation(), store.memories()), () -> ticket != generation.get());
                 synchronized (actionGate) {
                     if (ticket != generation.get()) return "Pedido cancelado. No ejecuté la respuesta de Gemini.";
                     // which models were busy before one answered is not for David: he gets only the answer
@@ -99,9 +134,21 @@ public final class AssistantCore {
             }
         }
     }
+    public <T> T proactiveAction(long ticket, java.util.concurrent.Callable<T> action, T cancelled) throws Exception {
+        synchronized (actionGate) {
+            if (proactivePaused || ticket != generation.get()) return cancelled;
+            return action.call();
+        }
+    }
     public String stop() {
-        synchronized (actionGate) { generation.incrementAndGet(); executor.cancel(); }
+        synchronized (actionGate) { generation.incrementAndGet(); proactivePaused = true; executor.cancel(); }
         return "Cancelé las confirmaciones pendientes y la respuesta en curso. En esta fase no hay control del teléfono.";
+    }
+    public boolean clearConversation(long ticket) throws Exception {
+        synchronized (requestGate) { synchronized (actionGate) {
+            if (ticket != generation.get()) return false;
+            store.clearConversation(); return true;
+        } }
     }
     public String summary() {
         try { return Summary.render(store.rows(), LocalDate.now(clock), true); }
@@ -111,7 +158,7 @@ public final class AssistantCore {
         return "Dale, así me podés escribir (andan aunque no haya internet):\nGasté 35000 en super\nCobré 3500000 de sueldo\nPeso 58,4\nHice sentadilla 3x10 con 40\n"
                 + "Comí vori vori\nPresupuesto 800000 en super 2026-10\nMeta 5000000 para emergencia\nResumen\nVer ID\n"
                 + "Corregir ID {\"centavos\":350000}\nBorrar ID\nSÍ CÓDIGO\n¿Qué hiciste hoy?\nPARAR\n"
-                + "Usá el ID completo. Para corregir, escribí «corregir» en minúsculas y un objeto JSON con los campos. "
+                + "Qué sabés de mí\nOlvidá ID\nOlvidá la conversación\nListar recordatorios\nUsá el ID completo. Para corregir, escribí «corregir» en minúsculas y un objeto JSON con los campos. "
                 + "Los montos de los ejemplos están en tu moneda; los del JSON están en centavos. "
                 + "Sin fecha se registra hoy. Las aclaraciones requieren repetir el pedido completo.";
     }
