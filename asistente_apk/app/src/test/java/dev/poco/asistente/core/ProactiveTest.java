@@ -62,7 +62,8 @@ public class ProactiveTest {
         Proactive service = service(store, settings, clock, noCloud); service.poll(); assertEquals(0, store.out.size());
         clock.set("2026-10-25T21:30"); service.poll(); assertTrue(store.out.containsKey("w_2026-10-25"));
         clock.set("2026-10-30T12:00"); service.poll(); service.poll(); assertEquals(2, store.out.size());
-        clock.set("2026-11-09T12:00"); service.poll(); assertEquals(3, store.out.size());
+        // Monday noon: the 10-day system reminder, and Sunday's weekly summary that 21:30 missed (it catches up the next day)
+        clock.set("2026-11-09T12:00"); service.poll(); assertEquals(4, store.out.size()); assertTrue(store.out.containsKey("w_2026-11-08"));
     }
     @Test public void quotaFailureFallsBackAndStopPreventsLateSummaryCommit() throws Exception {
         Port store = new Port(); Settings settings = new Settings(); settings.daily = true; settings.key = "key";
