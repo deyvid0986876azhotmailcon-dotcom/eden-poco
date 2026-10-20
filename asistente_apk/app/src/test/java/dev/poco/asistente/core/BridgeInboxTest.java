@@ -53,7 +53,7 @@ public class BridgeInboxTest {
         assertTrue(receive("three", "SÍ " + code).startsWith("Borré")); assertTrue(store.rows().isEmpty());
         receive("four", "gasté 3500 en super");
         proposal = receive("five", "borrar " + store.rows().get(0).id);
-        code = proposal.substring(proposal.indexOf("escribí SÍ ") + 11, proposal.indexOf(". PARAR"));
+        code = proposal.substring(proposal.indexOf("SÍ ") + 3, proposal.indexOf("\n(vale"));
         receive("six", "PARAR"); assertFalse(receive("seven", "SÍ " + code).startsWith("Borré"));
         assertEquals(1, store.rows().size());
     }
