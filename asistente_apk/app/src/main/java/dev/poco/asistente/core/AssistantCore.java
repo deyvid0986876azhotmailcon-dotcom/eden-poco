@@ -88,9 +88,9 @@ public final class AssistantCore {
                 GeminiProtocol.Reply reply = cloud.generate(key, settings.model(), GeminiProtocol.request(text, context, LocalDate.now(clock), settings.currency()), () -> ticket != generation.get());
                 synchronized (actionGate) {
                     if (ticket != generation.get()) return "Pedido cancelado. No ejecuté la respuesta de Gemini.";
-                    String notice = reply.notice == null ? "" : reply.notice;
-                    if (reply.tool == null) return notice + reply.text;
-                    return notice + executor.execute(actor, operation, reply.tool, reply.args);
+                    // which models were busy before one answered is not for David: he gets only the answer
+                    if (reply.tool == null) return reply.text;
+                    return executor.execute(actor, operation, reply.tool, reply.args);
                 }
             } catch (IllegalArgumentException e) {
                 return e.getMessage(); // only local validation/network messages, never raw server bodies
