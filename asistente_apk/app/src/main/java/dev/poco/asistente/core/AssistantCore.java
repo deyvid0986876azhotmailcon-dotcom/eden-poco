@@ -39,7 +39,8 @@ public final class AssistantCore {
     // ---- voice calls (call/LiveSession): the same persona, notebook and executor as text
     /** The Gemini request a text message would use; LiveSession takes its system instruction. */
     public org.json.JSONObject liveContext() throws Exception {
-        String context = Summary.render(store.rows(), LocalDate.now(clock), false);
+        // the call needs the local time too, or «en 2 minutos» lands on UTC (3 hours off in Asunción)
+        String context = "Fecha y hora local: " + java.time.ZonedDateTime.now(clock) + "\n" + Summary.render(store.rows(), LocalDate.now(clock), false);
         if (context.length() > 6000) context = context.substring(0, 6000) + "\n[contexto recortado]";
         return GeminiProtocol.request("", context, LocalDate.now(clock), settings.currency(), store.conversation(), store.memories());
     }

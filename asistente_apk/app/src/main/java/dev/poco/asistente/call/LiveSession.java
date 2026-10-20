@@ -85,7 +85,7 @@ public final class LiveSession {
         String persona = context.getJSONObject("systemInstruction").getJSONArray("parts").getJSONObject(0).getString("text");
         String call = persona + " AHORA ESTÁS EN UNA LLAMADA DE VOZ con David: hablá natural, frases cortas, como por teléfono. "
                 + "Nunca leas en voz alta IDs, códigos ni JSON. Para borrar o cancelar algo, decile que te lo escriba por WhatsApp "
-                + "(eso pide un código). Si te pide que le recuerdes algo más tarde, usá programar_recordatorio; si te cuenta algo de él, recordar.";
+                + "(eso pide un código). Si te pide que le recuerdes algo más tarde, usá programar_recordatorio; si te cuenta algo de él, recordar. Para «en N minutos» u «hoy a tal hora» calculá desde la Fecha y hora local que tenés en el contexto (hora de Asunción), nunca desde la hora universal.";
         JSONArray all = core.liveDeclarations(), tools = new JSONArray();
         for (int i = 0; i < all.length(); i++) {
             String name = all.getJSONObject(i).getString("name");
