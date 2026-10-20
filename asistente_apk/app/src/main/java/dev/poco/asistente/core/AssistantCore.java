@@ -35,6 +35,26 @@ public final class AssistantCore {
         executor = new ToolExecutor(store, clock, elapsedMillis);
     }
     public String receive(String text) { return receive(text, Source.LOCAL_USER, UUID.randomUUID().toString()); }
+
+    // ---- voice calls (call/LiveSession): the same persona, notebook and executor as text
+    /** The Gemini request a text message would use; LiveSession takes its system instruction. */
+    public org.json.JSONObject liveContext() throws Exception {
+        String context = Summary.render(store.rows(), LocalDate.now(clock), false);
+        if (context.length() > 6000) context = context.substring(0, 6000) + "\n[contexto recortado]";
+        return GeminiProtocol.request("", context, LocalDate.now(clock), settings.currency(), store.conversation(), store.memories());
+    }
+    public org.json.JSONArray liveDeclarations() throws Exception { return GeminiProtocol.declarations(); }
+    /** A tool Gemini asked for during a call; only the safe ones LiveSession offers, validated by the executor. */
+    public String callTool(String tool, org.json.JSONObject args) {
+        boolean allowed = false;
+        for (String t : dev.poco.asistente.call.LiveSession.CALL_TOOLS) allowed |= t.equals(tool);
+        if (!allowed) return "Eso no lo puedo hacer en una llamada; pedímelo por WhatsApp.";
+        synchronized (actionGate) {
+            try { return executor.execute("llamada", "llamada:" + UUID.randomUUID(), tool, args); }
+            catch (IllegalArgumentException e) { return e.getMessage(); }
+            catch (Exception e) { return "No pude hacerlo."; }
+        }
+    }
     public long cancellationToken() { return generation.get(); }
     /** Capture the token when queuing, so PARAR also cancels work that has not started. */
     public String receive(String text, long queuedToken) {

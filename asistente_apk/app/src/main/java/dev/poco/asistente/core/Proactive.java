@@ -20,7 +20,11 @@ public final class Proactive {
         boolean dailySummary();
         boolean weeklySummary();
         String summaryTime();
+        /** Reminders also ring the phone as a call (call/CallLauncher); off unless David turns it on. */
+        default boolean callReminders() { return false; }
     }
+    /** Set by the app: rings a call for a due reminder. Core stays free of Android. */
+    public volatile java.util.function.Consumer<String> onReminderCall;
     private final Port store;
     private final Settings settings;
     private final Cloud cloud;
@@ -42,6 +46,8 @@ public final class Proactive {
             if (due >= 0 && due <= millis && (!Reminders.quiet(now) || night)) {
                 long next = Reminders.next(reminder.data, now.toInstant(), clock.getZone());
                 core.proactiveAction(ticket, () -> { store.enqueue("r_" + reminder.id + "_" + due, reminder.data.getString("texto"), "recordatorio", night, millis, reminder, next, null); return null; }, null);
+                java.util.function.Consumer<String> call = onReminderCall;
+                if (call != null && settings.callReminders() && !cancelled.getAsBoolean()) call.accept(reminder.data.getString("texto"));
             }
         }
         long system = store.scheduleState("whatsapp", now.plusDays(10).toInstant().toEpochMilli());

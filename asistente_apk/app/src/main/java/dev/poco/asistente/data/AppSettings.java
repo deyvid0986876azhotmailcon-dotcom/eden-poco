@@ -40,6 +40,9 @@ public final class AppSettings implements dev.poco.asistente.core.Proactive.Sett
         if (!prefs.edit().putBoolean("summary_daily", daily).putBoolean("summary_weekly", weekly).putString("summary_time", hour).commit())
             throw new IllegalStateException("No se guardaron los ajustes del resumen.");
     }
+    /** Reminders ring the phone as a call (CallLauncher); David asked for it, so it starts on. */
+    @Override public boolean callReminders() { return prefs.getBoolean("call_reminders", true); }
+    public void setCallReminders(boolean on) { prefs.edit().putBoolean("call_reminders", on).apply(); }
     public boolean whatsappEnabled() { return prefs.getBoolean("whatsapp_enabled", false); }
     public String whatsappName() { return prefs.getString("whatsapp_name", ""); }
     public String whatsappPhone() { return prefs.getString("whatsapp_phone", ""); }

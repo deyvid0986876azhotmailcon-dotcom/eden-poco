@@ -479,6 +479,29 @@ public final class MainActivity extends Activity {
             catch (RuntimeException e) { whatsappStatus.setText("Abrí Ajustes del sistema → Acceso a notificaciones → Asistente."); }
         }));
 
+        LinearLayout calls = ui.card(); form.addView(calls);
+        calls.addView(ui.cardTitle(Icons.PHONE, "Llamadas", false));
+        calls.addView(label("Hablá con la asistente por voz (Gemini Live). Si lo activás, los recordatorios te suenan como una llamada."));
+        TextView callStatus = ui.text("", 14, color.text, false); calls.addView(callStatus);
+        Switch ringReminders = toggle("Recordatorios por llamada");
+        ringReminders.setChecked(app.settings.callReminders());
+        ringReminders.setOnCheckedChangeListener((view, checked) -> app.settings.setCallReminders(checked));
+        calls.addView(ringReminders);
+        calls.addView(button("Llamar a la asistente", true, () -> dev.poco.asistente.call.CallActivity.callNow(this)));
+        calls.addView(button("Probar: que me llame en 10 segundos", false, () -> {
+            callStatus.setText("En 10 segundos te llama. Podés bloquear la pantalla.");
+            app.main.postDelayed(() -> dev.poco.asistente.call.CallLauncher.ring(app, "Esta es una llamada de prueba"), 10_000);
+        }));
+        if (!dev.poco.asistente.call.CallLauncher.canRingFullScreen(this)) {
+            callStatus.setText("Para que la llamada aparezca con la pantalla bloqueada, permití las notificaciones de pantalla completa.");
+            calls.addView(button("Permitir llamada en pantalla completa", false, () -> {
+                try { startActivity(new Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, android.net.Uri.parse("package:" + getPackageName()))); }
+                catch (RuntimeException e) { callStatus.setText("Abrí Ajustes → Apps → Asistente → Notificaciones de pantalla completa."); }
+            }));
+        }
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 43);
+
         LinearLayout privacy = ui.card(); form.addView(privacy);
         privacy.addView(ui.cardTitle(Icons.SHIELD, "Privacidad", false));
         privacy.addView(label("Gemini recibe tu mensaje, los últimos diez intercambios recortados, la libreta y un resumen local. En la cuota gratis Google puede usar esos datos para mejorar sus productos. Las reglas funcionan sin clave."));
