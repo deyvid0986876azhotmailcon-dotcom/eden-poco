@@ -3,6 +3,7 @@ process.umask(0o077);
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { Backups, signalBackup } = require('./respaldo.cjs');
 const { configuration, split, candidate, Ledger, post, DeliveryQueue, privateDirectory, FALLBACK } = require('./lib.cjs');
 // Do not print library errors, message objects or auth material to logs.
 function log(event) { console.log(`${new Date().toISOString()} ${event}`); }
@@ -11,6 +12,7 @@ const auth = path.join(root, 'auth');
 const qrFile = path.join(os.homedir(), 'storage', 'downloads', 'asistente_qr.png');
 let lockOwned = false, exiting = false, connection = null, reconnect = null, attempts = 0;
 let config, ledger, makeWASocket, useMultiFileAuthState, DisconnectReason, logger, QRCode;
+let backups;
 const queue = new DeliveryQueue(async (message, current) => {
   const response = await post(config, message);
   if (!current()) return;
@@ -115,7 +117,7 @@ function shutdown(code = 0) {
   }
   if (lockOwned) clearQr();
   // Wait for auth writes before releasing ownership; SIGKILL leaves a lock for manual inspection.
-  Promise.resolve(connection?.writes).finally(() => {
+  Promise.allSettled([connection?.writes, backups?.stop()]).finally(() => {
     if (lockOwned) {
       try { fs.unlinkSync(path.join(root, 'running.lock')); } catch { }
     }
@@ -129,16 +131,24 @@ async function loadBaileys() {
 }
 function fatal() { log('Fallido: error local; revisar configuración, dependencias y permisos. No se continúa para evitar duplicados'); shutdown(1); }
 async function main() {
+  if (process.argv.includes('--respaldo-ahora')) {
+    try { signalBackup(root); log('Respaldo solicitado; consultar el log del puente'); }
+    catch { log('Respaldo fallido: no se pudo avisar al puente activo'); process.exitCode = 1; }
+    return;
+  }
   privateDirectory(root);
   // O_EXCL prevents two processes from sharing Baileys keys or racing the dedup ledger.
   fs.writeFileSync(path.join(root, 'running.lock'), String(process.pid) + '\n', { flag: 'wx', mode: 0o600 }); lockOwned = true;
   const filename = path.join(root, 'config.json'); fs.chmodSync(filename, 0o600);
   config = configuration(JSON.parse(fs.readFileSync(filename, 'utf8')));
   ledger = new Ledger(path.join(root, 'seen.ids'));
+  backups = new Backups(root, config, log);
+  process.on('SIGUSR1', () => { void backups.request(); });
+  process.on('SIGINT', () => shutdown()); process.on('SIGTERM', () => shutdown());
+  backups.start();
   // Baileys 6.7.22+ is an ES module (6.7.18 and older let messages be spoofed: do not go back)
   ({ default: makeWASocket, useMultiFileAuthState, DisconnectReason } = await loadBaileys());
   logger = require('pino')({ level: 'silent' }); QRCode = require('qrcode');
-  process.on('SIGINT', () => shutdown()); process.on('SIGTERM', () => shutdown());
   await connect();
 }
 main().catch(fatal);

@@ -97,6 +97,7 @@ public final class BridgeService extends Service {
             String response;
             try {
                 BridgeHttp.Request request = BridgeHttp.read(client.getInputStream(), token);
+                if (request.backup) { deliverBackup(client); return; }
                 result = app.bridge.accept(request.id, request.text, arrivalToken);
                 response = result.get(85, TimeUnit.SECONDS);
             } catch (BridgeHttp.Failure failure) {
@@ -123,6 +124,33 @@ public final class BridgeService extends Service {
     private static void close(java.io.Closeable closeable) {
         if (closeable == null) return;
         try { closeable.close(); } catch (IOException ignored) { }
+    }
+    private synchronized void deliverBackup(Socket client) {
+        java.io.File snapshot = null;
+        boolean headersSent = false;
+        try {
+            snapshot = java.io.File.createTempFile("respaldo-", ".db", getCacheDir());
+            // VACUUM INTO accepts an existing empty file; no preferences or vault are read.
+            app.db.getWritableDatabase().execSQL("VACUUM INTO ?", new Object[]{snapshot.getAbsolutePath()});
+            long size = snapshot.length();
+            java.io.OutputStream output = client.getOutputStream();
+            headersSent = true;
+            output.write(("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.sqlite3\r\nContent-Length: "
+                    + size + "\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n")
+                    .getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            try (java.io.InputStream input = new java.io.FileInputStream(snapshot)) {
+                byte[] buffer = new byte[32768]; int count;
+                while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+            }
+            output.flush();
+            app.bridgeLog("Respaldo entregado (" + ((size + 1023) / 1024) + " KB)");
+        } catch (Exception e) {
+            app.bridgeLog("Respaldo fallido: no se pudo crear o entregar la base");
+            if (!headersSent) try { client.getOutputStream().write(BridgeHttp.response(503, "Respaldo no disponible")); }
+            catch (IOException ignored) { }
+        } finally {
+            if (snapshot != null && !snapshot.delete()) app.bridgeLog("Respaldo fallido: no se pudo borrar el temporal");
+        }
     }
     @Override public void onDestroy() {
         closed = true; close(server);

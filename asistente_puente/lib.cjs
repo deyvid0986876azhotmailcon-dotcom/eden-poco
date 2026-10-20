@@ -5,7 +5,8 @@ const crypto = require('node:crypto');
 const FALLBACK = 'No pude procesar tu mensaje, proba de nuevo';
 function configuration(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
-      || Object.keys(value).sort().join(',') !== 'puerto,remitente,token'
+      || !['puerto,remitente,token', 'puerto,remitente,respaldo_hora,token'].includes(Object.keys(value).sort().join(','))
+      || (value.respaldo_hora !== undefined && (typeof value.respaldo_hora !== 'string' || !/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(value.respaldo_hora)))
       || !Number.isInteger(value.puerto) || value.puerto < 1024 || value.puerto > 65535
       || typeof value.token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.token)
       || typeof value.remitente !== 'string' || !/^[1-9][0-9]{6,14}@s\.whatsapp\.net$/.test(value.remitente)) {

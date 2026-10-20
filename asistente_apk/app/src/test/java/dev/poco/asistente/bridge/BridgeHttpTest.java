@@ -72,4 +72,22 @@ public class BridgeHttpTest {
         assertTrue(parts[0].contains("Content-Length: " + parts[1].getBytes(StandardCharsets.UTF_8).length));
         assertTrue(parts[0].contains("Connection: close")); assertTrue(parts[1].contains("respuesta"));
     }
+    private String backupRequest(String headers) {
+        return "GET /respaldo HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nAuthorization: Bearer " + TOKEN + "\r\n" + headers + "\r\n";
+    }
+    @Test public void backupIsAuthenticatedAndHasNoBody() throws Exception {
+        assertTrue(read(backupRequest("")).backup);
+        assertTrue(read(backupRequest("Content-Length: 0\r\n")).backup);
+        assertFalse(read(request(BODY)).backup);
+        rejected(401, backupRequest("").replace(TOKEN, "wrong"));
+        rejected(401, backupRequest("").replace("Authorization: Bearer " + TOKEN + "\r\n", ""));
+        rejected(400, backupRequest("Content-Length: 1\r\n") + "x");
+        rejected(400, backupRequest("Content-Length: -1\r\n"));
+        rejected(400, backupRequest("Content-Length: 0\r\nContent-Length: 0\r\n"));
+        rejected(400, backupRequest("Transfer-Encoding: chunked\r\n"));
+        rejected(400, backupRequest("Expect: 100-continue\r\n"));
+        rejected(405, backupRequest("").replace("GET ", "POST "));
+        rejected(404, backupRequest("").replace("/respaldo ", "/respaldo?x=1 "));
+        rejected(404, backupRequest("").replace("/respaldo ", "http://127.0.0.1/respaldo "));
+    }
 }

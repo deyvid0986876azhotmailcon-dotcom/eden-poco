@@ -6,7 +6,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 public final class GeminiProtocol {
-    public static final String[] MODELS = {"gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"};
+    public static final String[] MODELS = {"gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash"};
     public static final class Reply {
         public final String text, tool, notice;
         public final JSONObject args;

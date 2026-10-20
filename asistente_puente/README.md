@@ -1,5 +1,62 @@
 # Puente de WhatsApp vinculado para Asistente
 
+## Respaldo nocturno a Google Drive
+
+El proceso principal incluye un programador interno, sin cron. Agregar opcionalmente
+`"respaldo_hora": "03:00"` a `~/.asistente_puente/config.json` (formato HH:mm de 24 horas)
+y reiniciar el puente. Si falta, usa 03:00, hora local del teléfono. Comprueba la hora
+cada minuto; al arrancar también respalda si no hay un éxito guardado o tiene más de
+24 horas. Hace como máximo un intento automático por día de ejecución; tras un fallo,
+se puede pedir otro manualmente o esperar al siguiente día. Necesita Asistente activo.
+
+Claude debe instalar `rclone` en el PATH de Termux y configurar el remoto `drive` para
+Google Drive con scope `drive.file` (`pkg install rclone`, luego `rclone config`).
+Las credenciales de rclone quedan en Termux; no se guardan en este repositorio.
+No se requiere rclone para las pruebas Node. Si falta o falla, el puente sigue funcionando.
+
+La app atiende `GET /respaldo` en el mismo servidor 127.0.0.1 y con el mismo Bearer.
+Rechaza cuerpos declarados y transferencia chunked. Genera una instantánea SQLite
+con `VACUUM INTO` en su caché privada, la transmite con longitud y tipo
+`application/vnd.sqlite3`, y borra el temporal al terminar. Registro muestra el
+tamaño entregado o un fallo. Solo exporta `asistente.db`: no incluye preferencias,
+vault ni claves. La base sí contiene los registros y mensajes guardados por la app.
+
+El puente descarga en streaming, con límite de 1 GiB y 95 segundos, valida la cabecera
+`SQLite format 3` y la longitud, y publica el archivo local con permisos 600 como
+`~/.asistente_puente/respaldos/asistente-AAAA-MM-DD.db`. Ejecuta sin shell:
+
+```sh
+rclone copy <archivo> drive:Asistente/respaldos
+rclone delete --min-age 30d drive:Asistente/respaldos
+```
+
+Cada ejecución de rclone tiene un límite de diez minutos. Tras ambas operaciones,
+conserva los siete archivos locales más recientes y guarda la fecha del éxito en
+`~/.asistente_puente/respaldo-exito.json`. La antigüedad remota es la que usa rclone,
+no una fecha interpretada del nombre. Usar esa carpeta de Drive solo para respaldos.
+Una ejecución manual del mismo día reemplaza el archivo de ese día. El log emite
+una línea final por intento (éxito y KB, o etapa fallida), sin contenido ni errores
+crudos de rclone. El archivo SQLite se sube sin cifrado adicional.
+
+Para probar mientras el puente principal está activo, desde su carpeta:
+
+```sh
+node index.cjs --respaldo-ahora
+```
+
+El comando lee el PID de `running.lock` y manda SIGUSR1; no toma ni borra el candado,
+ni inicia Baileys. Su salida confirma la solicitud, no la subida: consultar el log
+del proceso principal (en arranque automático, `~/.asistente_puente/puente.log`).
+Las solicitudes simultáneas comparten el respaldo en curso. SIGINT/SIGTERM espera
+a que termine antes de soltar el candado. Antes de usar el comando tras un cierre
+forzado, comprobar que el PID del candado sigue perteneciendo al puente actual.
+
+`npm test` incluye app y rclone simulados, rechazo de archivos inválidos/incompletos,
+retención, programación, recuperación tras reinicio, concurrencia, señal y timeouts.
+Queda comprobar en Android `VACUUM INTO`, coherencia con escrituras simultáneas,
+permisos reales de Termux y subida a Drive con el remoto configurado. Las pruebas
+JVM del parser están en `BridgeHttpTest`; ejecutar en CI, sin compilar en esta notebook.
+
 Corre en Termux, en el **espacio principal**, junto con Asistente. El WhatsApp
 del bot sigue en el Segundo espacio. El puente se vincula como otro dispositivo;
 no depende de los avisos del Segundo espacio. Es una integración no oficial,

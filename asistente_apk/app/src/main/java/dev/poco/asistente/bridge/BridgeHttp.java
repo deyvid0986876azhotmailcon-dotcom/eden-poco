@@ -23,15 +23,18 @@ public final class BridgeHttp {
         public Failure(int status) { super("HTTP " + status); this.status = status; }
     }
     public static final class Request {
+        public final boolean backup;
         public final String id, text;
-        Request(String id, String text) { this.id = id; this.text = text; }
+        Request(String id, String text) { this.id = id; this.text = text; this.backup = id == null; }
     }
     public static Request read(InputStream input, String token) throws IOException {
         int[] budget = {MAX_HEADERS};
         String[] first = line(input, budget).split(" ", -1);
         if (first.length != 3 || !first[2].equals("HTTP/1.1")) throw new Failure(400);
-        if (!first[0].equals("POST")) throw new Failure(405);
-        if (!first[1].equals("/mensaje")) throw new Failure(404);
+        if (!first[0].equals("POST") && !first[0].equals("GET")) throw new Failure(405);
+        if (!first[1].equals("/mensaje") && !first[1].equals("/respaldo")) throw new Failure(404);
+        boolean backup = first[1].equals("/respaldo");
+        if (!first[0].equals(backup ? "GET" : "POST")) throw new Failure(405);
         Map<String, String> headers = new HashMap<>();
         while (true) {
             String row = line(input, budget);
@@ -45,6 +48,10 @@ public final class BridgeHttp {
                 || headers.containsKey("transfer-encoding") || headers.containsKey("expect")) throw new Failure(400);
         String authorization = headers.getOrDefault("authorization", "");
         if (token == null || token.isEmpty() || !constantEquals("Bearer " + token, authorization)) throw new Failure(401);
+        if (backup) {
+            if (headers.containsKey("content-length") && !headers.get("content-length").equals("0")) throw new Failure(400);
+            return new Request(null, null);
+        }
         String type = headers.getOrDefault("content-type", "");
         if (!type.matches("(?i)application/json(?:\\s*;\\s*charset=utf-8)?")) throw new Failure(415);
         String length = headers.get("content-length");

@@ -9,7 +9,7 @@ const lib = require('../lib.cjs');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 // Execute the real entry point with a simulated Baileys/QR/clock. No npm modules or network.
-async function harness(prelocked = false) {
+async function harness(prelocked = false, manual = false) {
   const home = fs.mkdtempSync(path.join(__dirname, '.tmp-'));
   const root = path.join(home, '.asistente_puente'), auth = path.join(root, 'auth');
   const png = path.join(home, 'storage', 'downloads', 'asistente_qr.png');
@@ -17,8 +17,9 @@ async function harness(prelocked = false) {
   fs.mkdirSync(root); fs.mkdirSync(path.dirname(png), { recursive: true });
   fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify(config));
   if (prelocked) { fs.writeFileSync(path.join(root, 'running.lock'), 'other'); fs.writeFileSync(png, 'other QR'); }
-  const sockets = [], logs = [], posts = [], timers = new Set(), exits = [];
+  const sockets = [], logs = [], posts = [], timers = new Set(), exits = [], backupCalls = [];
   const fakeProcess = new EventEmitter();
+  fakeProcess.argv = ['node', 'index.cjs', ...(manual ? ['--respaldo-ahora'] : [])];
   fakeProcess.umask = () => {}; fakeProcess.pid = 123; fakeProcess.exit = code => exits.push(code);
   const socketFactory = options => {
     assert.equal(options.syncFullHistory, false); assert.equal(options.shouldSyncHistoryMessage(), false);
@@ -30,6 +31,10 @@ async function harness(prelocked = false) {
     setTimeout: (fn, delay) => { const timer = { fn, delay }; timers.add(timer); return timer; },
     clearTimeout: timer => timers.delete(timer),
     require: name => {
+      if (name === './respaldo.cjs') return {
+        Backups: class { start() { backupCalls.push('start'); } stop() {} request() { backupCalls.push('request'); } },
+        signalBackup: directory => backupCalls.push(directory)
+      };
       if (name === './lib.cjs') return { ...lib, post: async (_, message) => { posts.push(message); return 'Hecho'; } };
       if (name === 'node:os') return { homedir: () => home };
       if (name === '@whiskeysockets/baileys') return {
@@ -47,12 +52,25 @@ async function harness(prelocked = false) {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'index.cjs'), 'utf8')
     + '\nglobalThis.hooks = { shutdown, session: () => connection, queue: () => queue.tail };', sandbox);
   await tick();
-  return { home, root, auth, png, config, sockets, logs, posts, timers, exits, hooks: sandbox.hooks,
+  return { home, root, auth, png, config, sockets, logs, posts, timers, exits, backupCalls, fakeProcess, hooks: sandbox.hooks,
     async close() {
       sandbox.hooks.shutdown(); await tick();
       assert.equal(path.dirname(path.resolve(home)), path.resolve(__dirname)); fs.rmSync(home, { recursive: true });
     } };
 }
+test('manual CLI bypasses ownership and Baileys; primary handles SIGUSR1', async () => {
+  const manual = await harness(true, true);
+  try {
+    assert.deepEqual(manual.backupCalls, [manual.root]);
+    assert.equal(manual.sockets.length, 0);
+    assert.equal(fs.readFileSync(path.join(manual.root, 'running.lock'), 'utf8'), 'other');
+  } finally { await manual.close(); }
+  const primary = await harness();
+  try {
+    primary.fakeProcess.emit('SIGUSR1');
+    assert.deepEqual(primary.backupCalls, ['start', 'request']);
+  } finally { await primary.close(); }
+});
 test('QR terminal/PNG, authenticated delivery and persistent dedup use the real event wiring', async () => {
   const h = await harness();
   try {
