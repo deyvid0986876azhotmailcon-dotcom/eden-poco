@@ -58,7 +58,7 @@ public class CoreTest {
         assertEquals(first, core.receive("gaste 3500 en super", AssistantCore.Source.LOCAL_USER, "ui-message-1"));
         String id = store.rows().get(0).id;
         String proposal = core.receive("borrar " + id);
-        String code = proposal.substring(proposal.indexOf("escribí SÍ ") + 11, proposal.indexOf(". PARAR"));
+        String code = proposal.substring(proposal.indexOf("SÍ ") + 3, proposal.indexOf("\n(vale"));
         core.receive("sí"); assertEquals(1, store.rows().size());
         assertTrue(core.receive("SÍ " + code).startsWith("Borré")); assertTrue(store.rows().isEmpty());
     }
@@ -76,7 +76,7 @@ public class CoreTest {
         assertEquals(first, core.receive("gaste 3500 en super", AssistantCore.Source.WHATSAPP_OWNER, "wa1"));
         assertEquals(1, store.rows().size());
         String proposal = core.receive("borrar " + store.rows().get(0).id, AssistantCore.Source.WHATSAPP_OWNER, "wa2");
-        String code = proposal.substring(proposal.indexOf("escribí SÍ ") + 11, proposal.indexOf(". PARAR"));
+        String code = proposal.substring(proposal.indexOf("SÍ ") + 3, proposal.indexOf("\n(vale"));
         assertTrue(core.receive("SÍ " + code).contains("no corresponde")); assertEquals(1, store.rows().size());
         assertTrue(core.receive("SÍ " + code, AssistantCore.Source.WHATSAPP_OWNER, "wa3").startsWith("Borré"));
         assertTrue(store.rows().isEmpty());

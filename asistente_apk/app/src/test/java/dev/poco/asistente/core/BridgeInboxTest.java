@@ -48,7 +48,7 @@ public class BridgeInboxTest {
     @Test public void confirmationCodeBelongsToWhatsappActorAndStopInvalidatesIt() {
         receive("one", "gasté 3500 en super");
         String proposal = receive("two", "borrar " + store.rows().get(0).id);
-        String code = proposal.substring(proposal.indexOf("escribí SÍ ") + 11, proposal.indexOf(". PARAR"));
+        String code = proposal.substring(proposal.indexOf("SÍ ") + 3, proposal.indexOf("\n(vale"));
         assertTrue(core.receive("SÍ " + code).contains("no corresponde"));
         assertTrue(receive("three", "SÍ " + code).startsWith("Borré")); assertTrue(store.rows().isEmpty());
         receive("four", "gasté 3500 en super");

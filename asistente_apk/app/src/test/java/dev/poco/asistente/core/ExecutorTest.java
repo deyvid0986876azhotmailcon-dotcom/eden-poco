@@ -16,7 +16,7 @@ public class ExecutorTest {
     private String create() throws Exception { run("registrar_movimiento", movement()); return store.rows().get(0).id; }
     private String propose(String id) throws Exception {
         String result = run("borrar_registro", Json.object("id", id));
-        return result.substring(result.indexOf("escribí SÍ ") + 11, result.indexOf(". PARAR"));
+        return result.substring(result.indexOf("SÍ ") + 3, result.indexOf("\n(vale"));
     }
     @Test public void rejectsWrongTypesUnknownFieldsAndAmountsWithoutWrites() throws Exception {
         Object[] bad = {"350000", -1, 0, 1.1, Validation.MONEY_LIMIT, JSONObject.NULL};

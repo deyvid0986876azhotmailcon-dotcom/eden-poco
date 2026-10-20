@@ -35,11 +35,26 @@ public final class Memory {
         if (n.matches(".*\\b(hablame|decime|tratame|respuestas|corto|largo)\\b.*")) return "estilo";
         return "otro";
     }
+    /** What David reads for «qué sabés de mí»: grouped by topic, in plain words, without IDs. */
     public static String list(List<Store.Row> rows) {
-        StringBuilder out = new StringBuilder("Memoria:\n");
-        for (Store.Row row : rows) out.append(row.id).append(" · ").append(row.data.optString("categoria"))
-                .append(": ").append(row.data.optString("texto")).append('\n');
-        return rows.isEmpty() ? "La libreta está vacía." : out.toString();
+        if (rows.isEmpty()) return "Tu libreta está vacía todavía, che. Contame cosas como «acordate que no me gusta el mondongo» y me las guardo.";
+        String[][] topics = {{"gustos", "Lo que te gusta y lo que no"}, {"salud", "Salud"}, {"finanzas", "Plata"},
+                {"rutina", "Tu rutina"}, {"estilo", "Cómo te gusta que te hable"}, {"otro", "Otras cosas"}};
+        StringBuilder out = new StringBuilder("Esto es lo que tengo anotado de vos:\n");
+        for (String[] topic : topics) {
+            StringBuilder items = new StringBuilder();
+            for (Store.Row row : rows) if (topic[0].equals(row.data.optString("categoria", "otro")))
+                items.append("• ").append(row.data.optString("texto")).append('\n');
+            if (items.length() > 0) out.append('\n').append(topic[1]).append('\n').append(items);
+        }
+        return out.append("\nSi querés que me olvide de algo, decime por ejemplo «olvidá lo del mondongo».").toString();
+    }
+
+    /** The notes whose text contains what David named in «olvidá lo del …» (both normalized). */
+    public static List<Store.Row> find(List<Store.Row> rows, String phrase) {
+        List<Store.Row> found = new java.util.ArrayList<>();
+        for (Store.Row row : rows) if (Rules.normalize(row.data.optString("texto")).contains(phrase)) found.add(row);
+        return found;
     }
     public static JSONArray quoted(List<Store.Row> rows) throws Exception {
         JSONArray data = new JSONArray();

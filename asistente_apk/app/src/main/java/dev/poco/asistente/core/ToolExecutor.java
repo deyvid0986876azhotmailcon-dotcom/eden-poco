@@ -59,8 +59,11 @@ public final class ToolExecutor {
             StringBuilder code = new StringBuilder();
             for (byte b : bytes) code.append(String.format(java.util.Locale.ROOT, "%02X", b & 255));
             pending.put(actor, new Pending(code.toString(), row, elapsedMillis.getAsLong() + TTL));
-            return "Voy a borrar " + Receipt.describe(row.kind, row.data, LocalDate.now(clock)) + " (ref. " + Receipt.ref(row.id) + ")"
-                    + ". Para confirmar en 5 minutos escribí SÍ " + code + ". PARAR cancela.";
+            // the code binds this exact deletion; the rest reads like a message, without record IDs
+            String what = row.kind.equals("memoria") ? "me olvido de «" + row.data.optString("texto") + "»"
+                    : row.kind.equals("recordatorio") ? "cancelo el recordatorio «" + row.data.optString("texto") + "»"
+                    : "borro " + Receipt.describe(row.kind, row.data, LocalDate.now(clock));
+            return "¿Seguro que " + what + "? Si es así, respondé:\nSÍ " + code + "\n(vale 5 minutos; PARAR cancela)";
         }
         if (tool.equals("corregir_registro")) {
             Validation.keys(args, "id,cambios");
@@ -106,7 +109,10 @@ public final class ToolExecutor {
         Store.Row current = store.find(p.row.id);
         if (current == null || current.version != p.row.version)
             return "El registro cambió o ya no existe. Pedí el borrado otra vez.";
-        return store.mutate(operationId, p.row, null, "Borré " + Receipt.describe(p.row.kind, p.row.data, LocalDate.now(clock)) + ".", clock.millis());
+        String done = p.row.kind.equals("memoria") ? "Borré de la libreta «" + p.row.data.optString("texto") + "». Ya me olvidé."
+                : p.row.kind.equals("recordatorio") ? "Borré el recordatorio «" + p.row.data.optString("texto") + "»."
+                : "Borré " + Receipt.describe(p.row.kind, p.row.data, LocalDate.now(clock)) + ".";
+        return store.mutate(operationId, p.row, null, done, clock.millis());
     }
     public synchronized void cancel() { pending.clear(); }
     private Store.Row requireRow(String id) throws Exception {

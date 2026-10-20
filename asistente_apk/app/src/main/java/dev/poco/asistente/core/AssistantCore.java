@@ -2,6 +2,7 @@ package dev.poco.asistente.core;
 
 import java.time.Clock;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
@@ -105,9 +106,19 @@ public final class AssistantCore {
                     }
                 }
                 if (normalized.startsWith("olvida ")) {
+                    String what = normalized.substring(7).replaceAll("[¿?¡!.,]", "").trim();
+                    String id = what;
+                    if (!what.matches("[0-9a-f-]{36}")) {
+                        // «olvidá lo del mondongo», «olvidá que no me gusta el mondongo»: find the note by its words
+                        String phrase = what.replaceFirst("^(lo de(l)?|lo que|que|de|del|eso de(l)?) ", "").trim();
+                        List<Store.Row> found = phrase.length() < 3 ? java.util.Collections.emptyList() : Memory.find(store.memories(), phrase);
+                        if (found.isEmpty()) return "No encontré nada anotado sobre «" + phrase + "». Preguntame «qué sabés de mí» y fijate cómo lo tengo.";
+                        if (found.size() > 1) return "Tengo varias cosas con «" + phrase + "». Decime un poco más para saber cuál borro.";
+                        id = found.get(0).id;
+                    }
                     synchronized (actionGate) {
                         if (ticket != generation.get()) return "Pedido cancelado.";
-                        return executor.execute(actor, operation, "olvidar", Json.object("id", normalized.substring(7)));
+                        return executor.execute(actor, operation, "olvidar", Json.object("id", id));
                     }
                 }
                 if (normalized.equals("listar recordatorios")) return Reminders.list(store.reminders());
