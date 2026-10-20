@@ -75,4 +75,25 @@ public class MemoryTest {
         org.junit.Assert.assertEquals("rutina", Memory.guessCategory("voy al gimnasio los lunes"));
         org.junit.Assert.assertEquals("otro", Memory.guessCategory("mi perro se llama toby"));
     }
+    @Test public void dictatedNotesPreserveOriginalAndForgetStillNeedsCode() throws Exception {
+        TestStore store = new TestStore();
+        AssistantCore.Settings settings = new AssistantCore.Settings() {
+            public String apiKey() { throw new AssertionError("No key access"); }
+            public String currency() { return "PYG"; } public String model() { return GeminiProtocol.MODELS[0]; }
+        };
+        AssistantCore core = new AssistantCore(store, settings, (k, m, b) -> { throw new AssertionError("No cloud"); }, new TestStore.MutableClock());
+        for (String fact : new String[]{"NO  me gusta el maní", "no me gusta el mani\u0301", "prefiero cafe\u0301, sin azúcar"}) {
+            core.receive("Che,  acordate   que  " + fact);
+            assertTrue(store.memories().stream().anyMatch(r -> fact.equals(r.data.optString("texto"))));
+        }
+        String proposal = core.receive("olvidá lo del café, sin azúcar");
+        assertTrue(proposal.contains("SÍ ")); assertEquals(3, store.memories().size());
+        core.receive("sí"); assertEquals(3, store.memories().size());
+        java.util.regex.Matcher code = java.util.regex.Pattern.compile("SÍ ([A-F0-9]{16})").matcher(proposal);
+        assertTrue(code.find());
+        core.receive("SÍ " + code.group(1)); assertEquals(2, store.memories().size());
+        assertTrue(core.receive("olvidá lo del maní").contains("varias"));
+        assertTrue(core.receive("olvidá la conversación").contains("Olvidé"));
+        assertTrue(store.conversation().isEmpty()); assertEquals(2, store.memories().size());
+    }
 }

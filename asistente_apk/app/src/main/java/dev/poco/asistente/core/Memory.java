@@ -53,7 +53,9 @@ public final class Memory {
     /** The notes whose text contains what David named in «olvidá lo del …» (both normalized). */
     public static List<Store.Row> find(List<Store.Row> rows, String phrase) {
         List<Store.Row> found = new java.util.ArrayList<>();
-        for (Store.Row row : rows) if (Rules.normalize(row.data.optString("texto")).contains(phrase)) found.add(row);
+        String needle = Rules.normalize(phrase).replaceAll("[¿?¡!.,]", "").trim();
+        if (needle.isEmpty()) return found;
+        for (Store.Row row : rows) if (Rules.normalize(row.data.optString("texto")).replaceAll("[¿?¡!.,]", "").contains(needle)) found.add(row);
         return found;
     }
     public static JSONArray quoted(List<Store.Row> rows) throws Exception {

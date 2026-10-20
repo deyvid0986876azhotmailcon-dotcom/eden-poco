@@ -98,8 +98,10 @@ public final class AssistantCore {
                 // «acordate que…», «no te olvides que…», «tené en cuenta que…» («anotá» is for records: gastos, peso): straight to the notebook (Gemini sometimes only says it did)
                 java.util.regex.Matcher note = java.util.regex.Pattern.compile("^(?:che,? )?(?:acordate|recorda|no te olvides|tene en cuenta) (?:de )?que (.{3,200})$").matcher(normalized);
                 if (note.matches()) {
-                    String original = text.trim();
-                    String fact = original.substring(Math.max(0, original.length() - note.group(1).length())).trim();
+                    // Normalization changes lengths (spaces, combining accents, case).
+                    // Skip prefix words in the original; never use normalized character offsets.
+                    int prefixWords = normalized.substring(0, note.start(1)).trim().split(" ").length;
+                    String fact = text.trim().split("\\s+", prefixWords + 1)[prefixWords];
                     synchronized (actionGate) {
                         if (ticket != generation.get()) return "Pedido cancelado.";
                         return executor.execute(actor, operation, "recordar", Json.object("texto", fact, "categoria", Memory.guessCategory(note.group(1))));
