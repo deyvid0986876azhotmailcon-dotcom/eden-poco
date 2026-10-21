@@ -243,7 +243,9 @@ public final class LiveSession {
         if (!running) return;
         running = false;
         main.removeCallbacks(micFallback);
-        if (socket != null) socket.close();
+        // Closing TLS writes close_notify, and a hang-up runs on the main thread (NetworkOnMainThreadException).
+        LiveSocket closing = socket;
+        if (closing != null) new Thread(closing::close, "live-close").start();
         if (mic != null) { try { mic.stop(); } catch (RuntimeException ignored) { } }
         if (speaker != null) { try { speaker.pause(); speaker.flush(); } catch (RuntimeException ignored) { } }
         events.onEnded(why);
