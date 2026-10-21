@@ -63,4 +63,18 @@ public class AudioProtocolTest {
         assertNull(speech.generate("a".repeat(25), "Hola", () -> true)); assertTrue(attempts.isEmpty());
         assertNull(speech.generate("", "Hola", () -> false)); assertTrue(attempts.isEmpty());
     }
+    @Test public void acceptsWavAndPcmWithChannelsFromTtsModels() throws Exception {
+        java.nio.ByteBuffer wav = java.nio.ByteBuffer.allocate(48).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        wav.put("RIFF".getBytes()).putInt(40).put("WAVE".getBytes()).put("fmt ".getBytes()).putInt(16)
+                .putShort((short) 1).putShort((short) 1).putInt(24000).putInt(48000).putShort((short) 2).putShort((short) 16)
+                .put("data".getBytes()).putInt(4).putShort((short) 1).putShort((short) -1);
+        org.junit.Assert.assertArrayEquals(new byte[]{1, 0, -1, -1}, AudioProtocol.wavPcm(wav.array()));
+        for (String mime : new String[]{"audio/wav", "audio/l16; rate=24000; channels=1", "audio/L16;codec=pcm;rate=24000"}) {
+            String data = java.util.Base64.getEncoder().encodeToString(mime.equals("audio/wav") ? wav.array() : new byte[]{1, 0});
+            org.json.JSONObject response = new org.json.JSONObject().put("candidates", new org.json.JSONArray().put(new org.json.JSONObject()
+                    .put("finishReason", "STOP").put("content", new org.json.JSONObject().put("parts", new org.json.JSONArray()
+                            .put(new org.json.JSONObject().put("inlineData", new org.json.JSONObject().put("mimeType", mime).put("data", data)))))));
+            org.junit.Assert.assertEquals("pcm_s16le", AudioProtocol.pcm(response).getString("format"));
+        }
+    }
 }

@@ -56,13 +56,45 @@ public final class AudioProtocol {
                 data = part.getJSONObject("inlineData");
             }
         }
-        if (data == null || !data.getString("mimeType").toLowerCase(java.util.Locale.ROOT)
-                .matches("audio/(?:l16|pcm);\\s*codec=pcm;\\s*rate=24000|audio/(?:l16|pcm);\\s*rate=24000"))
-            throw new IllegalArgumentException("Formato de voz no permitido.");
+        if (data == null) throw new IllegalArgumentException("Formato de voz no permitido.");
+        // TTS models answer either raw PCM («audio/L16;codec=pcm;rate=24000», «audio/l16; rate=24000; channels=1»)
+        // or a WAV file («audio/wav», the 3.8 models). Both end as mono 16-bit PCM at 24 kHz for the bridge.
+        String mime = data.getString("mimeType").toLowerCase(java.util.Locale.ROOT).replace(" ", "");
         String encoded = data.getString("data");
-        if (encoded.length() > (MAX_PCM + 2) / 3 * 4) throw new IllegalArgumentException("Voz demasiado larga.");
+        if (encoded.length() > (MAX_PCM + 64 + 2) / 3 * 4) throw new IllegalArgumentException("Voz demasiado larga.");
         byte[] bytes = Base64.getDecoder().decode(encoded);
+        if (mime.equals("audio/wav") || mime.equals("audio/x-wav") || mime.equals("audio/wave")) {
+            bytes = wavPcm(bytes);
+            encoded = Base64.getEncoder().encodeToString(bytes);
+        } else if (!mime.matches("audio/(?:l16|pcm)(?:;codec=pcm)?;rate=24000(?:;channels=1)?")) {
+            throw new IllegalArgumentException("Formato de voz no permitido.");
+        }
         if (bytes.length == 0 || bytes.length > MAX_PCM || bytes.length % 2 != 0) throw new IllegalArgumentException("PCM inválido.");
         return Json.object("format", "pcm_s16le", "sampleRate", 24000, "channels", 1, "data", encoded);
+    }
+
+    /** The samples of a WAV file, only if it is PCM, mono, 16-bit, 24 kHz (what the bridge converts to Opus). */
+    static byte[] wavPcm(byte[] wav) {
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(wav).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        if (wav.length < 12 || b.getInt(0) != 0x46464952 || b.getInt(8) != 0x45564157) // "RIFF" ... "WAVE"
+            throw new IllegalArgumentException("WAV inválido.");
+        boolean format = false;
+        for (int at = 12; at + 8 <= wav.length; ) {
+            int id = b.getInt(at); long size = b.getInt(at + 4) & 0xffffffffL;
+            int body = at + 8;
+            if (id == 0x20746d66) { // "fmt "
+                if (size < 16 || body + 16 > wav.length) throw new IllegalArgumentException("WAV inválido.");
+                if (b.getShort(body) != 1 || b.getShort(body + 2) != 1 || b.getInt(body + 4) != 24000 || b.getShort(body + 14) != 16)
+                    throw new IllegalArgumentException("Voz en un formato WAV no permitido.");
+                format = true;
+            } else if (id == 0x61746164) { // "data"
+                if (!format) throw new IllegalArgumentException("WAV inválido.");
+                // some encoders write 0xFFFFFFFF or a length past the end for streamed WAV: take what is there
+                int end = (int) Math.min(wav.length, body + size);
+                return java.util.Arrays.copyOfRange(wav, body, end - ((end - body) % 2));
+            }
+            at = body + (int) Math.min(size + (size & 1), wav.length);
+        }
+        throw new IllegalArgumentException("WAV sin datos.");
     }
 }
