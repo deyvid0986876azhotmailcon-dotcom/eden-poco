@@ -22,7 +22,9 @@ public final class AndroidPhone implements PhoneTools.Port {
         List<PhonePolicy.App> apps = new ArrayList<>();
         Intent query = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
         for (ResolveInfo r : app.getPackageManager().queryIntentActivities(query, 0))
-            if (r.activityInfo != null && r.activityInfo.exported && r.activityInfo.enabled)
+            // no activityInfo.enabled check: an activity-alias turned on at runtime (YT Music Morphe's icon)
+            // keeps enabled=false from its manifest, and the query already returns only enabled components
+            if (r.activityInfo != null && r.activityInfo.exported)
                 apps.add(new PhonePolicy.App(r.loadLabel(app.getPackageManager()).toString(), r.activityInfo.packageName));
         return apps;
     }
@@ -46,8 +48,33 @@ public final class AndroidPhone implements PhoneTools.Port {
             case "musica": return music(a);
             case "leer_notificaciones": return PhoneNotifications.read(a.has("app") ? PhonePolicy.resolve(a.getString("app"), apps()).pkg : null);
             case "consultar_agenda": return calendar(a);
+            case "clima": {
+                WeatherProtocol.Place place = WeatherProtocol.place(getJson(WeatherProtocol.geocodeUrl(a.getString("lugar"))));
+                int days = a.getInt("dias");
+                return ExternalData.wrap(WeatherProtocol.render(place, getJson(WeatherProtocol.forecastUrl(place, days)), days));
+            }
             default: throw new IllegalArgumentException("Esa herramienta no está permitida.");
         }
+    }
+    /** Open-Meteo only (the URLs come from WeatherProtocol, never from the model); small bounded answers. */
+    private static JSONObject getJson(String url) throws Exception {
+        java.net.HttpURLConnection connection = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+        connection.setConnectTimeout(8000); connection.setReadTimeout(8000);
+        connection.setInstanceFollowRedirects(false);
+        try {
+            if (connection.getResponseCode() != 200) throw new IllegalArgumentException("El servicio del clima no respondió. Probá en un rato.");
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            try (java.io.InputStream in = connection.getInputStream()) {
+                byte[] buffer = new byte[8192];
+                for (int n; (n = in.read(buffer)) != -1; ) {
+                    out.write(buffer, 0, n);
+                    if (out.size() > 256 * 1024) throw new IllegalArgumentException("El servicio del clima devolvió demasiados datos.");
+                }
+            }
+            return new JSONObject(out.toString("UTF-8"));
+        } catch (java.io.IOException e) {
+            throw new IllegalArgumentException("No pude consultar el clima. Revisá la conexión a internet.");
+        } finally { connection.disconnect(); }
     }
     private void launchApp(String pkg) {
         if (PhonePolicy.blocked(pkg)) throw new IllegalArgumentException("Esa no la puedo abrir.");
@@ -79,11 +106,15 @@ public final class AndroidPhone implements PhoneTools.Port {
         catch (RuntimeException e) { throw new IllegalArgumentException("No pude acceder al reproductor. Revisá el acceso a notificaciones."); }
         List<MediaController> permitted = new ArrayList<>();
         for (MediaController session : sessions) if (!PhonePolicy.blocked(session.getPackageName())) permitted.add(session);
-        if (permitted.size() != 1) throw new IllegalArgumentException("Abrí el reproductor que querés controlar y dejá solo uno activo.");
+        int[] states = new int[permitted.size()];
+        for (int i = 0; i < states.length; i++) {
+            PlaybackState state = permitted.get(i).getPlaybackState();
+            states[i] = state == null ? PlaybackState.STATE_NONE : state.getState();
+        }
         int key = action.equals("reproducir") ? KeyEvent.KEYCODE_MEDIA_PLAY : action.equals("pausar") ? KeyEvent.KEYCODE_MEDIA_PAUSE
                 : action.equals("siguiente") ? KeyEvent.KEYCODE_MEDIA_NEXT : KeyEvent.KEYCODE_MEDIA_PREVIOUS;
         // AudioManager's global routing can hit a blocked package; target the verified session instead.
-        MediaController target = permitted.get(0);
+        MediaController target = permitted.get(PhonePolicy.player(states, action));
         boolean down = target.dispatchMediaButtonEvent(new KeyEvent(KeyEvent.ACTION_DOWN, key));
         boolean up = target.dispatchMediaButtonEvent(new KeyEvent(KeyEvent.ACTION_UP, key));
         return down && up ? "Mandé al reproductor la orden de " + action + "." : "El reproductor no aceptó la orden. Probá desde su app.";

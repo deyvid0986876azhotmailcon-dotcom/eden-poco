@@ -48,6 +48,27 @@ public final class PhonePolicy {
         }
         return found.get(0);
     }
+    // android.media.session.PlaybackState values, here so the choice is testable on the JVM
+    public static final int PAUSED = 2, PLAYING = 3, BUFFERING = 6;
+    /**
+     * Which player a media key goes to, from the permitted sessions in Android's order (most recent first):
+     * pause/next/previous go to the one that is playing; play goes to the most recent paused one.
+     * Players left open but stopped (YouTube after a video) do not count.
+     */
+    public static int player(int[] states, String action) {
+        int paused = -1;
+        for (int i = 0; i < states.length; i++) {
+            boolean playing = states[i] == PLAYING || states[i] == BUFFERING;
+            if (playing) {
+                if (action.equals("reproducir")) throw new IllegalArgumentException("Ya está sonando.");
+                return i;
+            }
+            if (states[i] == PAUSED && paused < 0) paused = i;
+        }
+        if (action.equals("pausar")) throw new IllegalArgumentException("No hay nada sonando.");
+        if (paused < 0) throw new IllegalArgumentException("No encontré un reproductor abierto. Abrí Spotify o YouTube Music y poné algo.");
+        return paused;
+    }
     private static final Pattern SECRET = Pattern.compile("\\b(codigo|code|otp|verificacion|verification|pin|clave|contrasena|password)\\b");
     private static final Pattern NO_SHARE = Pattern.compile("(no|nunca|jamas|not|never|don't|dont).{0,60}(compart|share|divulg|revel|digas|diga)");
     public static String redact(String text) {

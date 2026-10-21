@@ -27,7 +27,7 @@ public final class LiveSession {
     static final String MODEL = "models/gemini-3.1-flash-live-preview";
     public static final String[] CALL_TOOLS = {"recordar", "programar_recordatorio", "listar_recordatorios", "registrar_movimiento",
             "registrar_peso", "registrar_comida", "registrar_entreno", "consultar_resumen",
-            "abrir_app", "alarma", "temporizador", "musica", "leer_notificaciones", "consultar_agenda", "buscar_en_internet"};
+            "abrir_app", "alarma", "temporizador", "musica", "leer_notificaciones", "consultar_agenda", "clima", "buscar_en_internet"};
     private static final int IN_RATE = 16000, OUT_RATE = 24000;
 
     private final AssistantCore core;

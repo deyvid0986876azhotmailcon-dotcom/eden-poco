@@ -36,4 +36,16 @@ public class PhonePolicyTest {
         IllegalArgumentException blocked = assertThrows(IllegalArgumentException.class, () -> PhonePolicy.resolve("mango", Collections.singletonList(new PhonePolicy.App("Mango", "com.mangopayment.mangoapp"))));
         assertTrue(blocked.getMessage().contains("no la puedo"));
     }
+    @Test public void mediaKeysGoToThePlayingPlayerNotToStoppedOnes() {
+        int stopped = 1, none = 0;
+        // YT Music paused and YouTube left open stopped (seen on David's phone): play resumes YT Music
+        assertEquals(0, PhonePolicy.player(new int[]{PhonePolicy.PAUSED, stopped}, "reproducir"));
+        assertEquals(1, PhonePolicy.player(new int[]{stopped, PhonePolicy.PLAYING}, "pausar"));
+        assertEquals(1, PhonePolicy.player(new int[]{PhonePolicy.PAUSED, PhonePolicy.BUFFERING}, "siguiente"));
+        assertEquals(0, PhonePolicy.player(new int[]{PhonePolicy.PAUSED, stopped}, "anterior"));
+        assertThrows(IllegalArgumentException.class, () -> PhonePolicy.player(new int[]{PhonePolicy.PAUSED, stopped}, "pausar"));
+        assertThrows(IllegalArgumentException.class, () -> PhonePolicy.player(new int[]{PhonePolicy.PLAYING}, "reproducir"));
+        assertThrows(IllegalArgumentException.class, () -> PhonePolicy.player(new int[]{stopped, none}, "siguiente"));
+        assertThrows(IllegalArgumentException.class, () -> PhonePolicy.player(new int[0], "reproducir"));
+    }
 }

@@ -247,7 +247,7 @@ public final class AssistantCore {
         } catch (Exception e) {
             String message = e.getMessage() == null ? "" : e.getMessage();
             if ("buscar_en_internet".equals(tool))
-                result = message.contains("429") ? "La búsqueda no tiene cupo disponible con tu clave de Gemini. Probá más tarde."
+                result = message.contains("429") ? "La búsqueda de Google no viene incluida en la clave gratis de Gemini, así que por ahora no puedo buscar en internet. El clima sí: pedime «clima en» y la ciudad."
                         : "No pude completar la búsqueda con Gemini. Revisá la clave o probá más tarde.";
             else result = e instanceof IllegalArgumentException ? message : "No pude completar la lectura. Revisá los permisos en Ajustes.";
         }
