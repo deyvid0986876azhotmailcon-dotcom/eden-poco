@@ -31,7 +31,8 @@ public class GeminiSpeechTest {
                     return new GeminiClient.Response(400, ""); // force the safe plain spoken fallback
                 }
                 assertFalse(body.contains("Contenido externo"));
-                assertEquals("Nos vemos a las 18:30", request.getJSONArray("contents").getJSONObject(0).getJSONArray("parts").getJSONObject(0).getString("text"));
+                assertTrue(request.getJSONArray("contents").getJSONObject(0).getJSONArray("parts").getJSONObject(0).getString("text")
+                        .endsWith("## TRANSCRIPCIÓN\nNos vemos a las 18:30"));
                 return new GeminiClient.Response(400, "");
             } catch (org.json.JSONException e) { throw new AssertionError(e); }
         });
