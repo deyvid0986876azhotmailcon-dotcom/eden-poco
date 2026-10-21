@@ -54,6 +54,8 @@ public class AudioProtocolTest {
         List<String> attempts = new ArrayList<>();
         String body = voice("audio/L16;rate=24000", new byte[4], "STOP").toString();
         GeminiSpeech speech = new GeminiSpeech((model, key, request) -> {
+            // the spoken summary goes to the text models first; unavailable, it falls back to the plain text
+            if (!java.util.Arrays.asList(AudioProtocol.TTS_MODELS).contains(model)) return new GeminiClient.Response(503, "");
             attempts.add(model);
             return new GeminiClient.Response(attempts.size() == 1 ? 404 : attempts.size() == 2 ? 429 : 200, body);
         });
