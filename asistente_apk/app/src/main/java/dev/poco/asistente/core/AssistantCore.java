@@ -202,7 +202,10 @@ public final class AssistantCore {
                     String mode = chatMode.command(normalized, settings.proEnabled());
                     if (mode != null) return mode;
                 }
-                if (chatMode.active() && settings.proEnabled()) return chat(text, ticket);
+                // In chat mode the fast model still decides first: a request («buscá el clima», an alarm) runs
+                // its tool; only conversation goes to Pro (on 2026-10-21 Pro refused a weather search as «a friend»).
+                boolean chatting = chatMode.active() && settings.proEnabled();
+                if (chatting && ProProtocol.sensitive(text)) return ProProtocol.PRIVATE;
                 String key;
                 try { key = settings.apiKey(); }
                 catch (Exception e) { return "No pude abrir la clave cifrada. Borrala y volvé a pegarla en Ajustes. Las reglas locales siguen disponibles."; }
@@ -213,8 +216,9 @@ public final class AssistantCore {
                 synchronized (actionGate) {
                     if (ticket != generation.get()) return "Pedido cancelado. No ejecuté la respuesta de Gemini.";
                     // which models were busy before one answered is not for David: he gets only the answer
-                    if (reply.tool == null) return reply.text;
+                    if (reply.tool == null && !chatting) return reply.text;
                 }
+                if (reply.tool == null) return chat(text, ticket);
                 if ("buscar_en_internet".equals(reply.tool)) SearchProtocol.requireUserQuery(Validation.string(reply.args, "consulta", 300), text);
                 if ("charla_profunda".equals(reply.tool)) {
                     Validation.keys(reply.args, "");

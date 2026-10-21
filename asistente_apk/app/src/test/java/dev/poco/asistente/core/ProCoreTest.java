@@ -149,4 +149,18 @@ public class ProCoreTest {
         for (String code : new String[]{"SÍ <CÓDIGO>", "si abc123", "S\u200bÍ ABCDEF0123456789", "sí ABCXYZ"})
             assertEquals("Hola", ProProtocol.answer("Hola\n" + code));
     }
+    @Test public void inChatModeARequestStillRunsItsToolAndOnlyConversationGoesToPro() throws Exception {
+        // 2026-10-21: «necesito que busques el clima para mañana» in chat mode got a friendly refusal from Pro
+        AtomicInteger proCalls = new AtomicInteger();
+        AssistantCore core = core((k, m, b) -> b.toString().contains("busques el clima")
+                        ? new GeminiProtocol.Reply(null, "clima", Json.object("lugar", "Asunción", "dias", 2), "")
+                        : text("Gratis"),
+                (type, prompt, model, cancelled) -> { proCalls.incrementAndGet(); return "Te escucho"; },
+                (tool, args) -> { assertEquals("clima", tool); return "Mañana: con lluvia, máxima 29 °C."; });
+        core.receive("charlemos");
+        assertTrue(core.receive("Bueno, necesito que busques el clima para mañana en Asunción").contains("Mañana: con lluvia"));
+        assertEquals(0, proCalls.get());
+        assertEquals("Te escucho", core.receive("¿Y vos qué pensás de la soledad?"));
+        assertEquals(1, proCalls.get());
+    }
 }
