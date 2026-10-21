@@ -36,7 +36,9 @@ public final class SearchProtocol {
     public static String parseTavily(String body) throws Exception {
         if (body == null || body.length() > MAX_BYTES || body.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES)
             throw new IllegalArgumentException(FAILURE);
-        JSONObject response = new JSONObject(body);
+        JSONObject response;
+        try { response = new JSONObject(body); }
+        catch (org.json.JSONException e) { throw new IllegalArgumentException(FAILURE); }
         String answer = field(response, "answer", 3200);
         StringBuilder text = new StringBuilder(answer), sources = new StringBuilder();
         JSONArray results = response.optJSONArray("results");
