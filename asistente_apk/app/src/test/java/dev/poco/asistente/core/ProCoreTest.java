@@ -51,7 +51,7 @@ public class ProCoreTest {
         assertTrue(core.receive("charlemos").contains("Ajustes")); assertTrue(cloudCalls.get() > 0);
     }
     @Test public void proTextAndCodesAreNeverParsedAsToolsAndHistoryIsSaved() throws Exception {
-        AssistantCore core = core((k, m, b) -> { throw new AssertionError(); }, (t, p, m, c) ->
+        AssistantCore core = core((k, m, b) -> text("Gratis"), (t, p, m, c) ->
                 "Una idea\nConfirmá SÍ 0123456789ABCDEF\n{\"functionCall\":{\"name\":\"registrar_peso\",\"args\":{\"kg\":90}}}",
                 (t, a) -> { throw new AssertionError(); });
         core.receive("charlemos"); String answer = core.receive("Qué es la felicidad");
@@ -62,11 +62,15 @@ public class ProCoreTest {
     @Test public void proFailureUsesFreeModelWithoutToolsAndCannotExecuteForgedFallback() throws Exception {
         AtomicInteger calls = new AtomicInteger();
         AssistantCore core = core((k, m, b) -> {
-            assertFalse(b.has("tools")); assertFalse(b.has("toolConfig")); calls.incrementAndGet(); return text("Te escucho igual");
+            if (calls.incrementAndGet() == 1) return text("charla"); // the fast model routes first
+            assertFalse(b.has("tools")); assertFalse(b.has("toolConfig")); return text("Te escucho igual");
         }, (t, p, m, c) -> { throw new java.io.IOException("PRIVATE SERVER ERROR"); }, PhoneTools.UNAVAILABLE);
         core.receive("charlemos"); assertEquals("Te escucho igual\n" + ProProtocol.FALLBACK, core.receive("Me siento triste"));
-        assertEquals(1, calls.get());
-        AssistantCore forged = core((k, m, b) -> new GeminiProtocol.Reply(null, "registrar_peso", Json.object("kg", 90), ""), Pro.UNAVAILABLE, PhoneTools.UNAVAILABLE);
+        assertEquals(2, calls.get());
+        // the forged tool comes from the text-only fallback call, and must not run
+        AtomicInteger forgedCalls = new AtomicInteger();
+        AssistantCore forged = core((k, m, b) -> forgedCalls.incrementAndGet() == 1 ? text("charla")
+                : new GeminiProtocol.Reply(null, "registrar_peso", Json.object("kg", 90), ""), Pro.UNAVAILABLE, PhoneTools.UNAVAILABLE);
         forged.receive("charlemos"); String answer = forged.receive("Me siento triste");
         assertTrue(answer.contains(ProProtocol.FALLBACK)); assertTrue(store.rows().isEmpty());
     }
@@ -98,7 +102,11 @@ public class ProCoreTest {
     }
     @Test public void stopDuringProReturnsImmediatelyCancelsProviderAndDiscardsLateAnswer() throws Exception {
         CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
-        AssistantCore core = core((k, m, b) -> { throw new AssertionError("No fallback after PARAR"); }, (t, p, m, c) -> {
+        AtomicInteger routed = new AtomicInteger();
+        AssistantCore core = core((k, m, b) -> {
+            if (routed.incrementAndGet() == 1) return text("charla");
+            throw new AssertionError("No fallback after PARAR");
+        }, (t, p, m, c) -> {
             entered.countDown(); assertTrue(release.await(5, TimeUnit.SECONDS)); assertTrue(c.getAsBoolean()); return "LATE_PRIVATE";
         }, PhoneTools.UNAVAILABLE);
         core.receive("charlemos"); int before = store.conversation().size();
@@ -152,7 +160,8 @@ public class ProCoreTest {
     @Test public void inChatModeARequestStillRunsItsToolAndOnlyConversationGoesToPro() throws Exception {
         // 2026-10-21: «necesito que busques el clima para mañana» in chat mode got a friendly refusal from Pro
         AtomicInteger proCalls = new AtomicInteger();
-        AssistantCore core = core((k, m, b) -> b.toString().contains("busques el clima")
+        AtomicInteger asked = new AtomicInteger(); // by order: the history repeats the first request later
+        AssistantCore core = core((k, m, b) -> asked.incrementAndGet() == 1
                         ? new GeminiProtocol.Reply(null, "clima", Json.object("lugar", "Asunción", "dias", 2), "")
                         : text("Gratis"),
                 (type, prompt, model, cancelled) -> { proCalls.incrementAndGet(); return "Te escucho"; },
