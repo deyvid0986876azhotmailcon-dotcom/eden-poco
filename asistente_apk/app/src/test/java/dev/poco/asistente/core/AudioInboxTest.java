@@ -93,7 +93,7 @@ public class AudioInboxTest {
         spoken[0] = "borrar " + store.rows().get(0).id;
         CompletableFuture<String> proposal = inbox.acceptAudio("delete", AUDIO, core.cancellationToken());
         tasks.remove().run();
-        java.util.regex.Matcher code = java.util.regex.Pattern.compile("SÍ ([a-f0-9]{16})").matcher(proposal.join());
+        java.util.regex.Matcher code = java.util.regex.Pattern.compile("SÍ ([A-Fa-f0-9]{16})").matcher(proposal.join());
         assertTrue(code.find()); assertEquals(1, store.rows().size());
         assertTrue(core.receive("SÍ " + code.group(1)).contains("no corresponde"));
         CompletableFuture<String> confirm = inbox.accept("confirm", "SÍ " + code.group(1));
