@@ -20,12 +20,15 @@ public final class AssistantCore {
         default boolean phoneEnabled() { return false; }
         default void disablePhone() {}
         default void recordSearch() {}
+        default boolean proEnabled() { return true; }
     }
     private final Store store;
     private final Settings settings;
     private final Cloud cloud;
     private final Clock clock;
     private final ToolExecutor executor;
+    private final Pro pro;
+    private final ChatMode chatMode;
     private volatile boolean proactivePaused;
     public boolean proactivePaused() { return proactivePaused; }
     private final AtomicLong generation = new AtomicLong();
@@ -37,9 +40,14 @@ public final class AssistantCore {
         this(store, settings, cloud, clock, elapsedMillis, PhoneTools.UNAVAILABLE);
     }
     public AssistantCore(Store store, Settings settings, Cloud cloud, Clock clock, LongSupplier elapsedMillis, PhoneTools.Port phone) {
+        this(store, settings, cloud, clock, elapsedMillis, phone, Pro.UNAVAILABLE);
+    }
+    public AssistantCore(Store store, Settings settings, Cloud cloud, Clock clock, LongSupplier elapsedMillis, PhoneTools.Port phone, Pro pro) {
         this.store = store; this.settings = settings; this.cloud = cloud; this.clock = clock;
+        this.pro = pro; this.chatMode = new ChatMode(elapsedMillis);
         executor = new ToolExecutor(store, clock, elapsedMillis, settings::phoneEnabled, phone);
     }
+    public void clearChatMode() { chatMode.clear(); }
     public String receive(String text) { return receive(text, Source.LOCAL_USER, UUID.randomUUID().toString()); }
 
     // ---- voice calls (call/LiveSession): the same persona, notebook and executor as text
@@ -120,6 +128,8 @@ public final class AssistantCore {
             synchronized (actionGate) {
                 if (ticket != generation.get()) return "Pedido cancelado antes de empezar.";
                 proactivePaused = false;
+                if (!settings.proEnabled()) chatMode.clear();
+                chatMode.touch();
             }
             String actor = source == Source.LOCAL_USER ? "local" : "whatsapp";
             String operation = actor + ":" + requestId;
@@ -187,6 +197,12 @@ public final class AssistantCore {
                         return executor.execute(actor, operation, fixed.tool, fixed.args);
                     }
                 }
+                synchronized (actionGate) {
+                    if (ticket != generation.get()) return "Pedido cancelado.";
+                    String mode = chatMode.command(normalized, settings.proEnabled());
+                    if (mode != null) return mode;
+                }
+                if (chatMode.active() && settings.proEnabled()) return chat(text, ticket);
                 String key;
                 try { key = settings.apiKey(); }
                 catch (Exception e) { return "No pude abrir la clave cifrada. Borrala y volvé a pegarla en Ajustes. Las reglas locales siguen disponibles."; }
@@ -200,6 +216,10 @@ public final class AssistantCore {
                     if (reply.tool == null) return reply.text;
                 }
                 if ("buscar_en_internet".equals(reply.tool)) SearchProtocol.requireUserQuery(Validation.string(reply.args, "consulta", 300), text);
+                if ("charla_profunda".equals(reply.tool)) {
+                    Validation.keys(reply.args, "");
+                    return chat(text, ticket);
+                }
                 return dispatch(actor, operation, reply.tool, reply.args, ticket);
             } catch (IllegalArgumentException e) {
                 return e.getMessage(); // only local validation/network messages, never raw server bodies
@@ -216,11 +236,39 @@ public final class AssistantCore {
     }
     public String stop() {
         synchronized (actionGate) {
-            generation.incrementAndGet(); proactivePaused = true; executor.cancel();
+            generation.incrementAndGet(); proactivePaused = true; executor.cancel(); chatMode.clear();
             try { settings.disablePhone(); }
             catch (RuntimeException e) { return "Cancelé los pedidos. No pude guardar el apagado del control; revisá el interruptor en Ajustes antes de reiniciar la app."; }
         }
         return "Cancelé las confirmaciones pendientes y la respuesta en curso. Apagué el control del teléfono; solo se vuelve a encender desde la app.";
+    }
+    private String chat(String text, long ticket) throws Exception {
+        if (ticket != generation.get()) return "Pedido cancelado.";
+        // Never send current bank/credential text to either chat provider.
+        if (ProProtocol.sensitive(text)) return ProProtocol.PRIVATE;
+        if (settings.proEnabled()) {
+            try {
+                String answer = ProProtocol.answer(pro.generate("charla", ProProtocol.chatPrompt(text, store.conversation(), store.memories()),
+                        ProProtocol.CHAT_MODEL, () -> ticket != generation.get() || !settings.proEnabled()));
+                if (ticket != generation.get() || !settings.proEnabled()) return "Pedido cancelado.";
+                return answer;
+            } catch (Exception ignored) { /* Isolated text-only fallback below. */ }
+        }
+        if (ticket != generation.get()) return "Pedido cancelado.";
+        String answer = "No pude responder ahora; probá en un rato.";
+        try {
+            String key = settings.apiKey();
+            if (key != null && !key.isEmpty()) {
+                // Reuse ONLY the already filtered Pro context, not financial summaries or raw old history.
+                org.json.JSONObject body = GeminiProtocol.request(text, "", LocalDate.now(clock), settings.currency());
+                body = ProProtocol.fallbackRequest(body);
+                body.put("contents", new org.json.JSONArray().put(Json.object("role", "user", "parts", new org.json.JSONArray().put(
+                        Json.object("text", ProProtocol.chatPrompt(text, store.conversation(), store.memories()))))));
+                GeminiProtocol.Reply fallback = cloud.generate(key, settings.model(), body, () -> ticket != generation.get());
+                if (fallback.tool == null) answer = ProProtocol.answer(fallback.text);
+            }
+        } catch (Exception ignored) { }
+        return ticket != generation.get() ? "Pedido cancelado." : answer + "\n" + ProProtocol.FALLBACK;
     }
     private String dispatch(String actor, String operation, String tool, org.json.JSONObject args, long ticket) throws Exception {
         return dispatch(actor, operation, tool, args, ticket, () -> false);
@@ -244,11 +292,20 @@ public final class AssistantCore {
                 if (cancelled.getAsBoolean()) throw new IllegalArgumentException("Pedido cancelado.");
                 // Informational attempts, including failures. A counter write must never block a search.
                 try { settings.recordSearch(); } catch (RuntimeException ignored) { }
-                result = executor.readPhone(tool, checked);
-                if (!cancelled.getAsBoolean()) {
-                    try {
-                        result = SearchProtocol.summary(cloud.generate(settings.apiKey(), settings.model(), SearchProtocol.summaryRequest(result), cancelled));
-                    } catch (Exception ignored) { /* Keep the bounded Tavily text and its sources. */ }
+                result = null;
+                if (settings.proEnabled()) try {
+                    result = SearchProtocol.summary(new GeminiProtocol.Reply(ProProtocol.answer(pro.generate("busqueda",
+                            ProProtocol.searchPrompt(checked.getString("consulta")), ProProtocol.SEARCH_MODEL,
+                            () -> cancelled.getAsBoolean() || !settings.proEnabled())), null, null, ""));
+                } catch (Exception ignored) { /* Tavily remains the fallback. */ }
+                if (cancelled.getAsBoolean()) throw new IllegalArgumentException("Pedido cancelado.");
+                if (result == null) {
+                    result = executor.readPhone(tool, checked);
+                    if (!cancelled.getAsBoolean()) {
+                        try {
+                            result = SearchProtocol.summary(cloud.generate(settings.apiKey(), settings.model(), SearchProtocol.summaryRequest(result), cancelled));
+                        } catch (Exception ignored) { /* Keep the bounded Tavily text and its sources. */ }
+                    }
                 }
             } else result = executor.readPhone(tool, checked);
         } catch (Exception e) {

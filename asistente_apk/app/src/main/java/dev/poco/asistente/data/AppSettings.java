@@ -18,6 +18,10 @@ public final class AppSettings implements dev.poco.asistente.core.Proactive.Sett
         bridgeVault = new KeyVault(context, "bridge_vault", "dev.poco.asistente.bridge.v1");
     }
     public boolean bridgeEnabled() { return prefs.getBoolean("bridge_enabled", false); }
+    @Override public boolean proEnabled() { return prefs.getBoolean("pro_enabled", true); }
+    public void setProEnabled(boolean enabled) {
+        if (!prefs.edit().putBoolean("pro_enabled", enabled).commit()) throw new IllegalStateException("No se guardó el ajuste Pro.");
+    }
     private static final Object SEARCH_COUNT_LOCK = new Object();
     private static String searchMonth() { return java.time.YearMonth.now(dev.poco.asistente.core.Reminders.ZONE).toString(); }
     public long searchesThisMonth() {

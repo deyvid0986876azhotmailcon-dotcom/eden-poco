@@ -17,7 +17,7 @@ async function harness(prelocked = false, manual = false) {
   fs.mkdirSync(root); fs.mkdirSync(path.dirname(png), { recursive: true });
   fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify(config));
   if (prelocked) { fs.writeFileSync(path.join(root, 'running.lock'), 'other'); fs.writeFileSync(png, 'other QR'); }
-  const sockets = [], logs = [], posts = [], timers = new Set(), exits = [], backupCalls = [];
+  const sockets = [], logs = [], posts = [], timers = new Set(), exits = [], backupCalls = [], proCalls = [];
   const fakeProcess = new EventEmitter();
   fakeProcess.argv = ['node', 'index.cjs', ...(manual ? ['--respaldo-ahora'] : [])];
   fakeProcess.umask = () => {}; fakeProcess.pid = 123; fakeProcess.exit = code => exits.push(code);
@@ -31,6 +31,13 @@ async function harness(prelocked = false, manual = false) {
     setTimeout: (fn, delay) => { const timer = { fn, delay }; timers.add(timer); return timer; },
     clearTimeout: timer => timers.delete(timer),
     require: name => {
+      if (name === './pro.cjs') return {
+        ProRunner: class { cancel() { proCalls.push('cancel'); } },
+        createProServer: configured => {
+          assert.equal(configured.token, config.token);
+          return { async start() { proCalls.push('start'); }, async close() { proCalls.push('close'); } };
+        }
+      };
       if (name === './respaldo.cjs') return {
         Backups: class { start() { backupCalls.push('start'); } stop() {} request() { backupCalls.push('request'); } },
         signalBackup: directory => backupCalls.push(directory)
@@ -61,7 +68,7 @@ async function harness(prelocked = false, manual = false) {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'index.cjs'), 'utf8')
     + '\nglobalThis.hooks = { shutdown, session: () => connection, queue: () => queue.tail };', sandbox);
   await tick();
-  return { home, root, auth, png, config, sockets, logs, posts, timers, exits, backupCalls, fakeProcess, hooks: sandbox.hooks,
+  return { home, root, auth, png, config, sockets, logs, posts, timers, exits, backupCalls, proCalls, fakeProcess, hooks: sandbox.hooks,
     async close() {
       sandbox.hooks.shutdown(); await tick();
       assert.equal(path.dirname(path.resolve(home)), path.resolve(__dirname)); fs.rmSync(home, { recursive: true });
@@ -166,5 +173,21 @@ test('a second process refuses to run and does not remove the first process QR o
     assert.deepEqual(h.exits, [1]); assert.equal(h.sockets.length, 0);
     assert.equal(fs.readFileSync(h.png, 'utf8'), 'other QR');
     assert.equal(fs.readFileSync(path.join(h.root, 'running.lock'), 'utf8'), 'other');
+  } finally { await h.close(); }
+});
+
+test('Pro starts and stops with bridge; authenticated PARAR cancels CLI immediately', async () => {
+  const h = await harness();
+  try {
+    assert.deepEqual(h.proCalls, ['start']);
+    const socket = h.sockets[0];
+    socket.ev.emit('connection.update', { connection: 'open' }); await h.hooks.session().events;
+    socket.ev.emit('messages.upsert', { type: 'notify', messages: [{
+      key: { fromMe: false, id: 'STOP_1', remoteJid: h.config.remitente },
+      messageTimestamp: Math.floor(Date.now() / 1000), message: { conversation: 'PARAR' }
+    }] });
+    assert.deepEqual(h.proCalls, ['start', 'cancel']);
+    await h.hooks.queue(); h.hooks.shutdown(); await tick();
+    assert.deepEqual(h.proCalls, ['start', 'cancel', 'close']);
   } finally { await h.close(); }
 });

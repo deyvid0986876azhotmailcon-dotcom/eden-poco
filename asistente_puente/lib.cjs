@@ -5,7 +5,9 @@ const crypto = require('node:crypto');
 const FALLBACK = 'No pude procesar tu mensaje, proba de nuevo';
 function configuration(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
-      || !['puerto,remitente,token', 'puerto,remitente,respaldo_hora,token'].includes(Object.keys(value).sort().join(','))
+      || Object.keys(value).some(k => !['puerto', 'remitente', 'token', 'respaldo_hora', 'pro_puerto'].includes(k))
+      || (value.pro_puerto !== undefined && (!Number.isInteger(value.pro_puerto) || value.pro_puerto < 1024 || value.pro_puerto > 65535 || value.pro_puerto === value.puerto))
+      || value.puerto === (value.pro_puerto === undefined ? 8766 : value.pro_puerto)
       || (value.respaldo_hora !== undefined && (typeof value.respaldo_hora !== 'string' || !/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(value.respaldo_hora)))
       || !Number.isInteger(value.puerto) || value.puerto < 1024 || value.puerto > 65535
       || typeof value.token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.token)

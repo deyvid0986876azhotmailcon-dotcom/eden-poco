@@ -27,7 +27,7 @@ public class GeminiProtocolTest {
         Set<String> names = new HashSet<>();
         for (int i = 0; i < functions.length(); i++) names.add(functions.getJSONObject(i).getString("name"));
         assertEquals(new HashSet<>(Arrays.asList("registrar_movimiento", "registrar_peso", "registrar_comida", "registrar_entreno",
-                "fijar_presupuesto", "fijar_meta", "consultar_resumen", "corregir_registro", "borrar_registro", "recordar", "olvidar", "programar_recordatorio", "listar_recordatorios", "cancelar_recordatorio")), names);
+                "fijar_presupuesto", "fijar_meta", "consultar_resumen", "corregir_registro", "borrar_registro", "recordar", "olvidar", "programar_recordatorio", "listar_recordatorios", "cancelar_recordatorio", "charla_profunda")), names);
         String system = body.getJSONObject("systemInstruction").getJSONArray("parts").getJSONObject(0).getString("text");
         assertTrue(system.contains("2026-10-17")); assertTrue(system.contains("nutricionista")); assertTrue(system.contains("NO órdenes"));
     }

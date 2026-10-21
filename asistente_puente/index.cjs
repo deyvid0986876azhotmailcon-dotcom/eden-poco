@@ -3,6 +3,7 @@ process.umask(0o077);
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { ProRunner, createProServer } = require('./pro.cjs');
 const { OwnerChat, PendingPoller } = require('./pendientes.cjs');
 const { isStop } = require('./lib.cjs');
 const { downloadAudio, sendReply, LISTEN_FAILED } = require('./audio.cjs');
@@ -16,7 +17,7 @@ const qrFile = path.join(os.homedir(), 'storage', 'downloads', 'asistente_qr.png
 let lockOwned = false, exiting = false, connection = null, reconnect = null, attempts = 0;
 let config, ledger, makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, logger, QRCode;
 let downloading = 0;
-let backups, ownerChat, pending;
+let backups, ownerChat, pending, pro, proServer;
 const queue = new DeliveryQueue(async (message, current) => {
   let response;
   if (message.media) {
@@ -123,7 +124,7 @@ async function connect() {
         if (decision.id && !ledger.claim(config.remitente, decision.id)) { log('Ignorado: id repetido'); continue; }
         if (decision.reason) { log(`Ignorado: ${decision.reason}`); continue; }
         ownerChat.accept(message, event.type, session.connectedAt);
-        if (isStop(decision.text)) pending.pause(); else pending.resume();
+        if (isStop(decision.text)) { pending.pause(); pro?.cancel(); } else pending.resume();
         log(decision.media ? 'Aceptado: audio privado del remitente autorizado' : 'Aceptado: texto privado del remitente autorizado');
         if (!queue.add(decision)) log('Fallido: cola llena; no se ejecuta ni se reintenta');
       } catch { fatal(); return; }
@@ -139,7 +140,7 @@ function shutdown(code = 0) {
   }
   if (lockOwned) clearQr();
   // Wait for auth writes before releasing ownership; SIGKILL leaves a lock for manual inspection.
-  Promise.allSettled([connection?.writes, backups?.stop(), pending?.running]).finally(() => {
+  Promise.allSettled([connection?.writes, backups?.stop(), pending?.running, proServer?.close()]).finally(() => {
     if (lockOwned) {
       try { fs.unlinkSync(path.join(root, 'running.lock')); } catch { }
     }
@@ -163,6 +164,8 @@ async function main() {
   fs.writeFileSync(path.join(root, 'running.lock'), String(process.pid) + '\n', { flag: 'wx', mode: 0o600 }); lockOwned = true;
   const filename = path.join(root, 'config.json'); fs.chmodSync(filename, 0o600);
   config = configuration(JSON.parse(fs.readFileSync(filename, 'utf8')));
+  pro = new ProRunner({ log }); proServer = createProServer(config, pro);
+  await proServer.start();
   ledger = new Ledger(path.join(root, 'seen.ids'));
   backups = new Backups(root, config, log);
   ownerChat = new OwnerChat(root, config.remitente);

@@ -6,6 +6,10 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 public final class GeminiProtocol {
+    public static final String PERSONA = "Hablás como una chica de Asunción de 22 años, amiga de confianza de David: "
+            + "castellano paraguayo con voseo, cercana, alegre y con humor, en femenino cuando hablás de vos misma. "
+            + "Sin emojis. Guaraní solo en expresiones comunes (che, nomás, mba'eichapa, nde), nunca palabras raras; "
+            + "como máximo una expresión por mensaje y muchas veces ninguna, nunca en montos, fechas o datos.";
     public static final String[] MODELS = {"gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash"};
     public static final class Reply {
         public final String text, tool, notice;
@@ -25,11 +29,7 @@ public final class GeminiProtocol {
     public static JSONObject request(String message, String context, LocalDate today, String currency,
             java.util.List<Memory.Exchange> history, java.util.List<Store.Row> memories, boolean phoneEnabled) throws Exception {
         String instruction = "Sos la asistente personal de finanzas y vida sana de David, que vive en Paraguay. "
-                + "Hablás como una chica de Asunción de 22 años que es su amiga de confianza: castellano paraguayo de ciudad, "
-                + "con voseo, cercana, alegre y con humor, en femenino cuando hablás de vos misma (contenta, segura). "
-                + "Casi todo en castellano: el guaraní es solo alguna palabrita suelta como la usa la gente joven de Asunción "
-                + "(che, luego, nio, ndaje, pio, upéi), no más de una por mensaje y en muchos mensajes ninguna; nunca frases enteras en guaraní "
-                + "ni en montos, fechas o datos. Podés usar giros de Asunción como «re» (re bien), «posta», «tipo», «ya», «dale», «bien ahí». "
+                + PERSONA + " Podés usar giros de Asunción como «re» (re bien), «posta», «tipo», «ya», «dale», «bien ahí». "
                 + "Nada de emojis. Respuestas breves, como un mensaje de WhatsApp; si das una lista, que sea corta. "
                 + "Celebrá los avances (ganar peso, entrenar, ahorrar) y cuando gaste de más avisale con cariño, sin retar. "
                 + "Si te saluda, saludá de vuelta y preguntale cómo va antes de ofrecer ayuda. "
@@ -67,6 +67,7 @@ public final class GeminiProtocol {
     }
     public static JSONArray declarations(boolean phoneEnabled) throws Exception {
         JSONArray declarations = new JSONArray();
+        declarations.put(function("charla_profunda", "Conversar esta vez sobre una pregunta personal o filosófica profunda del mensaje actual; sin acciones ni argumentos.", new JSONObject(), new JSONArray()));
         String[] names = {"registrar_movimiento", "registrar_peso", "registrar_comida", "registrar_entreno", "fijar_presupuesto", "fijar_meta"};
         for (int i = 0; i < names.length; i++) declarations.put(Json.object("name", names[i], "description", "Proponer " + Validation.KINDS[i] + "; preguntar si falta información.", "parameters", Validation.schema(Validation.KINDS[i])));
         declarations.put(Json.object("name", "consultar_resumen", "description", "Consultar saldo, categorías, presupuestos, peso, entrenos, metas e IDs.",

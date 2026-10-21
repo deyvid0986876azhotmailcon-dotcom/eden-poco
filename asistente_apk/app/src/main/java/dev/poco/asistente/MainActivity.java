@@ -430,6 +430,17 @@ public final class MainActivity extends Activity {
         whatsapp.addView(ui.cardTitle(Icons.WHATSAPP, "WhatsApp (puente QR)", true));
         whatsapp.addView(label("Termux corre el puente vinculado por QR al WhatsApp del Segundo espacio. Solo se acepta el remitente configurado en Termux."));
         TextView bridgeStatus = ui.text("", 14, color.text, false); whatsapp.addView(bridgeStatus);
+        Switch proToggle = toggle("Usar mi Google AI Pro"); proToggle.setChecked(app.settings.proEnabled()); whatsapp.addView(proToggle);
+        TextView proStatus = label(app.settings.proEnabled() ? "Pro preferido para charla y búsquedas. Si no responde, uso el respaldo." : "Pro apagado; uso el modelo gratis y Tavily.");
+        whatsapp.addView(proStatus);
+        proToggle.setOnCheckedChangeListener((view, checked) -> {
+            if (checked == app.settings.proEnabled()) return;
+            try {
+                app.settings.setProEnabled(checked);
+                if (!checked) app.core.clearChatMode();
+                proStatus.setText(checked ? "Pro preferido. Termux necesita una sesión de Antigravity iniciada." : "Pro apagado; uso el modelo gratis y Tavily.");
+            } catch (RuntimeException e) { view.setChecked(app.settings.proEnabled()); proStatus.setText("No pude guardar el ajuste Pro."); }
+        });
         bridgeToggle = toggle("Puente de WhatsApp");
         bridgeToggle.setChecked(app.settings.bridgeEnabled()); whatsapp.addView(bridgeToggle);
         bridgeToggle.setOnCheckedChangeListener((view, checked) -> {

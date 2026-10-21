@@ -1,5 +1,45 @@
 # Puente de WhatsApp vinculado para Asistente
 
+## Google AI Pro con Antigravity (2026-10-21)
+
+Actualizar también `pro.cjs`, `index.cjs` y `lib.cjs`; no hay dependencias nuevas.
+Requiere `~/.local/bin/agy` instalado y **sesión ya iniciada con Google AI Pro** en
+Termux. Sin sesión, cuota o respuesta, la app usa el modelo gratis para charla y
+Tavily para búsqueda. El puente nunca solicita ni registra credenciales de agy.
+En la app, «Usar mi Google AI Pro» está encendido por defecto. «charlemos» activa
+la charla; «listo», «fin de la charla», «chau», PARAR o 30 minutos sin mensajes
+la terminan. Los comandos locales siguen funcionando durante la charla.
+
+El servidor inverso escucha **solo 127.0.0.1:8766**, `POST /pro`, mismo Bearer de
+`config.json`, sin CORS, redirects ni keep-alive. Recibe `{tipo, prompt, modelo?}`
+y responde `{texto}`; los fallos llevan `codigo` y `mensaje` genérico. Se puede
+agregar `pro_puerto` (1024–65535, diferente de `puerto`) al config. La app usa
+8766: cambiarlo requiere también configurar ese puerto al construir `ProClient`.
+No cambiarlo solo en Termux. Si no puede abrir el puerto, el puente falla al
+arrancar para evitar que la integración parezca activa.
+
+`agy` corre sin shell, en `~/charla` (700), con entorno limitado a HOME, PATH,
+TMPDIR y LANG; `--mode plan --sandbox --disable-slash-commands --output-format text`,
+modelo de lista cerrada y `--print-timeout`. El prompt se pasa como **un argumento**
+de `-p`, interfaz comprobada en el encargo; no se conoce la interfaz por stdin.
+No se registra el prompt ni stderr, pero el argumento puede verse desde procesos
+con acceso al UID de Termux, y agy podría guardar su propia sesión. No se afirma
+que `plan`/`sandbox` aíslen todos los archivos: falta comprobarlos en el teléfono.
+
+Un pedido activo y dos en espera. Plazo total de cola+ejecución: 60 s para charla,
+35 s para búsqueda; SIGKILL al grupo ante timeout, desconexión o PARAR, sin arrancar
+otro proceso hasta recibir `close`. Máximo 24.000 bytes de prompt, 32 KiB de cuerpo
+HTTP y 64 KiB de stdout+stderr; cabeceras y cuerpo deben llegar en 5 s. Solo se
+registra duración y éxito/fallo. La app limita a 70/45 s, filtra contexto privado,
+descarta líneas de confirmación y nunca ejecuta la respuesta de Pro como herramienta.
+Un respaldo lento todavía puede agotar el límite de 80 s del mensaje completo.
+
+Pruebas locales: `node --test test/*.test.cjs` (spawn simulado, sin agy real).
+Pruebas JVM y APK **solo en CI**: desde `asistente_apk`,
+`gradle --no-daemon test assembleDebug`. Claude debe comprobar flags/entorno,
+sesión vencida, búsqueda real, PARAR desde la app y WhatsApp durante agy, respaldo
+y pantalla bloqueada. No reinstalar ni volver a vincular WhatsApp para actualizar.
+
 ## Audios de WhatsApp (2026-10-20)
 
 La entrada admite notas de voz y archivos de audio del mismo dueño autorizado:
