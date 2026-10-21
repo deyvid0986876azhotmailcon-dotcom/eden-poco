@@ -14,6 +14,7 @@ public final class Icons {
     public static final String WALLET = "", ARROW_UP = "", ARROW_DOWN = "", PIGGY_BANK = "";
     public static final String BULLSEYE = "", WEIGHT_SCALE = "", DUMBBELL = "", UTENSILS = "";
     public static final String KEY = "", MICROCHIP = "", TRASH = "", SHIELD = "", INFO = "";
+    public static final String PHONE = "", PHONE_SLASH = "", MICROPHONE = "", MICROPHONE_SLASH = "", VOLUME = "";
     // fa-brands-400.ttf
     public static final String WHATSAPP = "";
 

@@ -58,4 +58,11 @@ public class RemindersTest {
         assertTrue(executor.execute("local", "cancel", "cancelar_recordatorio", Json.object("id", id)).contains("SÍ "));
         assertEquals(50, store.reminders().size()); executor.cancel();
     }
+    @Test public void whenReadsLikeAMessage() throws Exception {
+        java.time.LocalDate today = java.time.LocalDate.of(2026, 10, 20);
+        org.junit.Assert.assertEquals("hoy a las 20:19", Reminders.when(new org.json.JSONObject().put("cuando", "2026-10-20T20:19"), today));
+        org.junit.Assert.assertEquals("mañana a las 08:00", Reminders.when(new org.json.JSONObject().put("cuando", "2026-10-21T08:00"), today));
+        org.junit.Assert.assertEquals("todos los días a las 07:00", Reminders.when(new org.json.JSONObject().put("repeticion", "diaria").put("hora", "07:00"), today));
+        org.junit.Assert.assertEquals("los lunes, miércoles y viernes a las 18:00", Reminders.when(new org.json.JSONObject().put("repeticion", "1,3,5").put("hora", "18:00"), today));
+    }
 }

@@ -38,6 +38,7 @@ public final class AssistantApplication extends Application {
         db = new AssistantDb(this);
         core = new AssistantCore(db, settings, new GeminiClient(), Clock.system(dev.poco.asistente.core.Reminders.ZONE), SystemClock::elapsedRealtime);
         proactive = new dev.poco.asistente.core.Proactive(db, settings, new GeminiClient(), Clock.system(dev.poco.asistente.core.Reminders.ZONE), core);
+        proactive.onReminderCall = text -> main.post(() -> dev.poco.asistente.call.CallLauncher.ring(this, text));
         whatsapp = new WhatsAppBridge(this);
         bridge = new BridgeInbox(core, messages, controlGate, settings::bridgeEnabled, id -> {
             if (!db.claimNotice(id, "Puente")) return false;
