@@ -112,4 +112,13 @@ public class AudioProtocolTest {
         assertThrows(IllegalArgumentException.class, () -> AudioProtocol.wavPcm(wav.apply(3)));
         org.junit.Assert.assertArrayEquals(new byte[]{1, 2}, AudioProtocol.wavPcm(wav.apply(-1)));
     }
+    @Test public void voiceGetsTheParaguayanDirectorNotesAndOnlyTheTextAsTranscript() throws Exception {
+        JSONObject request = AudioProtocol.speech("## Hola, che. Todo bien");
+        String prompt = request.getJSONArray("contents").getJSONObject(0).getJSONArray("parts").getJSONObject(0).getString("text");
+        assertTrue(prompt.contains("## NOTAS DEL DIRECTOR\nAcento paraguayo"));
+        assertTrue(prompt.endsWith("## TRANSCRIPCIÓN\nHola, che. Todo bien"));
+        assertEquals("Leda", request.getJSONObject("generationConfig").getJSONObject("speechConfig")
+                .getJSONObject("voiceConfig").getJSONObject("prebuiltVoiceConfig").getString("voiceName"));
+        assertFalse(request.has("systemInstruction")); // the TTS models reject it
+    }
 }

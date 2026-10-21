@@ -81,10 +81,16 @@ public final class AudioProtocol {
     }
     public static JSONObject speech(String text) throws Exception {
         if (text == null || text.trim().isEmpty() || text.length() > 2000) throw new IllegalArgumentException("Respuesta larga: solo texto.");
-        // only the words to say: the voice model reads aloud anything else it is given
-        return Json.object("contents", array(Json.object("role", "user", "parts", array(Json.object("text", text)))),
+        // Plain instructions get read aloud. Google's director-notes layout does not: only the transcript is
+        // spoken (tested 2026-10-21: 7.4 s against 7 s for the bare text). David chose Leda with this accent.
+        // The text loses any '#' so it cannot open a section of its own.
+        String prompt = "# PERFIL DE VOZ\nChica de 22 años de Asunción, Paraguay.\n\n"
+                + "## NOTAS DEL DIRECTOR\nAcento paraguayo (asunceno), voseo, tono relajado, cercano y alegre, "
+                + "ritmo natural de nota de voz de WhatsApp entre amigos.\n\n"
+                + "## TRANSCRIPCIÓN\n" + text.replace("#", "").trim();
+        return Json.object("contents", array(Json.object("role", "user", "parts", array(Json.object("text", prompt)))),
                 "generationConfig", Json.object("responseModalities", array("AUDIO"), "speechConfig",
-                        Json.object("voiceConfig", Json.object("prebuiltVoiceConfig", Json.object("voiceName", "Kore")))));
+                        Json.object("voiceConfig", Json.object("prebuiltVoiceConfig", Json.object("voiceName", "Leda")))));
     }
     public static JSONObject pcm(JSONObject response) throws Exception {
         JSONArray candidates = response.getJSONArray("candidates");
