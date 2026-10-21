@@ -36,6 +36,15 @@ public final class AssistantCore {
     }
     public String receive(String text) { return receive(text, Source.LOCAL_USER, UUID.randomUUID().toString()); }
     public long cancellationToken() { return generation.get(); }
+    /** The trusted inbox calls this inside the shared queue, then feeds the literal text to receive. */
+    public String transcribe(AudioInput audio, long ticket) throws Exception {
+        if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
+        String key = settings.apiKey();
+        if (key == null || key.isEmpty()) throw new IllegalArgumentException(AudioInput.FALLBACK);
+        GeminiProtocol.Reply reply = cloud.generate(key, settings.model(), AudioProtocol.transcription(audio), () -> ticket != generation.get());
+        if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
+        return AudioProtocol.transcript(reply);
+    }
     /** Capture the token when queuing, so PARAR also cancels work that has not started. */
     public String receive(String text, long queuedToken) {
         return receive(text, Source.LOCAL_USER, UUID.randomUUID().toString(), queuedToken);

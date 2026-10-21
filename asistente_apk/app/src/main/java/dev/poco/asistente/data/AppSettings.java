@@ -18,6 +18,11 @@ public final class AppSettings implements dev.poco.asistente.core.Proactive.Sett
         bridgeVault = new KeyVault(context, "bridge_vault", "dev.poco.asistente.bridge.v1");
     }
     public boolean bridgeEnabled() { return prefs.getBoolean("bridge_enabled", false); }
+    public String audioReplyMode() { return prefs.getString("audio_reply_mode", dev.poco.asistente.core.AudioProtocol.ON_AUDIO); }
+    public void saveAudioReplyMode(String mode) {
+        if (!Arrays.asList("nunca", "audio", "siempre").contains(mode)) throw new IllegalArgumentException("Modo de audio inválido.");
+        if (!prefs.edit().putString("audio_reply_mode", mode).commit()) throw new IllegalStateException("No se guardó el modo de audio.");
+    }
     public void setBridgeEnabled(boolean enabled) {
         if (!prefs.edit().putBoolean("bridge_enabled", enabled).commit()) throw new IllegalStateException("No se guardó el estado del puente.");
     }

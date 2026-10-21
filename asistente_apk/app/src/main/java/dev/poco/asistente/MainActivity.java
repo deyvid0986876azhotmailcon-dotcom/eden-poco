@@ -399,6 +399,18 @@ public final class MainActivity extends Activity {
             catch (Exception e) { status.setText("No pude guardar los ajustes."); }
         }));
 
+        LinearLayout audioPrefs = ui.card(); form.addView(audioPrefs);
+        audioPrefs.addView(label("Responder con audio (WhatsApp)"));
+        String[] audioLabels = {"Nunca", "Cuando David manda audio", "Siempre"};
+        String[] audioModes = {"nunca", "audio", "siempre"};
+        int audioSelected = java.util.Arrays.asList(audioModes).indexOf(app.settings.audioReplyMode());
+        Spinner audioMode = spinner(audioLabels, audioLabels[audioSelected < 0 ? 1 : audioSelected]); audioPrefs.addView(audioMode);
+        TextView audioStatus = label("También se conserva la respuesta escrita."); audioPrefs.addView(audioStatus);
+        audioPrefs.addView(button("Guardar audio", true, () -> {
+            try { app.settings.saveAudioReplyMode(audioModes[audioMode.getSelectedItemPosition()]); audioStatus.setText("Preferencia de audio guardada."); }
+            catch (Exception e) { audioStatus.setText("No pude guardar la preferencia de audio."); }
+        }));
+
         LinearLayout summaries = ui.card(); form.addView(summaries);
         summaries.addView(ui.cardTitle(Icons.CLOCK, "Resúmenes por WhatsApp", false));
         Switch daily = toggle("Resumen diario"); daily.setChecked(app.settings.dailySummary()); summaries.addView(daily);

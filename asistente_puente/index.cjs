@@ -5,6 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { OwnerChat, PendingPoller } = require('./pendientes.cjs');
 const { isStop } = require('./lib.cjs');
+const { downloadAudio, sendReply, LISTEN_FAILED } = require('./audio.cjs');
 const { Backups, signalBackup } = require('./respaldo.cjs');
 const { configuration, split, candidate, Ledger, post, DeliveryQueue, privateDirectory, FALLBACK } = require('./lib.cjs');
 // Do not print library errors, message objects or auth material to logs.
@@ -13,18 +14,35 @@ const root = path.join(os.homedir(), '.asistente_puente');
 const auth = path.join(root, 'auth');
 const qrFile = path.join(os.homedir(), 'storage', 'downloads', 'asistente_qr.png');
 let lockOwned = false, exiting = false, connection = null, reconnect = null, attempts = 0;
-let config, ledger, makeWASocket, useMultiFileAuthState, DisconnectReason, logger, QRCode;
+let config, ledger, makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, logger, QRCode;
+let downloading = 0;
 let backups, ownerChat, pending;
 const queue = new DeliveryQueue(async (message, current) => {
-  const response = await post(config, message);
+  let response;
+  if (message.media) {
+    if (downloading >= 2) response = { respuesta: LISTEN_FAILED };
+    else {
+      downloading++;
+      const source = connection;
+      try {
+        message.audio = await downloadAudio(message.media, downloadMediaMessage,
+          { logger, reuploadRequest: source.socket.updateMediaMessage });
+      } catch { response = { respuesta: LISTEN_FAILED }; log('Audio rechazado o descarga fallida'); }
+      finally { downloading--; delete message.media; }
+      if (!current() || source !== connection || !source?.opened) return;
+    }
+  }
+  if (!response) response = await post(config, message, fetch, 90000, true);
+  delete message.audio;
   if (!current()) return;
-  log(response === FALLBACK ? 'Fallido: app no disponible o tiempo agotado' : 'Aceptado: respuesta de la app');
+  if (response.parar === true) { queue.cancel(); pending.pause(); }
+  log(response.respuesta === FALLBACK ? 'Fallido: app no disponible o tiempo agotado' : 'Aceptado: respuesta de la app');
   const session = connection;
   if (!session?.opened) { log('Fallido: sin conexión para entregar; no se reintenta'); return; }
-  for (const text of split(response)) {
-    if (!current() || connection !== session || !session.opened) return;
-    await session.socket.sendMessage(message.chat || config.remitente, { text });
-  }
+  // A voice PARAR cancels the generation, but its acknowledgement may still be delivered.
+  const epoch = queue.epoch;
+  await sendReply(response, message.chat || config.remitente, session.socket.sendMessage.bind(session.socket),
+    () => queue.epoch === epoch && connection === session && session.opened, log);
   log('Aceptado: respuesta enviada a WhatsApp');
 }, () => log('Fallido: envío interrumpido; revisar Resumen antes de repetir'));
 
@@ -106,7 +124,7 @@ async function connect() {
         if (decision.reason) { log(`Ignorado: ${decision.reason}`); continue; }
         ownerChat.accept(message, event.type, session.connectedAt);
         if (isStop(decision.text)) pending.pause(); else pending.resume();
-        log('Aceptado: texto privado del remitente autorizado');
+        log(decision.media ? 'Aceptado: audio privado del remitente autorizado' : 'Aceptado: texto privado del remitente autorizado');
         if (!queue.add(decision)) log('Fallido: cola llena; no se ejecuta ni se reintenta');
       } catch { fatal(); return; }
     }
@@ -154,7 +172,7 @@ async function main() {
   process.on('SIGINT', () => shutdown()); process.on('SIGTERM', () => shutdown());
   backups.start();
   // Baileys 6.7.22+ is an ES module (6.7.18 and older let messages be spoofed: do not go back)
-  ({ default: makeWASocket, useMultiFileAuthState, DisconnectReason } = await loadBaileys());
+  ({ default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage } = await loadBaileys());
   logger = require('pino')({ level: 'silent' }); QRCode = require('qrcode');
   await connect();
 }

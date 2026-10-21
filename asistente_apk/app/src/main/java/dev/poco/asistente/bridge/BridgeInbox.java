@@ -12,6 +12,8 @@ import java.util.function.Predicate;
 
 /** Authenticated ingress; shares the chat queue/generation, with confirmations owned by the WhatsApp actor. */
 public final class BridgeInbox {
+    private static final class Result extends CompletableFuture<String> { volatile boolean stopped; }
+    public static boolean wasStopped(CompletableFuture<String> result) { return result instanceof Result && ((Result) result).stopped; }
     private final AssistantCore core;
     private final MessageQueue queue;
     private final Object gate;
@@ -29,6 +31,12 @@ public final class BridgeInbox {
         return accept(id, text, core.cancellationToken());
     }
     public CompletableFuture<String> accept(String id, String text, long arrivalToken) {
+        return accept(id, text, null, arrivalToken);
+    }
+    public CompletableFuture<String> acceptAudio(String id, dev.poco.asistente.core.AudioInput audio, long arrivalToken) {
+        return accept(id, "", audio, arrivalToken);
+    }
+    private CompletableFuture<String> accept(String id, String text, dev.poco.asistente.core.AudioInput audio, long arrivalToken) {
         synchronized (gate) {
             if (!enabled.getAsBoolean()) throw new IllegalStateException("Puente apagado");
             // Reserve room for PARAR even when the ordinary queue is full.
@@ -43,7 +51,7 @@ public final class BridgeInbox {
                 return CompletableFuture.completedFuture("Cola vaciada y confirmaciones canceladas. No se deshacen acciones ya terminadas.");
             }
             long ticket = arrivalToken;
-            CompletableFuture<String> result = new CompletableFuture<>();
+            Result result = new Result();
             pending.put(requestId, result);
             queue.add(() -> {
                 try {
@@ -52,7 +60,25 @@ public final class BridgeInbox {
                             result.complete("Pedido cancelado antes de empezar."); return;
                         }
                     }
-                    String response = core.receive(text, AssistantCore.Source.WHATSAPP_OWNER, requestId, ticket);
+                    String understood = text;
+                    if (audio != null) {
+                        try { understood = core.transcribe(audio, ticket); }
+                        catch (Exception e) {
+                            result.complete(dev.poco.asistente.core.AudioInput.FALLBACK); return;
+                        }
+                        synchronized (gate) {
+                            if (result.isDone() || !enabled.getAsBoolean() || ticket != core.cancellationToken()) return;
+                            if (Rules.normalize(understood).equals("parar")) {
+                                result.stopped = true;
+                                // Remove this acknowledgement, then cancel before releasing its HTTP waiter.
+                                pending.remove(requestId);
+                                stop.run();
+                                result.complete("Cola vaciada y confirmaciones canceladas. No se deshacen acciones ya terminadas.");
+                                return;
+                            }
+                        }
+                    }
+                    String response = core.receive(understood, AssistantCore.Source.WHATSAPP_OWNER, requestId, ticket);
                     synchronized (gate) {
                         result.complete(ticket == core.cancellationToken() ? response : "Pedido cancelado; consultá Resumen.");
                     }

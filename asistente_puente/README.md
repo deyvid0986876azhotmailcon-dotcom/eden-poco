@@ -1,5 +1,42 @@
 # Puente de WhatsApp vinculado para Asistente
 
+## Audios de WhatsApp (2026-10-20)
+
+La entrada admite notas de voz y archivos de audio del mismo dueño autorizado:
+máximo **5.000.000 bytes y 180 segundos**. Se descarga con Baileys en streaming,
+con límite real de bytes y 20 segundos de plazo; la app comprueba además la duración
+del archivo con Android. Si no puede verificarla, no lo manda a Gemini.
+La deduplicación usa el mismo ID que los mensajes escritos.
+
+Para la salida, instalar en **Termux**, con el teléfono disponible para Claude:
+
+```sh
+pkg install ffmpeg
+```
+
+Actualizar tanto la app como la carpeta del puente, incluido `audio.cjs`, y reiniciar
+el puente mediante el mecanismo habitual. No hace falta volver a vincular WhatsApp.
+En Ajustes → **Responder con audio (WhatsApp)** elegir Nunca, Cuando David manda
+audio (predeterminado) o Siempre, y pulsar Guardar audio. El modo Siempre se aplica
+a respuestas de `/mensaje` y `/audio`; los avisos proactivos siguen escritos.
+Siempre se envía también el texto, incluidos montos y códigos de confirmación.
+Si falta ffmpeg, falla TTS o la respuesta es demasiado larga, queda el texto y se
+registra la falta de voz sin mostrar claves ni contenido.
+
+La app primero pide una transcripción sin herramientas y luego la procesa con las
+reglas, historial, libreta y ejecutor de siempre. Solo guarda esa transcripción y la
+respuesta en el historial. Sin clave/cupo o audio inteligible responde:
+«No pude escuchar el audio ahora; mandamelo escrito».
+**PARAR escrito conserva su vía inmediata**; PARAR hablado requiere descargar y
+transcribir, espera la cola y no funciona sin Gemini. Los códigos de confirmación
+siguen siendo exactos y ligados al actor de WhatsApp; conviene enviarlos escritos.
+
+Pruebas sin red ni ffmpeg real: `npm test` (Node). JVM en CI desde `asistente_apk`:
+`gradle --no-daemon test`. No compilar en esta notebook. Protocolo, decisiones,
+límites y lista de pruebas de teléfono en [AUDIO.md](../asistente/AUDIO.md).
+Los nombres de modelos TTS y la disponibilidad con la clave real requieren prueba
+de Claude; no se verificaron por red en este encargo.
+
 ## Respaldo nocturno a Google Drive
 
 El proceso principal incluye un programador interno, sin cron. Agregar opcionalmente

@@ -26,7 +26,7 @@ function split(text, limit = 1800) {
   return parts;
 }
 function isStop(text) {
-  return text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase() === 'parar';
+  return typeof text === 'string' && text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase() === 'parar';
 }
 function candidate(message, type, owner, connectedAt, now = Date.now()) {
   const key = message?.key;
@@ -48,12 +48,18 @@ function candidate(message, type, owner, connectedAt, now = Date.now()) {
   // Ephemeral TEXT is allowed; media captions, protocol edits, reactions and quoted text are not orders.
   if (content?.ephemeralMessage) content = content.ephemeralMessage.message;
   const text = content?.conversation ?? content?.extendedTextMessage?.text;
-  if (typeof text !== 'string' || !text.trim() || text.length > 4000) return { reason: 'no es texto válido' };
+  const audio = content?.audioMessage;
+  if (!audio && (typeof text !== 'string' || !text.trim() || text.length > 4000)) return { reason: 'no es texto válido' };
   const timestamp = Number(message.messageTimestamp?.toString());
   if (type !== 'notify' || !connectedAt || !Number.isSafeInteger(timestamp)
       || timestamp < connectedAt || timestamp > Math.floor(now / 1000) + 30) return { reason: 'mensaje antiguo o de historial', id: key.id };
   // the reply goes to the same chat (the LID one when that is how WhatsApp named it): sending to the
   // phone number of a LID chat arrives as "waiting for this message", it cannot be decrypted
+  if (audio) {
+    try { require('./audio.cjs').metadata(audio); }
+    catch { return { reason: 'audio inválido (máximo 5 MB y 3 minutos)', id: key.id }; }
+    return { id: key.id, media: message, chat: key.remoteJid };
+  }
   return { id: key.id, text, chat: key.remoteJid };
 }
 class Ledger {
@@ -74,14 +80,24 @@ class Ledger {
     this.seen.add(hash); return true;
   }
 }
-async function post(config, message, fetcher = fetch, timeout = 90000) {
+async function post(config, message, fetcher = fetch, timeout = 90000, detailed = false) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
-    const response = await fetcher(`http://127.0.0.1:${config.puerto}/mensaje`, {
+    const audio = message.audio;
+    const headers = { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' };
+    if (audio) {
+      const policy = require('./audio.cjs');
+      if (!Buffer.isBuffer(audio.bytes) || !audio.bytes.length || audio.bytes.length > policy.MAX_BYTES
+          || !Number.isFinite(audio.seconds) || audio.seconds <= 0 || audio.seconds > policy.MAX_SECONDS
+          || !/^[A-Za-z0-9_-]{1,120}$/.test(message.id)) throw new Error('Audio inválido');
+      headers['Content-Type'] = policy.mime(audio.mime);
+      headers['X-Message-Id'] = message.id; headers['X-Audio-Seconds'] = String(audio.seconds);
+    }
+    const response = await fetcher(`http://127.0.0.1:${config.puerto}/${audio ? 'audio' : 'mensaje'}`, {
       method: 'POST', redirect: 'error', signal: controller.signal,
-      headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: message.id, texto: message.text })
+      headers,
+      body: audio ? audio.bytes : JSON.stringify({ id: message.id, texto: message.text })
     });
     if (!response.ok) throw new Error('Respuesta HTTP fallida');
     // The deadline also covers the body. Bound memory even if a different local process owns the port.
@@ -91,13 +107,13 @@ async function post(config, message, fetcher = fetch, timeout = 90000) {
       const { value, done } = await reader.read();
       if (done) break;
       size += value.length;
-      if (size > 256 * 1024) { await reader.cancel(); throw new Error('Respuesta demasiado grande'); }
+      if (size > (detailed ? 4 * 1024 * 1024 : 256 * 1024)) { await reader.cancel(); throw new Error('Respuesta demasiado grande'); }
       chunks.push(Buffer.from(value));
     }
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if (typeof body.respuesta !== 'string' || !body.respuesta.trim()) throw new Error('Respuesta inválida');
-    return body.respuesta;
-  } catch { return FALLBACK; }
+    return detailed ? body : body.respuesta;
+  } catch { return detailed ? { respuesta: message.audio ? require('./audio.cjs').LISTEN_FAILED : FALLBACK } : FALLBACK; }
   finally { clearTimeout(timer); }
 }
 /** Dispatch immediately to the APP's queue: a local PARAR must also cancel waiting WhatsApp work. */

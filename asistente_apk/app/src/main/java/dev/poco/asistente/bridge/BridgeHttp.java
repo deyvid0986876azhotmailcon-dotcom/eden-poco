@@ -23,6 +23,7 @@ public final class BridgeHttp {
         public Failure(int status) { super("HTTP " + status); this.status = status; }
     }
     public static final class Request {
+        public dev.poco.asistente.core.AudioInput audio;
         public final boolean backup, pending, confirm;
         public final java.util.List<String> ids;
         public final String id, text;
@@ -36,7 +37,7 @@ public final class BridgeHttp {
         String[] first = line(input, budget).split(" ", -1);
         if (first.length != 3 || !first[2].equals("HTTP/1.1")) throw new Failure(400);
         if (!first[0].equals("POST") && !first[0].equals("GET")) throw new Failure(405);
-        if (!java.util.Arrays.asList("/mensaje", "/respaldo", "/pendientes", "/pendientes/confirmar").contains(first[1])) throw new Failure(404);
+        if (!java.util.Arrays.asList("/audio", "/mensaje", "/respaldo", "/pendientes", "/pendientes/confirmar").contains(first[1])) throw new Failure(404);
         boolean readOnly = first[1].equals("/respaldo") || first[1].equals("/pendientes");
         if (!first[0].equals(readOnly ? "GET" : "POST")) throw new Failure(405);
         Map<String, String> headers = new HashMap<>();
@@ -57,13 +58,25 @@ public final class BridgeHttp {
             return new Request(first[1], null, null, java.util.Collections.emptyList());
         }
         String type = headers.getOrDefault("content-type", "");
-        if (!type.matches("(?i)application/json(?:\\s*;\\s*charset=utf-8)?")) throw new Failure(415);
+        boolean audio = first[1].equals("/audio");
+        if (audio) {
+            try { type = dev.poco.asistente.core.AudioInput.mime(type); }
+            catch (IllegalArgumentException e) { throw new Failure(415); }
+        } else if (!type.matches("(?i)application/json(?:\\s*;\\s*charset=utf-8)?")) throw new Failure(415);
         String length = headers.get("content-length");
         if (length == null) throw new Failure(411);
         if (!length.matches("[0-9]{1,10}")) throw new Failure(400);
         long count = Long.parseLong(length);
-        if (count > MAX_BODY) throw new Failure(413);
+        if (count > (audio ? dev.poco.asistente.core.AudioInput.MAX_BYTES : MAX_BODY)) throw new Failure(413);
         if (count == 0) throw new Failure(400);
+        String audioId = headers.getOrDefault("x-message-id", "");
+        double seconds = 0;
+        if (audio) {
+            String duration = headers.getOrDefault("x-audio-seconds", "");
+            if (!audioId.matches("[A-Za-z0-9_-]{1,120}") || !duration.matches("[0-9]{1,3}(?:\\.[0-9]{1,3})?")) throw new Failure(400);
+            seconds = Double.parseDouble(duration);
+            if (seconds <= 0 || seconds > dev.poco.asistente.core.AudioInput.MAX_SECONDS) throw new Failure(413);
+        }
         byte[] body = new byte[(int) count];
         int used = 0;
         while (used < body.length) {
@@ -71,6 +84,11 @@ public final class BridgeHttp {
             if (read < 0) throw new Failure(400);
             if (read == 0) continue;
             used += read;
+        }
+        if (audio) {
+            Request request = new Request(first[1], audioId, null, java.util.Collections.emptyList());
+            request.audio = new dev.poco.asistente.core.AudioInput(body, type, seconds);
+            return request;
         }
         String json;
         try {

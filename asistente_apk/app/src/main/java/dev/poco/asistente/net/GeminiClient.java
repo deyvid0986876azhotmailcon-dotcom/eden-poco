@@ -60,12 +60,15 @@ public final class GeminiClient implements Cloud {
         }
         throw new IllegalArgumentException(notices + "No pude conectar con ningún modelo. No guardé nada; las reglas locales siguen funcionando.");
     }
-    private static final class HttpTransport implements Transport {
+    static final class HttpTransport implements Transport {
+        private final int maxBody, timeout;
+        HttpTransport() { this(262144, 30000); }
+        HttpTransport(int maxBody, int timeout) { this.maxBody = maxBody; this.timeout = timeout; }
         @Override public Response post(String model, String key, String body) throws IOException {
             HttpURLConnection connection = (HttpURLConnection) new URL("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent").openConnection();
             try {
                 connection.setRequestMethod("POST"); connection.setDoOutput(true); connection.setInstanceFollowRedirects(false);
-                connection.setConnectTimeout(15000); connection.setReadTimeout(30000); connection.setUseCaches(false);
+                connection.setConnectTimeout(Math.min(15000, timeout)); connection.setReadTimeout(timeout); connection.setUseCaches(false);
                 connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
                 connection.setRequestProperty("x-goog-api-key", key);
                 byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
@@ -76,7 +79,7 @@ public final class GeminiClient implements Cloud {
                 try (InputStream input = connection.getInputStream(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
                     byte[] buffer = new byte[4096]; int read;
                     while ((read = input.read(buffer)) != -1) {
-                        if (out.size() + read > 262144) throw new IOException("Respuesta demasiado grande");
+                        if (Thread.currentThread().isInterrupted() || out.size() + read > maxBody) throw new IOException("Respuesta demasiado grande o cancelada");
                         out.write(buffer, 0, read);
                     }
                     return new Response(status, new String(out.toByteArray(), StandardCharsets.UTF_8));

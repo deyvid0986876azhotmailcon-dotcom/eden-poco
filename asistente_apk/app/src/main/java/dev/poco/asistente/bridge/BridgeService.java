@@ -42,6 +42,7 @@ public final class BridgeService extends Service {
     private final ThreadPoolExecutor handlers = new ThreadPoolExecutor(0, 8, 30, TimeUnit.SECONDS,
             new SynchronousQueue<>(), new ThreadPoolExecutor.AbortPolicy());
     private final ScheduledExecutorService deadlines = Executors.newSingleThreadScheduledExecutor();
+    private final BridgeVoice voice = new BridgeVoice();
     @Override public void onCreate() { super.onCreate(); app = (AssistantApplication) getApplication(); }
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && STOP.equals(intent.getAction())) {
@@ -88,6 +89,7 @@ public final class BridgeService extends Service {
         }
     }
     private void handle(Socket socket, String token, long arrivalToken) {
+        long startedAt = android.os.SystemClock.elapsedRealtime();
         ScheduledFuture<?> deadline = null;
         CompletableFuture<String> result = null;
         try (Socket client = socket) {
@@ -95,6 +97,8 @@ public final class BridgeService extends Service {
             client.setSoTimeout(10000);
             int status = 200;
             String response;
+            org.json.JSONObject audio = null;
+            boolean stopped = false;
             try {
                 BridgeHttp.Request request = BridgeHttp.read(client.getInputStream(), token);
                 if (request.backup) { deliverBackup(client); return; }
@@ -115,8 +119,25 @@ public final class BridgeService extends Service {
                     }
                     client.getOutputStream().flush(); app.changed(); return;
                 }
-                result = app.bridge.accept(request.id, request.text, arrivalToken);
-                response = result.get(85, TimeUnit.SECONDS);
+                if (request.audio != null) {
+                    try { AudioDuration.validate(request.audio, getCacheDir()); }
+                    catch (Exception e) {
+                        client.getOutputStream().write(BridgeHttp.response(200, dev.poco.asistente.core.AudioInput.FALLBACK));
+                        client.getOutputStream().flush(); app.bridgeLog("Audio rechazado: formato o duración no verificables"); return;
+                    }
+                    if (android.os.SystemClock.elapsedRealtime() - startedAt >= 80000) throw new TimeoutException();
+                    result = app.bridge.acceptAudio(request.id, request.audio, arrivalToken);
+                } else result = app.bridge.accept(request.id, request.text, arrivalToken);
+                response = result.get(Math.max(1, 80000 - (android.os.SystemClock.elapsedRealtime() - startedAt)), TimeUnit.MILLISECONDS);
+                stopped = BridgeInbox.wasStopped(result);
+                audio = voice.generate(app, response, request.audio != null, arrivalToken,
+                        80000 - (android.os.SystemClock.elapsedRealtime() - startedAt));
+                if (!stopped && arrivalToken != app.core.cancellationToken()) {
+                    audio = null;
+                    // Preserve the explicit text PARAR acknowledgement too.
+                    if (!dev.poco.asistente.core.Rules.normalize(request.text == null ? "" : request.text).equals("parar"))
+                        response = "Pedido cancelado; consultá Resumen por acciones ya terminadas.";
+                }
             } catch (BridgeHttp.Failure failure) {
                 status = failure.status; response = "Pedido rechazado";
             } catch (TimeoutException e) {
@@ -127,7 +148,12 @@ public final class BridgeService extends Service {
             } catch (Exception e) {
                 status = 503; response = "No disponible";
             }
-            client.getOutputStream().write(BridgeHttp.response(status, response));
+            if (status == 200) {
+                org.json.JSONObject payload = new org.json.JSONObject().put("respuesta", response);
+                if (audio != null) payload.put("audio", audio);
+                if (stopped) payload.put("parar", true);
+                client.getOutputStream().write(BridgeHttp.jsonResponse(status, payload.toString()));
+            } else client.getOutputStream().write(BridgeHttp.response(status, response));
             client.getOutputStream().flush();
             app.bridgeLog(status == 200 ? "Aceptado: respuesta HTTP entregada" : "Fallido: HTTP " + status);
         } catch (Exception e) {
@@ -173,7 +199,7 @@ public final class BridgeService extends Service {
         closed = true; close(server);
         app.stop();
         for (Socket client : clients) close(client);
-        listener.shutdownNow(); handlers.shutdownNow(); deadlines.shutdownNow();
+        listener.shutdownNow(); handlers.shutdownNow(); deadlines.shutdownNow(); voice.close();
         app.bridgeLog("Aceptado: servicio detenido");
         stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy();
     }

@@ -27,7 +27,7 @@ async function harness(prelocked = false, manual = false) {
     sockets.push(socket); return socket;
   };
   const sandbox = {
-    process: fakeProcess, console: { log: message => logs.push(message) },
+    process: fakeProcess, fetch: () => assert.fail('network forbidden'), console: { log: message => logs.push(message) },
     setTimeout: (fn, delay) => { const timer = { fn, delay }; timers.add(timer); return timer; },
     clearTimeout: timer => timers.delete(timer),
     require: name => {
@@ -42,10 +42,12 @@ async function harness(prelocked = false, manual = false) {
           stop() { return super.stop(); }
         } };
       }
-      if (name === './lib.cjs') return { ...lib, post: async (_, message) => { posts.push(message); return 'Hecho'; } };
+      if (name === './audio.cjs') return require('../audio.cjs');
+      if (name === './lib.cjs') return { ...lib, post: async (_, message) => { posts.push({ ...message }); return { respuesta: 'Hecho' }; } };
       if (name === 'node:os') return { homedir: () => home };
       if (name === '@whiskeysockets/baileys') return {
         default: socketFactory, DisconnectReason: { loggedOut: 401 },
+        downloadMediaMessage: async () => require('node:stream').Readable.from([Buffer.from('OggS')]),
         useMultiFileAuthState: async directory => ({
           state: { keys: { set: async () => fs.writeFileSync(path.join(directory, 'signal.json'), '{}') } },
           saveCreds: async () => fs.writeFileSync(path.join(directory, 'creds.json'), '{}')
@@ -115,6 +117,23 @@ test('owner LID replies stay in that chat; unrelated chats and payload aliases a
     await h.hooks.queue();
     assert.equal(h.posts.length, 1); assert.equal(socket.sent.length, 1);
     assert.equal(socket.sent[0].jid, '123@lid'); assert.deepEqual(h.exits, []);
+  } finally { await h.close(); }
+});
+
+test('audio event wiring downloads authorized media once and forwards binary to app', async () => {
+  const h = await harness();
+  try {
+    const socket = h.sockets[0];
+    socket.ev.emit('connection.update', { connection: 'open' }); await h.hooks.session().events;
+    const message = { key: { fromMe: false, id: 'AUDIO_1', remoteJid: h.config.remitente },
+      messageTimestamp: Math.floor(Date.now() / 1000),
+      message: { audioMessage: { seconds: 2, fileLength: 4, mimetype: 'audio/ogg', ptt: true } } };
+    socket.ev.emit('messages.upsert', { type: 'notify', messages: [message, message,
+      { ...message, key: { ...message.key, id: 'UNAUTHORIZED', remoteJid: '2222222222@s.whatsapp.net' } }] });
+    await h.hooks.queue();
+    assert.equal(h.posts.length, 1); assert.equal(h.posts[0].audio.bytes.toString(), 'OggS');
+    assert.equal(h.posts[0].audio.mime, 'audio/ogg'); assert.equal(socket.sent[0].body.text, 'Hecho');
+    assert.deepEqual(h.exits, []);
   } finally { await h.close(); }
 });
 
