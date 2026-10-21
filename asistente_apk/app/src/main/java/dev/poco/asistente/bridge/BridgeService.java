@@ -150,7 +150,16 @@ public final class BridgeService extends Service {
             }
             if (status == 200) {
                 org.json.JSONObject payload = new org.json.JSONObject().put("respuesta", response);
-                if (audio != null) payload.put("audio", audio);
+                if (audio != null) {
+                    payload.put("audio", audio);
+                    // David sent a voice note: he gets only hers, unless he asked for it in writing or there is a code to copy
+                    String asked = null;
+                    try {
+                        java.util.List<dev.poco.asistente.core.Memory.Exchange> history = app.db.conversation();
+                        if (!history.isEmpty()) asked = history.get(history.size() - 1).user;
+                    } catch (Exception ignored) { }
+                    if (request.audio != null && !dev.poco.asistente.core.AudioProtocol.needsText(response, asked)) payload.put("solo_audio", true);
+                }
                 if (stopped) payload.put("parar", true);
                 client.getOutputStream().write(BridgeHttp.jsonResponse(status, payload.toString()));
             } else client.getOutputStream().write(BridgeHttp.response(status, response));

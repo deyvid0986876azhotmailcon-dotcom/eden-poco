@@ -77,16 +77,21 @@ function convert(audio, launch = spawn, timeout = 15000) {
   });
 }
 async function sendReply(reply, chat, send, current, log, convertAudio = convert) {
-  // Always keep the written answer, including exact amounts and confirmation codes.
+  // The app sets solo_audio when David sent a voice note and there is no code to copy and he did not ask
+  // for text: then only her voice note goes. If the voice cannot be made, the text always goes.
   const { split } = require('./lib.cjs');
-  for (const text of split(reply.respuesta)) {
-    if (!current()) return;
-    await send(chat, { text });
-  }
+  const sendText = async () => {
+    for (const text of split(reply.respuesta)) {
+      if (!current()) return;
+      await send(chat, { text });
+    }
+  };
+  const voiceOnly = reply.solo_audio === true && reply.audio;
+  if (!voiceOnly) await sendText(); // the written answer first, as before
   if (!reply.audio || !current()) return;
   let ogg;
   try { ogg = await convertAudio(reply.audio); }
-  catch { log('Audio no disponible: revisar ffmpeg; respuesta enviada como texto'); return; }
+  catch { log('Audio no disponible: revisar ffmpeg; respuesta enviada como texto'); if (voiceOnly) await sendText(); return; }
   if (current()) await send(chat, { audio: ogg, mimetype: 'audio/ogg; codecs=opus', ptt: true });
 }
 module.exports = { MAX_BYTES, MAX_SECONDS, MAX_PCM, LISTEN_FAILED, mime, metadata, downloadAudio, convert, sendReply };

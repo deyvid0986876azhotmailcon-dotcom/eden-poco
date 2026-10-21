@@ -77,4 +77,12 @@ public class AudioProtocolTest {
             org.junit.Assert.assertEquals("pcm_s16le", AudioProtocol.pcm(response).getString("format"));
         }
     }
+    @Test public void voiceRepliesAreCleanAndOnlyVoiceUnlessTextIsNeeded() throws Exception {
+        org.junit.Assert.assertEquals("Anoté un gasto de 25.000 guaraníes en almuerzo (hoy). Listo, che.",
+                AudioProtocol.plainSpoken("Anoté un gasto de ₲ 25.000 en almuerzo (hoy). Listo, che. (ref. 442bb857-795e-488b-bd16-d6f558b03c6c)"));
+        org.junit.Assert.assertFalse(AudioProtocol.needsText("Anoté un gasto.", "gasté 25000 en almuerzo"));
+        org.junit.Assert.assertTrue(AudioProtocol.needsText("¿Seguro? Si es así, respondé:\nSÍ 0123456789ABCDEF\n(vale 5 minutos)", "borrá el gasto"));
+        org.junit.Assert.assertTrue(AudioProtocol.needsText("Gastaste 85.000 hoy.", "cuánto gasté hoy, mandámelo por escrito"));
+        org.junit.Assert.assertFalse(AudioProtocol.speech("Hola").toString().contains("Leé"));
+    }
 }

@@ -113,3 +113,13 @@ test('PARAR while audio is downloading prevents forwarding it to app', async () 
   queue.add({ id: 'stop', text: 'PARAR' }); await queue.tail; release();
   await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(forwarded, ['stop']);
 });
+test('a voice note gets only a voice note unless the app asks for text', async () => {
+  const sent = [];
+  await sendReply({ respuesta: 'Anoté', audio: pcm(), solo_audio: true }, owner, async (_, body) => sent.push(body), () => true, () => {},
+    async () => Buffer.from('OggS'));
+  assert.equal(sent.length, 1); assert.equal(sent[0].ptt, true);
+  const fallback = [];
+  await sendReply({ respuesta: 'Anoté', audio: pcm(), solo_audio: true }, owner, async (_, body) => fallback.push(body), () => true, () => {},
+    async () => { throw new Error('sin ffmpeg'); });
+  assert.deepEqual(fallback, [{ text: 'Anoté' }]);
+});

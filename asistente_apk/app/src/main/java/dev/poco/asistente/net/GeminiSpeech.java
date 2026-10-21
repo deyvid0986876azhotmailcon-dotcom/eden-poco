@@ -11,7 +11,17 @@ public final class GeminiSpeech {
     public GeminiSpeech(GeminiClient.Transport transport) { this.transport = transport; }
     public JSONObject generate(String key, String text, BooleanSupplier cancelled) throws Exception {
         if (key == null || !key.matches("[A-Za-z0-9._-]{20,200}")) return null;
-        String body = AudioProtocol.speech(text).toString();
+        // first what she would say (short, natural, no codes), then her voice saying only that
+        String spoken = AudioProtocol.plainSpoken(text);
+        for (String model : dev.poco.asistente.core.GeminiProtocol.MODELS) {
+            if (cancelled.getAsBoolean() || Thread.currentThread().isInterrupted()) return null;
+            try {
+                GeminiClient.Response summary = transport.post(model, key, AudioProtocol.spokenRequest(text).toString());
+                if (summary.status == 200) { spoken = AudioProtocol.spokenText(new JSONObject(summary.body)); break; }
+                if (summary.status != 404 && summary.status != 429 && summary.status != 503) break;
+            } catch (Exception e) { break; } // keep the plain version
+        }
+        String body = AudioProtocol.speech(spoken).toString();
         for (String model : AudioProtocol.TTS_MODELS) {
             if (cancelled.getAsBoolean() || Thread.currentThread().isInterrupted()) return null;
             GeminiClient.Response response;
