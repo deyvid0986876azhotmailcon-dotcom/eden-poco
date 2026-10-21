@@ -48,6 +48,7 @@ public final class AndroidPhone implements PhoneTools.Port {
             case "musica": return music(a);
             case "leer_notificaciones": return PhoneNotifications.read(a.has("app") ? PhonePolicy.resolve(a.getString("app"), apps()).pkg : null);
             case "consultar_agenda": return calendar(a);
+            case "buscar_en_internet": return new dev.poco.asistente.net.TavilyClient().search(a.getString("consulta"));
             case "clima": {
                 WeatherProtocol.Place place = WeatherProtocol.place(getJson(WeatherProtocol.geocodeUrl(a.getString("lugar"))));
                 int days = a.getInt("dias");

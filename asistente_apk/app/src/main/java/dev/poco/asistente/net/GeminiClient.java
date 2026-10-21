@@ -54,8 +54,6 @@ public final class GeminiClient implements Cloud {
             }
             try {
                 String notice = notices.length() == 0 ? "" : notices + "Respondió " + model + ".\n";
-                if (body.optJSONArray("tools") != null && body.getJSONArray("tools").getJSONObject(0).has("google_search"))
-                    return dev.poco.asistente.core.SearchProtocol.parse(new JSONObject(response.body), notice);
                 return GeminiProtocol.parse(new JSONObject(response.body), notice);
             } catch (org.json.JSONException e) {
                 throw new IllegalArgumentException("Respuesta inválida de Gemini. No guardé nada.");

@@ -537,7 +537,8 @@ public final class MainActivity extends Activity {
                 new android.content.ComponentName(this, dev.poco.asistente.phone.PhoneNotifications.class));
         boolean calendar = checkSelfPermission(android.Manifest.permission.READ_CALENDAR) == android.content.pm.PackageManager.PERMISSION_GRANTED;
         phoneStatus.setText("Accesibilidad: " + (dev.poco.asistente.phone.PhoneAccessibility.connected() ? "conectada" : "sin conectar")
-                + "\nNotificaciones: " + (notices ? "permitidas" : "sin permiso") + "\nAgenda: " + (calendar ? "lectura permitida" : "sin permiso"));
+                + "\nNotificaciones: " + (notices ? "permitidas" : "sin permiso") + "\nAgenda: " + (calendar ? "lectura permitida" : "sin permiso")
+                + "\nBúsquedas este mes: " + app.settings.searchesThisMonth());
     }
     private void phoneCard(LinearLayout form) {
         LinearLayout card = ui.card(); form.addView(card);

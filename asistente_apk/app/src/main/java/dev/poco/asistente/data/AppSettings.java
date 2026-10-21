@@ -18,6 +18,21 @@ public final class AppSettings implements dev.poco.asistente.core.Proactive.Sett
         bridgeVault = new KeyVault(context, "bridge_vault", "dev.poco.asistente.bridge.v1");
     }
     public boolean bridgeEnabled() { return prefs.getBoolean("bridge_enabled", false); }
+    private static final Object SEARCH_COUNT_LOCK = new Object();
+    private static String searchMonth() { return java.time.YearMonth.now(dev.poco.asistente.core.Reminders.ZONE).toString(); }
+    public long searchesThisMonth() {
+        synchronized (SEARCH_COUNT_LOCK) { return searchesIn(searchMonth()); }
+    }
+    private long searchesIn(String month) {
+        return month.equals(prefs.getString("search_month", "")) ? Math.max(0, prefs.getLong("search_count", 0)) : 0;
+    }
+    /** Counts started attempts, not Tavily billing/credits; no local quota is enforced. */
+    @Override public void recordSearch() {
+        synchronized (SEARCH_COUNT_LOCK) {
+            String month = searchMonth(); long count = searchesIn(month);
+            prefs.edit().putString("search_month", month).putLong("search_count", count == Long.MAX_VALUE ? count : count + 1).apply();
+        }
+    }
     @Override public boolean phoneEnabled() { return prefs.getBoolean("phone_enabled", false); }
     @Override public void disablePhone() { setPhoneEnabled(false); }
     public void setPhoneEnabled(boolean enabled) {

@@ -141,7 +141,7 @@ public final class ToolExecutor {
     }
     /** Read-only port, deliberately outside the executor/action locks so PARAR stays responsive. */
     public String readPhone(String tool, JSONObject checked) throws Exception {
-        if (!PhoneTools.external(tool) || "buscar_en_internet".equals(tool)) throw new IllegalArgumentException("Lectura no permitida.");
+        if (!PhoneTools.external(tool)) throw new IllegalArgumentException("Lectura no permitida.");
         requirePhone();
         return phone.execute(tool, checked);
     }

@@ -19,6 +19,7 @@ public final class AssistantCore {
         String currency();
         default boolean phoneEnabled() { return false; }
         default void disablePhone() {}
+        default void recordSearch() {}
     }
     private final Store store;
     private final Settings settings;
@@ -239,16 +240,21 @@ public final class AssistantCore {
         String result;
         try {
             if ("buscar_en_internet".equals(tool)) {
-                GeminiProtocol.Reply reply = cloud.generate(settings.apiKey(), settings.model(), SearchProtocol.request(checked.getString("consulta")),
-                        () -> ticket != generation.get() || closed.getAsBoolean() || !settings.phoneEnabled());
-                if (reply.tool != null || reply.text == null) throw new IllegalArgumentException("La búsqueda devolvió una acción; la descarté.");
-                result = ExternalData.isExternal(reply.text) ? reply.text : ExternalData.wrap(reply.text);
+                java.util.function.BooleanSupplier cancelled = () -> ticket != generation.get() || closed.getAsBoolean() || !settings.phoneEnabled();
+                if (cancelled.getAsBoolean()) throw new IllegalArgumentException("Pedido cancelado.");
+                // Informational attempts, including failures. A counter write must never block a search.
+                try { settings.recordSearch(); } catch (RuntimeException ignored) { }
+                result = executor.readPhone(tool, checked);
+                if (!cancelled.getAsBoolean()) {
+                    try {
+                        result = SearchProtocol.summary(cloud.generate(settings.apiKey(), settings.model(), SearchProtocol.summaryRequest(result), cancelled));
+                    } catch (Exception ignored) { /* Keep the bounded Tavily text and its sources. */ }
+                }
             } else result = executor.readPhone(tool, checked);
         } catch (Exception e) {
             String message = e.getMessage() == null ? "" : e.getMessage();
             if ("buscar_en_internet".equals(tool))
-                result = message.contains("429") ? "La búsqueda de Google no viene incluida en la clave gratis de Gemini, así que por ahora no puedo buscar en internet. El clima sí: pedime «clima en» y la ciudad."
-                        : "No pude completar la búsqueda con Gemini. Revisá la clave o probá más tarde.";
+                result = SearchProtocol.FAILURE;
             else result = e instanceof IllegalArgumentException ? message : "No pude completar la lectura. Revisá los permisos en Ajustes.";
         }
         synchronized (actionGate) {
