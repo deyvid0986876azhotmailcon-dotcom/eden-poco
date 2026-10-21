@@ -12,8 +12,10 @@ import java.util.function.Predicate;
 
 /** Authenticated ingress; shares the chat queue/generation, with confirmations owned by the WhatsApp actor. */
 public final class BridgeInbox {
-    private static final class Result extends CompletableFuture<String> { volatile boolean stopped; }
+    private static final class Result extends CompletableFuture<String> { volatile boolean stopped; volatile String heard; }
     public static boolean wasStopped(CompletableFuture<String> result) { return result instanceof Result && ((Result) result).stopped; }
+    /** What this request's voice note said once transcribed, or null; never another request's words. */
+    public static String heard(CompletableFuture<String> result) { return result instanceof Result ? ((Result) result).heard : null; }
     private final AssistantCore core;
     private final MessageQueue queue;
     private final Object gate;
@@ -62,7 +64,7 @@ public final class BridgeInbox {
                     }
                     String understood = text;
                     if (audio != null) {
-                        try { understood = core.transcribe(audio, ticket); }
+                        try { understood = core.transcribe(audio, ticket); result.heard = understood; }
                         catch (Exception e) {
                             result.complete(dev.poco.asistente.core.AudioInput.FALLBACK); return;
                         }

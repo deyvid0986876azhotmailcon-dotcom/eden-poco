@@ -12,12 +12,18 @@ public final class GeminiSpeech {
     public JSONObject generate(String key, String text, BooleanSupplier cancelled) throws Exception {
         if (key == null || !key.matches("[A-Za-z0-9._-]{20,200}")) return null;
         // first what she would say (short, natural, no codes), then her voice saying only that
+        // codes and IDs never reach the summary model, and whatever it answers is cleaned again
         String spoken = AudioProtocol.plainSpoken(text);
+        String request = AudioProtocol.spokenRequest(spoken).toString();
         for (String model : dev.poco.asistente.core.GeminiProtocol.MODELS) {
             if (cancelled.getAsBoolean() || Thread.currentThread().isInterrupted()) return null;
             try {
-                GeminiClient.Response summary = transport.post(model, key, AudioProtocol.spokenRequest(text).toString());
-                if (summary.status == 200) { spoken = AudioProtocol.spokenText(new JSONObject(summary.body)); break; }
+                GeminiClient.Response summary = transport.post(model, key, request);
+                if (summary.status == 200) {
+                    String said = AudioProtocol.plainSpoken(AudioProtocol.spokenText(new JSONObject(summary.body)));
+                    if (!said.isEmpty()) spoken = said;
+                    break;
+                }
                 if (summary.status != 404 && summary.status != 429 && summary.status != 503) break;
             } catch (Exception e) { break; } // keep the plain version
         }

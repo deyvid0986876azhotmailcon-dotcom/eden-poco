@@ -48,17 +48,29 @@ public final class AudioProtocol {
                 "generationConfig", Json.object("temperature", 0.5, "maxOutputTokens", 300));
     }
     public static String spokenText(JSONObject response) throws Exception {
-        JSONArray parts = response.getJSONArray("candidates").getJSONObject(0).getJSONObject("content").getJSONArray("parts");
+        // only a complete answer: a cut one (MAX_TOKENS, blocked) could end up being the whole reply David gets
+        JSONArray candidates = response.getJSONArray("candidates");
+        if (candidates.length() != 1 || !"STOP".equals(candidates.getJSONObject(0).optString("finishReason")))
+            throw new IllegalArgumentException("Resumen hablado incompleto.");
+        JSONArray parts = candidates.getJSONObject(0).getJSONObject("content").getJSONArray("parts");
         StringBuilder out = new StringBuilder();
-        for (int i = 0; i < parts.length(); i++) if (!parts.getJSONObject(i).optBoolean("thought")) out.append(parts.getJSONObject(i).optString("text"));
+        for (int i = 0; i < parts.length(); i++) {
+            JSONObject part = parts.getJSONObject(i);
+            if (part.has("functionCall")) throw new IllegalArgumentException("Resumen hablado inválido.");
+            if (!part.optBoolean("thought")) out.append(part.optString("text"));
+        }
         String text = out.toString().trim().replaceAll("^[\"«]+|[\"»]+$", "");
         if (text.isEmpty() || text.length() > 600) throw new IllegalArgumentException("Resumen hablado inválido.");
         return text;
     }
-    /** Without the summary (no quota): the written answer without what should not be read aloud. */
+    /**
+     * What must never be read aloud taken out: references, IDs and confirmation codes. Used on the written answer
+     * before the summary, on the summary itself (the model may repeat a code) and as the fallback without quota.
+     */
     public static String plainSpoken(String written) {
-        return written.replaceAll("\\(ref\\.[^)]*\\)", "").replaceAll("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "")
-                .replaceAll("SÍ [0-9A-F]{16}[^\\n]*", "te dejé el código escrito").replaceAll("[«»\"•]", "")
+        return written.replaceAll("\\(ref\\.[^)]*\\)", "").replaceAll("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "")
+                .replaceAll("(?i)S[IÍ] [0-9A-F]{16}[^\\n]*", "te dejé el código escrito").replaceAll("(?i)\\b[0-9a-f]{16}\\b", "")
+                .replaceAll("[«»\"•]", "")
                 .replaceAll("₲ ?([0-9.]+)", "$1 guaraníes").replaceAll("\\s+", " ").trim();
     }
     /** When David sent audio, he gets only the voice note unless he asked for text or there is a code to copy. */
@@ -121,9 +133,14 @@ public final class AudioProtocol {
                 format = true;
             } else if (id == 0x61746164) { // "data"
                 if (!format) throw new IllegalArgumentException("WAV inválido.");
-                // some encoders write 0xFFFFFFFF or a length past the end for streamed WAV: take what is there
-                int end = (int) Math.min(wav.length, body + size);
-                return java.util.Arrays.copyOfRange(wav, body, end - ((end - body) % 2));
+                // a streamed WAV says 0xFFFFFFFF (or 0): take what is there. Any other size must be whole and
+                // complete, since with solo_audio a truncated voice note would be the only answer David gets.
+                if (size == 0xffffffffL || size == 0) {
+                    int available = wav.length - body;
+                    return java.util.Arrays.copyOfRange(wav, body, wav.length - (available % 2));
+                }
+                if (body + size > wav.length || size % 2 != 0) throw new IllegalArgumentException("WAV incompleto.");
+                return java.util.Arrays.copyOfRange(wav, body, (int) (body + size));
             }
             at = body + (int) Math.min(size + (size & 1), wav.length);
         }

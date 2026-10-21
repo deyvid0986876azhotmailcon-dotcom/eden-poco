@@ -44,6 +44,9 @@ public final class LiveSession {
     private final java.util.Map<String, JSONObject> toolAnswers = new java.util.HashMap<>();
     private Thread reader, recorder;
     private int previousMode;
+    // reminders that came due before Live was ready go into her first turn; guarded by this
+    private final java.util.List<String> lateReminders = new java.util.ArrayList<>();
+    private boolean ready;
 
     public LiveSession(AssistantCore core, AudioManager audio, Events events) {
         this.core = core; this.audio = audio; this.events = events;
@@ -123,6 +126,11 @@ public final class LiveSession {
                 String opening = reason == null
                         ? "David te acaba de llamar. Saludalo corto y preguntale qué necesita."
                         : "Lo estás llamando vos para recordarle esto: «" + reason + "». Saludalo, decíselo en una frase y preguntale si necesita algo más.";
+                synchronized (this) {
+                    ready = true;
+                    for (String late : lateReminders) opening += " Además llegó este recordatorio para David: «" + late + "». Decíselo también.";
+                    lateReminders.clear();
+                }
                 socket.sendText(new JSONObject().put("clientContent", new JSONObject()
                         .put("turns", new JSONArray().put(new JSONObject().put("role", "user").put("parts", new JSONArray().put(new JSONObject().put("text", opening)))))
                         .put("turnComplete", true)).toString());
@@ -227,6 +235,13 @@ public final class LiveSession {
 
     /** Another reminder came due while talking: she says it too. */
     public void addReminder(String text) {
+        if (!running) return;
+        synchronized (this) { if (!ready) { lateReminders.add(text); return; } }
+        // called from the screen (onNewIntent): the network write goes to its own thread
+        new Thread(() -> sendReminder(text), "live-reminder").start();
+    }
+
+    private void sendReminder(String text) {
         LiveSocket s = socket;
         if (!running || s == null) return;
         try {

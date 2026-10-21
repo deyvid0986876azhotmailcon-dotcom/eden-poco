@@ -122,4 +122,11 @@ test('a voice note gets only a voice note unless the app asks for text', async (
   await sendReply({ respuesta: 'Anoté', audio: pcm(), solo_audio: true }, owner, async (_, body) => fallback.push(body), () => true, () => {},
     async () => { throw new Error('sin ffmpeg'); });
   assert.deepEqual(fallback, [{ text: 'Anoté' }]);
+  // the voice note converts but WhatsApp rejects it: the text still goes
+  const rejected = [];
+  await sendReply({ respuesta: 'Anoté', audio: pcm(), solo_audio: true }, owner, async (_, body) => {
+    if (body.ptt) throw new Error('subida rechazada');
+    rejected.push(body);
+  }, () => true, () => {}, async () => Buffer.from('OggS'));
+  assert.deepEqual(rejected, [{ text: 'Anoté' }]);
 });

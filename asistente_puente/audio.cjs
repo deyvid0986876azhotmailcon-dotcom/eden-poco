@@ -92,6 +92,13 @@ async function sendReply(reply, chat, send, current, log, convertAudio = convert
   let ogg;
   try { ogg = await convertAudio(reply.audio); }
   catch { log('Audio no disponible: revisar ffmpeg; respuesta enviada como texto'); if (voiceOnly) await sendText(); return; }
-  if (current()) await send(chat, { audio: ogg, mimetype: 'audio/ogg; codecs=opus', ptt: true });
+  if (!current()) return;
+  // An upload or send failure must not leave David with nothing when only the voice note was going.
+  try { await send(chat, { audio: ogg, mimetype: 'audio/ogg; codecs=opus', ptt: true }); }
+  catch (error) {
+    if (!voiceOnly) throw error;
+    log('Audio no enviado; respuesta enviada como texto');
+    await sendText();
+  }
 }
 module.exports = { MAX_BYTES, MAX_SECONDS, MAX_PCM, LISTEN_FAILED, mime, metadata, downloadAudio, convert, sendReply };

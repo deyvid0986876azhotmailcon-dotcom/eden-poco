@@ -87,4 +87,29 @@ public class AudioProtocolTest {
         org.junit.Assert.assertTrue(AudioProtocol.needsText("Gastaste 85.000 hoy.", "cuánto gasté hoy, mandámelo por escrito"));
         org.junit.Assert.assertFalse(AudioProtocol.speech("Hola").toString().contains("Leé"));
     }
+    @Test public void spokenSummaryMustBeCompleteAndNeverCarriesCodes() throws Exception {
+        java.util.function.Function<String, org.json.JSONObject> reply = finish -> {
+            try {
+                return new org.json.JSONObject().put("candidates", new org.json.JSONArray().put(new org.json.JSONObject().put("finishReason", finish)
+                        .put("content", new org.json.JSONObject().put("parts", new org.json.JSONArray().put(new org.json.JSONObject().put("text", "Listo, che."))))));
+            } catch (Exception e) { throw new RuntimeException(e); }
+        };
+        assertEquals("Listo, che.", AudioProtocol.spokenText(reply.apply("STOP")));
+        assertThrows(IllegalArgumentException.class, () -> AudioProtocol.spokenText(reply.apply("MAX_TOKENS")));
+        assertThrows(IllegalArgumentException.class, () -> AudioProtocol.spokenText(reply.apply("SAFETY")));
+        String spoken = AudioProtocol.plainSpoken("Confirmá con SÍ 0123456789ABCDEF ya. El código es 0123456789abcdef.");
+        assertFalse(spoken.toLowerCase().contains("0123456789abcdef"));
+    }
+    @Test public void truncatedWavIsRejectedButStreamedWavIsRead() {
+        java.util.function.IntFunction<byte[]> wav = declared -> {
+            java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(47).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            b.put("RIFF".getBytes()).putInt(39).put("WAVE".getBytes()).put("fmt ".getBytes()).putInt(16)
+                    .putShort((short) 1).putShort((short) 1).putInt(24000).putInt(48000).putShort((short) 2).putShort((short) 16)
+                    .put("data".getBytes()).putInt(declared).put((byte) 1).put((byte) 2).put((byte) 3);
+            return b.array();
+        };
+        assertThrows(IllegalArgumentException.class, () -> AudioProtocol.wavPcm(wav.apply(4)));
+        assertThrows(IllegalArgumentException.class, () -> AudioProtocol.wavPcm(wav.apply(3)));
+        org.junit.Assert.assertArrayEquals(new byte[]{1, 2}, AudioProtocol.wavPcm(wav.apply(-1)));
+    }
 }
