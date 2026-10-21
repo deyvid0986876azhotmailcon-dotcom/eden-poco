@@ -111,9 +111,12 @@ public final class LiveSession {
                         .put("turns", new JSONArray().put(new JSONObject().put("role", "user").put("parts", new JSONArray().put(new JSONObject().put("text", opening)))))
                         .put("turnComplete", true)).toString());
                 events.onState("En llamada");
+                // if she stays silent, David can still talk after a few seconds
+                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(this::openMic, 8000);
                 return;
             }
             JSONObject content = m.optJSONObject("serverContent");
+            if (content != null && (content.optBoolean("turnComplete") || content.optBoolean("generationComplete"))) openMic();
             if (content != null) {
                 if (content.optBoolean("interrupted") && speaker != null) { speaker.pause(); speaker.flush(); speaker.play(); }
                 JSONObject turn = content.optJSONObject("modelTurn");
@@ -162,6 +165,11 @@ public final class LiveSession {
                         .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
                 .setBufferSizeInBytes(Math.max(outMin, OUT_RATE)).setTransferMode(AudioTrack.MODE_STREAM).build();
         speaker.play();
+    }
+
+    /** The microphone opens once she finished her first sentence: open earlier and Live waits for David to talk first. */
+    private synchronized void openMic() {
+        if (!running || mic == null || recorder != null) return;
         mic.startRecording();
         recorder = new Thread(this::record, "live-mic");
         recorder.start();
