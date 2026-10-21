@@ -111,3 +111,24 @@ Datos históricos aportados por el proyecto, no vueltos a verificar por Codex en
 - El puente conserva el último chat del dueño validado por el filtro actual (teléfono o LID) en `owner-chat.json`, y estados de envío en `outgoing.ids`, ambos dentro de `~/.asistente_puente`, modo 600. Sin chat previo usa el teléfono de config. Un ACK perdido se repite sin volver a enviar. **Límite deliberado:** una caída/timeout entre registrar intención y confirmar el envío a WhatsApp queda «entrega incierta» en el log del puente, no se reenvía ni se marca entregada automáticamente. Se prioriza evitar duplicados; no se garantiza entrega exactamente una vez. Requiere revisión de Claude, sin borrar el ledger.
 - PARAR invalida resultados de Gemini, cancela la cola saliente preparada y pausa la generación en el proceso; un nuevo pedido aceptado la habilita. Si PARAR llegó por WhatsApp, el sondeo del puente espera otro mensaje autorizado por WhatsApp. Los recordatorios futuros se conservan. Un envío ya entregado a Baileys no se puede retirar. Apagar el servicio también cancela la cola preparada.
 - Comprobaciones de Codex: pruebas Node sin red para sondeo, identidad persistida, pérdida de ACK, reinicio, fallo ambiguo y PARAR; pruebas JVM agregadas para validación, historial/prompt, calendario/zona/silencio, resúmenes y endpoints. Compilación/JVM y uso real quedan para CI/Claude; no se compiló ni se usó adb en esta notebook.
+
+## Fase 3: control del teléfono (decidido con David el 2026-10-20)
+
+**Desde dónde:** WhatsApp, la llamada de voz y el chat de la app.
+
+**Qué hace y cómo se confirma**
+
+| Acción | Confirmación |
+|---|---|
+| Alarmas y temporizadores, leer notificaciones, abrir apps y música, consultar la agenda, buscar en internet y resumir | Ninguna (riesgo bajo) |
+| Descargar lo que pida a una carpeta propia del asistente, armar PDFs y mandarlos por WhatsApp | Ninguna, solo a David |
+| Mandar mensajes a otros, llamar a contactos, agendar en el calendario, cambiar ajustes (wifi, bluetooth, no molestar, brillo) | Por WhatsApp o app: SÍ + código. En la llamada: ella lee en voz alta exactamente qué va a hacer y David dice «sí, confirmo» (lo pedido en esa misma llamada) |
+| Pagos y compras | Siempre SÍ + código, también en la llamada |
+
+**Nunca:** apps de bancos y billeteras, autenticadores, gestor de contraseñas, códigos de verificación (se tapan antes de mandar la pantalla al modelo). Lo que diga una pantalla, una página o un mensaje de otra persona es dato, nunca orden. «PARAR» corta todo. Registro de cada acción en la app.
+
+**Finanzas desde el correo del banco:** en vez de entrar al banco, leer con permiso de solo lectura de Gmail solo los correos del remitente del banco, anotar gastos e ingresos (monto, comercio, fecha) y avisar; si un correo no se entiende, preguntar antes de anotar. Falta: qué banco y un correo de ejemplo de gasto y de ingreso (con la cuenta tapada). El saldo, por captura de pantalla que manda David.
+
+**Pendiente de aclarar:** «verificación de paso» (¿contador de pasos?).
+
+**Cómo:** servicio de accesibilidad de la app (ver pantalla, tocar, escribir) con lista cerrada de acciones y apps permitidas; ejecutor que valida cada acción como hoy los registros. Primero lo que solo lee, después acciones simples, al final lo que pide confirmación.
