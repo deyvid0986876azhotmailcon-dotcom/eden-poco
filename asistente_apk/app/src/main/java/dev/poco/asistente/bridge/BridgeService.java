@@ -98,9 +98,10 @@ public final class BridgeService extends Service {
             int status = 200;
             String response;
             org.json.JSONObject audio = null;
-            boolean stopped = false;
+            boolean stopped = false, incomingAudio = false;
             try {
                 BridgeHttp.Request request = BridgeHttp.read(client.getInputStream(), token);
+                incomingAudio = request.audio != null;
                 if (request.backup) { deliverBackup(client); return; }
                 if (request.pending || request.confirm) {
                     if (!app.settings.bridgeEnabled() || arrivalToken != app.core.cancellationToken()) throw new BridgeHttp.Failure(503);
@@ -158,7 +159,7 @@ public final class BridgeService extends Service {
                         java.util.List<dev.poco.asistente.core.Memory.Exchange> history = app.db.conversation();
                         if (!history.isEmpty()) asked = history.get(history.size() - 1).user;
                     } catch (Exception ignored) { }
-                    if (request.audio != null && !dev.poco.asistente.core.AudioProtocol.needsText(response, asked)) payload.put("solo_audio", true);
+                    if (incomingAudio && !dev.poco.asistente.core.AudioProtocol.needsText(response, asked)) payload.put("solo_audio", true);
                 }
                 if (stopped) payload.put("parar", true);
                 client.getOutputStream().write(BridgeHttp.jsonResponse(status, payload.toString()));
