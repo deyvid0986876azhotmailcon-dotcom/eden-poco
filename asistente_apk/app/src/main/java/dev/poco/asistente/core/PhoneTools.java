@@ -49,7 +49,7 @@ public final class PhoneTools {
                 LocalDate from = LocalDate.parse(Validation.date(Validation.string(a, "desde", 10)));
                 LocalDate to = LocalDate.parse(Validation.date(Validation.string(a, "hasta", 10)));
                 long days = ChronoUnit.DAYS.between(from, to);
-                if (days < 0 || days > 31) throw new IllegalArgumentException("Elegí un período de hasta 31 días, con el final después del inicio.");
+                if (days < 0 || days >= 31) throw new IllegalArgumentException("Elegí un período de hasta 31 días, con el final después del inicio.");
                 break;
             case "buscar_en_internet": Validation.keys(a, "consulta"); a.put("consulta", Validation.string(a, "consulta", 300)); break;
             default: throw new IllegalArgumentException("Esa herramienta no está permitida.");
@@ -57,6 +57,23 @@ public final class PhoneTools {
         return a;
     }
     private static void label(JSONObject a) throws Exception { if (a.has("etiqueta")) a.put("etiqueta", Validation.string(a, "etiqueta", 100)); }
+    /** Instances stores all-day dates at UTC midnight, timed events as actual instants. */
+    public static final class CalendarWindow {
+        private final long localStart, localEnd, utcStart, utcEnd;
+        public CalendarWindow(String from, String through) {
+            LocalDate start = LocalDate.parse(from), end = LocalDate.parse(through).plusDays(1);
+            localStart = start.atStartOfDay(Reminders.ZONE).toInstant().toEpochMilli();
+            localEnd = end.atStartOfDay(Reminders.ZONE).toInstant().toEpochMilli();
+            utcStart = start.atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli();
+            utcEnd = end.atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli();
+        }
+        public long queryStart() { return Math.min(localStart, utcStart); }
+        public long queryEnd() { return Math.max(localEnd, utcEnd); }
+        public boolean includes(long start, long end, boolean allDay) {
+            long from = allDay ? utcStart : localStart, until = allDay ? utcEnd : localEnd;
+            return start < until && (end > from || (end == start && start >= from));
+        }
+    }
     public static JSONArray declarations() throws Exception {
         JSONArray out = new JSONArray();
         for (String name : NAMES) {

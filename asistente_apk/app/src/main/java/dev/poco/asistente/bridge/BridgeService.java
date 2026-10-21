@@ -150,7 +150,7 @@ public final class BridgeService extends Service {
                 status = 503; response = "No disponible";
             }
             if (status == 200) {
-                org.json.JSONObject payload = new org.json.JSONObject().put("respuesta", response);
+                org.json.JSONObject payload = new org.json.JSONObject().put("respuesta", dev.poco.asistente.core.ExternalData.display(response));
                 if (audio != null) {
                     payload.put("audio", audio);
                     // David sent a voice note: he gets only hers, unless he asked for it in writing or there is a code to copy.

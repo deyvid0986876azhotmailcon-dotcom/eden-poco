@@ -68,7 +68,7 @@ public final class AssistantCore {
             try {
                 if ("buscar_en_internet".equals(tool)) SearchProtocol.requireUserQuery(Validation.string(args, "consulta", 300), guard.userText());
                 if (PhoneTools.external(tool)) guard.expose();
-                return dispatch("llamada", "llamada:" + UUID.randomUUID(), tool, args, ticket);
+                return dispatch("llamada", "llamada:" + UUID.randomUUID(), tool, args, ticket, guard::closed);
             }
             catch (IllegalArgumentException e) { return e.getMessage(); }
             catch (Exception e) { return "No pude hacerlo."; }
@@ -222,30 +222,38 @@ public final class AssistantCore {
         return "Cancelé las confirmaciones pendientes y la respuesta en curso. Apagué el control del teléfono; solo se vuelve a encender desde la app.";
     }
     private String dispatch(String actor, String operation, String tool, org.json.JSONObject args, long ticket) throws Exception {
+        return dispatch(actor, operation, tool, args, ticket, () -> false);
+    }
+    private String dispatch(String actor, String operation, String tool, org.json.JSONObject args, long ticket,
+            java.util.function.BooleanSupplier closed) throws Exception {
         org.json.JSONObject checked;
         synchronized (actionGate) {
-            if (ticket != generation.get()) return "Pedido cancelado.";
-            if (!"buscar_en_internet".equals(tool)) return executor.execute(actor, operation, tool, args);
+            if (ticket != generation.get() || closed.getAsBoolean()) return "Pedido cancelado.";
+            if (!PhoneTools.external(tool)) return executor.execute(actor, operation, tool, args);
             executor.requirePhone();
             String previous = store.receipt(operation);
             if (previous != null) return previous;
             checked = executor.beginPhone(operation, tool, args);
         }
-        // Never hold actionGate during network I/O: PARAR can invalidate this request immediately.
+        // Provider/Binder reads can also stall. PARAR must not wait for Android or the network.
         String result;
         try {
-            GeminiProtocol.Reply reply = cloud.generate(settings.apiKey(), settings.model(), SearchProtocol.request(checked.getString("consulta")),
-                    () -> ticket != generation.get() || !settings.phoneEnabled());
-            if (reply.tool != null || reply.text == null) throw new IllegalArgumentException("La búsqueda devolvió una acción; la descarté.");
-            result = ExternalData.isExternal(reply.text) ? reply.text : ExternalData.wrap(reply.text);
+            if ("buscar_en_internet".equals(tool)) {
+                GeminiProtocol.Reply reply = cloud.generate(settings.apiKey(), settings.model(), SearchProtocol.request(checked.getString("consulta")),
+                        () -> ticket != generation.get() || closed.getAsBoolean() || !settings.phoneEnabled());
+                if (reply.tool != null || reply.text == null) throw new IllegalArgumentException("La búsqueda devolvió una acción; la descarté.");
+                result = ExternalData.isExternal(reply.text) ? reply.text : ExternalData.wrap(reply.text);
+            } else result = executor.readPhone(tool, checked);
         } catch (Exception e) {
             String message = e.getMessage() == null ? "" : e.getMessage();
-            result = message.contains("429") ? "La búsqueda no tiene cupo disponible con tu clave de Gemini. Probá más tarde."
-                    : "No pude completar la búsqueda con Gemini. Revisá la clave o probá más tarde.";
+            if ("buscar_en_internet".equals(tool))
+                result = message.contains("429") ? "La búsqueda no tiene cupo disponible con tu clave de Gemini. Probá más tarde."
+                        : "No pude completar la búsqueda con Gemini. Revisá la clave o probá más tarde.";
+            else result = e instanceof IllegalArgumentException ? message : "No pude completar la lectura. Revisá los permisos en Ajustes.";
         }
         synchronized (actionGate) {
-            if (ticket != generation.get() || !settings.phoneEnabled()) {
-                store.finishAction(operation, "Búsqueda cancelada; no entregué su resultado.");
+            if (ticket != generation.get() || closed.getAsBoolean() || !settings.phoneEnabled()) {
+                store.finishAction(operation, "Lectura cancelada; no entregué su resultado.");
                 return "Pedido cancelado.";
             }
             return executor.finishPhone(operation, tool, result);

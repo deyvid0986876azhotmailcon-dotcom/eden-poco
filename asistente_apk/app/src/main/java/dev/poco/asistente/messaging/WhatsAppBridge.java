@@ -70,7 +70,8 @@ public final class WhatsAppBridge {
     private boolean active(long token) { return app.settings.whatsappEnabled() && token == app.core.cancellationToken(); }
     private void deliver(String id, String sender, String response, Reply reply, long token) {
         if (reply == null) { log(sender, "Respuesta pendiente: el aviso no trae la acción Responder."); return; }
-        List<String> chunks = NotificationPolicy.split(response, 1800);
+        String shown = dev.poco.asistente.core.ExternalData.display(response);
+        List<String> chunks = NotificationPolicy.split(shown, 1800);
         int offset = 0;
         for (int i = 0; i < chunks.size(); i++) {
             synchronized (app.controlGate) {
@@ -85,13 +86,13 @@ public final class WhatsAppBridge {
                     log(sender, "Respuesta fallida en parte " + (i + 1) + "/" + chunks.size() + "; resto en Registro."); return;
                 }
                 offset += chunks.get(i).length();
-                app.db.noticeState(id, offset == response.length() ? "enviado a Responder" : "pendiente", pendingText(response, offset));
+                app.db.noticeState(id, offset == shown.length() ? "enviado a Responder" : "pendiente", pendingText(response, offset));
                 log(sender, "Respuesta enviada a Responder " + (i + 1) + "/" + chunks.size() + " (entrega no confirmada).");
             }
         }
     }
     private void log(String sender, String event) { app.db.messagingLog(sender, event); app.changed(); }
     private static String pendingText(String response, int offset) {
-        return dev.poco.asistente.core.ExternalData.isExternal(response) ? "" : response.substring(offset);
+        return dev.poco.asistente.core.ExternalData.pending(response, offset);
     }
 }

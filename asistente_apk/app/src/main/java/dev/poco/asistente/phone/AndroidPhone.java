@@ -91,18 +91,18 @@ public final class AndroidPhone implements PhoneTools.Port {
     private String calendar(JSONObject a) {
         if (app.checkSelfPermission(Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED)
             throw new IllegalArgumentException("En Asistente → Ajustes → Control del teléfono, tocá Permitir lectura de agenda.");
-        long from = LocalDate.parse(a.optString("desde")).atStartOfDay(Reminders.ZONE).toInstant().toEpochMilli();
-        long until = LocalDate.parse(a.optString("hasta")).plusDays(1).atStartOfDay(Reminders.ZONE).toInstant().toEpochMilli();
+        PhoneTools.CalendarWindow window = new PhoneTools.CalendarWindow(a.optString("desde"), a.optString("hasta"));
         android.net.Uri.Builder uri = CalendarContract.Instances.CONTENT_URI.buildUpon();
-        ContentUris.appendId(uri, from); ContentUris.appendId(uri, until);
+        ContentUris.appendId(uri, window.queryStart()); ContentUris.appendId(uri, window.queryEnd());
         String[] columns = {CalendarContract.Instances.TITLE, CalendarContract.Instances.BEGIN, CalendarContract.Instances.END,
                 CalendarContract.Instances.EVENT_LOCATION, CalendarContract.Instances.ALL_DAY};
         StringBuilder text = new StringBuilder(); int count = 0;
         try (Cursor c = app.getContentResolver().query(uri.build(), columns, CalendarContract.Instances.VISIBLE + "=1", null, CalendarContract.Instances.BEGIN + " ASC")) {
             if (c == null) throw new IllegalArgumentException("No pude leer la agenda.");
             while (c.moveToNext()) {
-                if (count++ == 50 || text.length() > 10000) { text.append("Hay más eventos; pedime un período más corto.\n"); break; }
                 boolean allDay = c.getInt(4) != 0;
+                if (!window.includes(c.getLong(1), c.getLong(2), allDay)) continue;
+                if (count++ == 50 || text.length() > 10000) { text.append("Hay más eventos; pedime un período más corto.\n"); break; }
                 String start = Instant.ofEpochMilli(c.getLong(1)).atZone(allDay ? ZoneOffset.UTC : Reminders.ZONE)
                         .format(DateTimeFormatter.ofPattern(allDay ? "dd/MM 'todo el día'" : "dd/MM HH:mm"));
                 String end = allDay ? "" : " a " + Instant.ofEpochMilli(c.getLong(2)).atZone(Reminders.ZONE).format(DateTimeFormatter.ofPattern("dd/MM HH:mm"));

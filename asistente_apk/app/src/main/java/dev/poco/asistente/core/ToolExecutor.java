@@ -139,6 +139,12 @@ public final class ToolExecutor {
     public void requirePhone() {
         if (!phoneEnabled.getAsBoolean()) throw new IllegalArgumentException("El control del teléfono está apagado. Encendelo desde Ajustes de la app.");
     }
+    /** Read-only port, deliberately outside the executor/action locks so PARAR stays responsive. */
+    public String readPhone(String tool, JSONObject checked) throws Exception {
+        if (!PhoneTools.external(tool) || "buscar_en_internet".equals(tool)) throw new IllegalArgumentException("Lectura no permitida.");
+        requirePhone();
+        return phone.execute(tool, checked);
+    }
     public JSONObject beginPhone(String operation, String tool, JSONObject args) throws Exception {
         requirePhone();
         JSONObject checked = PhoneTools.validate(tool, args);

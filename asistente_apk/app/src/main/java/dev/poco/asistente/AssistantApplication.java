@@ -68,7 +68,7 @@ public final class AssistantApplication extends Application {
             long token = core.cancellationToken();
             append("David: " + text); changed();
             messages.add(() -> {
-                try { append("Asistente: " + core.receive(text, token)); }
+                try { append("Asistente: " + dev.poco.asistente.core.ExternalData.display(core.receive(text, token))); }
                 finally {
                     synchronized (controlGate) {
                         if (token == core.cancellationToken()) synchronized (this) { busy = false; }

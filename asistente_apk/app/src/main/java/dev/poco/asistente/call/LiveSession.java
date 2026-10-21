@@ -134,13 +134,16 @@ public final class LiveSession {
                         ? "David te acaba de llamar. Saludalo corto y preguntale qué necesita."
                         : "Lo estás llamando vos para recordarle esto: «" + reason + "». Saludalo, decíselo en una frase y preguntale si necesita algo más.";
                 synchronized (this) {
-                    ready = true;
                     for (String late : lateReminders) opening += " Además llegó este recordatorio para David: «" + late + "». Decíselo también.";
                     lateReminders.clear();
                 }
                 socket.sendText(new JSONObject().put("clientContent", new JSONObject()
                         .put("turns", new JSONArray().put(new JSONObject().put("role", "user").put("parts", new JSONArray().put(new JSONObject().put("text", opening)))))
                         .put("turnComplete", true)).toString());
+                // ready only after her opening went out, so no reminder overtakes it; any that came meanwhile go now
+                java.util.List<String> meanwhile;
+                synchronized (this) { ready = true; meanwhile = new java.util.ArrayList<>(lateReminders); lateReminders.clear(); }
+                for (String late : meanwhile) sendReminder(late);
                 events.onState("En llamada");
                 // if she stays silent, David can still talk after a few seconds
                 main.postDelayed(micFallback, 8000);
@@ -269,6 +272,7 @@ public final class LiveSession {
     private synchronized void end(String why) {
         if (!running) return;
         running = false;
+        externalGuard.close();
         main.removeCallbacks(micFallback);
         // Closing TLS writes close_notify, and a hang-up runs on the main thread (NetworkOnMainThreadException).
         LiveSocket closing = socket;

@@ -9,7 +9,7 @@ import static org.junit.Assert.*;
 
 public class PhoneCoreTest {
     private static final class Settings implements AssistantCore.Settings {
-        boolean enabled;
+        volatile boolean enabled;
         public String apiKey() { return "abcdefghijklmnopqrstuv"; }
         public String model() { return GeminiProtocol.MODELS[0]; }
         public String currency() { return "PYG"; }
@@ -106,5 +106,66 @@ public class PhoneCoreTest {
         AssistantCore core = core((key, model, body) -> { throw new AssertionError(); }, (tool, args) -> { throw new AssertionError(); });
         assertTrue(core.receive("PARAR", AssistantCore.Source.UNTRUSTED_DATA, "notice1").contains("no órdenes"));
         assertTrue(settings.enabled); assertTrue(store.receipts.isEmpty());
+    }
+    @Test public void stopDoesNotWaitForAndroidReadAndNeverDeliversItsLateContent() throws Exception {
+        settings.enabled = true;
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        AssistantCore core = core((key, model, body) -> new GeminiProtocol.Reply(null, "consultar_agenda",
+                Json.object("desde", "2026-10-21", "hasta", "2026-10-21"), ""), (tool, args) -> {
+            entered.countDown();
+            if (!release.await(5, TimeUnit.SECONDS)) throw new IllegalStateException();
+            return ExternalData.wrap("CONTENIDO_PRIVADO_TARDIO");
+        });
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<String> reading = workers.submit(() -> core.receive("leé la agenda"));
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            assertTrue(workers.submit(core::stop).get(1, TimeUnit.SECONDS).contains("Apagué"));
+            release.countDown();
+            assertTrue(reading.get(5, TimeUnit.SECONDS).contains("cancelado"));
+            assertFalse(store.history("2026-10-21").contains("CONTENIDO_PRIVADO"));
+            assertTrue(store.conversation().isEmpty());
+        } finally { release.countDown(); workers.shutdownNow(); }
+    }
+    @Test public void hangupInvalidatesToolWaitingForAnotherAction() throws Exception {
+        settings.enabled = true; AtomicInteger effects = new AtomicInteger();
+        AssistantCore core = core((key, model, body) -> { throw new AssertionError(); },
+                (tool, args) -> { effects.incrementAndGet(); return "Abierta"; });
+        ExternalData.Guard guard = new ExternalData.Guard();
+        CountDownLatch locked = new CountDownLatch(1), release = new CountDownLatch(1);
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        AtomicReference<Thread> caller = new AtomicReference<>();
+        try {
+            Future<?> blocking = workers.submit(() -> core.proactiveAction(core.cancellationToken(), () -> {
+                locked.countDown(); release.await(5, TimeUnit.SECONDS); return null;
+            }, null));
+            assertTrue(locked.await(5, TimeUnit.SECONDS));
+            Future<String> action = workers.submit(() -> {
+                caller.set(Thread.currentThread());
+                return core.callTool("abrir_app", Json.object("nombre", "Música"), guard);
+            });
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while ((caller.get() == null || caller.get().getState() != Thread.State.BLOCKED) && System.nanoTime() < deadline) Thread.yield();
+            assertNotNull(caller.get()); assertEquals(Thread.State.BLOCKED, caller.get().getState());
+            guard.close(); release.countDown();
+            assertTrue(action.get(5, TimeUnit.SECONDS).contains("cancelado")); blocking.get(5, TimeUnit.SECONDS);
+            assertEquals(0, effects.get()); assertTrue(settings.enabled); assertTrue(store.receipts.isEmpty());
+        } finally { release.countDown(); workers.shutdownNow(); }
+    }
+    @Test public void hangupDuringExternalReadDoesNotBlockOrPersistItsAnswer() throws Exception {
+        settings.enabled = true;
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        AssistantCore core = core((key, model, body) -> { throw new AssertionError(); }, (tool, args) -> {
+            entered.countDown(); release.await(5, TimeUnit.SECONDS); return ExternalData.wrap("AVISO_PRIVADO");
+        });
+        ExternalData.Guard guard = new ExternalData.Guard();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<String> result = worker.submit(() -> core.callTool("leer_notificaciones", new JSONObject(), guard));
+            assertTrue(entered.await(5, TimeUnit.SECONDS)); guard.close(); release.countDown();
+            assertTrue(result.get(5, TimeUnit.SECONDS).contains("cancelado"));
+            assertFalse(store.history("2026-10-21").contains("AVISO_PRIVADO"));
+            assertTrue(store.conversation().isEmpty());
+        } finally { release.countDown(); worker.shutdownNow(); }
     }
 }

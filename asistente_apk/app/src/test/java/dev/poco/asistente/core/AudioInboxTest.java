@@ -50,6 +50,20 @@ public class AudioInboxTest {
             assertTrue(store.rows().isEmpty()); assertTrue(store.conversation().isEmpty());
         }
     }
+    @Test public void writtenPreferenceBelongsToTheRequestEvenAfterAnotherAudioFinishes() {
+        String[] words = {"hola, mandame el texto por escrito"};
+        setup("key", (key, model, body) -> transcript(words[0]));
+        CompletableFuture<String> first = inbox.acceptAudio("first", AUDIO, core.cancellationToken());
+        tasks.remove().run(); first.join();
+        words[0] = "hola che";
+        CompletableFuture<String> second = inbox.acceptAudio("second", AUDIO, core.cancellationToken());
+        tasks.remove().run(); second.join();
+        assertEquals("hola, mandame el texto por escrito", BridgeInbox.heard(first));
+        assertEquals("hola che", BridgeInbox.heard(second));
+        assertTrue(AudioProtocol.needsText(first.join(), BridgeInbox.heard(first)));
+        assertFalse(AudioProtocol.needsText(second.join(), BridgeInbox.heard(second)));
+        assertNull(BridgeInbox.heard(CompletableFuture.completedFuture("sin transcripción")));
+    }
     @Test public void spokenStopCancelsFollowingWorkBeforeAcknowledging() {
         setup("key", (key, model, body) -> transcript("Parar."));
         long ticket = core.cancellationToken();

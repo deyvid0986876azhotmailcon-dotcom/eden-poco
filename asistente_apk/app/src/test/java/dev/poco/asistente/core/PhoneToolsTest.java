@@ -28,4 +28,20 @@ public class PhoneToolsTest {
         assertThrows(IllegalArgumentException.class, () -> PhoneTools.validate("musica", Json.object("accion", "pausar", "app", "spotify")));
         assertThrows(IllegalArgumentException.class, () -> PhoneTools.validate("agendar", new JSONObject()));
     }
+    @Test public void calendarLimitsCountBothDatesAndSeparateAllDayFromLocalInstants() throws Exception {
+        PhoneTools.validate("consultar_agenda", Json.object("desde", "2026-10-01", "hasta", "2026-10-31"));
+        assertThrows(IllegalArgumentException.class, () -> PhoneTools.validate("consultar_agenda", Json.object("desde", "2026-10-01", "hasta", "2026-11-01")));
+        PhoneTools.CalendarWindow day = new PhoneTools.CalendarWindow("2026-10-21", "2026-10-21");
+        long today = java.time.Instant.parse("2026-10-21T00:00:00Z").toEpochMilli();
+        long tomorrow = today + 86400000L;
+        assertTrue(day.includes(today, tomorrow, true));
+        assertFalse(day.includes(tomorrow, tomorrow + 86400000L, true));
+        assertFalse(day.includes(today - 86400000L, today, true));
+        assertTrue(day.includes(today - 86400000L, tomorrow, true));
+        // Midnight UTC on the 22nd is still the evening of the 21st in Asunción.
+        assertTrue(day.includes(tomorrow, tomorrow + 3600000L, false));
+        long localEnd = java.time.LocalDate.parse("2026-10-22").atStartOfDay(Reminders.ZONE).toInstant().toEpochMilli();
+        assertFalse(day.includes(localEnd, localEnd + 3600000L, false));
+        assertTrue(day.includes(tomorrow, tomorrow, false));
+    }
 }
