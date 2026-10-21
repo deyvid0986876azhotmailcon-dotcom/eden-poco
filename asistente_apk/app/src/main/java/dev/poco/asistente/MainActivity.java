@@ -49,7 +49,8 @@ public final class MainActivity extends Activity {
     private TextView send;
     private TextView messagingLog;
     private boolean readingLog;
-    private Switch bridgeToggle, noticeToggle;
+    private Switch bridgeToggle, noticeToggle, phoneToggle;
+    private TextView phoneStatus;
     private String screen = "Chat", draft = "", shownChat = null;
     private final Runnable observer = this::refreshChat;
     @Override public void onCreate(Bundle savedState) {
@@ -84,6 +85,7 @@ public final class MainActivity extends Activity {
         }
     }
     @Override protected void onStart() { super.onStart(); app.listen(observer); refreshChat(); }
+    @Override protected void onResume() { super.onResume(); refreshPhoneStatus(); }
     @Override protected void onStop() { app.unlisten(observer); super.onStop(); }
     @Override protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state); state.putString("screen", screen); // no key or chat copied to Bundle
@@ -131,7 +133,7 @@ public final class MainActivity extends Activity {
 
     private void show(String name) {
         if (input != null) draft = input.getText().toString();
-        screen = name; body.removeAllViews(); input = null; bubbles = null; shownChat = null; messagingLog = null; bridgeToggle = null; noticeToggle = null;
+        screen = name; body.removeAllViews(); input = null; bubbles = null; shownChat = null; messagingLog = null; bridgeToggle = null; noticeToggle = null; phoneToggle = null; phoneStatus = null;
         tabs.removeAllViews();
         for (int i = 0; i < SCREENS.length; i++) {
             String target = SCREENS[i];
@@ -191,6 +193,7 @@ public final class MainActivity extends Activity {
         return list;
     }
     private void refreshChat() {
+        refreshPhoneStatus();
         if (bridgeToggle != null) bridgeToggle.setChecked(app.settings.bridgeEnabled());
         if (noticeToggle != null) noticeToggle.setChecked(app.settings.whatsappEnabled());
         if (screen.equals("Registro")) { refreshMessaging(); return; }
@@ -215,7 +218,7 @@ public final class MainActivity extends Activity {
     // ---- Registro
 
     private void messaging() {
-        body.addView(title("Registro de WhatsApp"));
+        body.addView(title("Registro de acciones y WhatsApp"));
         LinearLayout content = new LinearLayout(this); page(content);
         LinearLayout card = ui.card(); content.addView(card);
         card.addView(ui.cardTitle(Icons.WHATSAPP, "Mensajes y puente", true));
@@ -230,7 +233,7 @@ public final class MainActivity extends Activity {
         readingLog = true; TextView target = messagingLog;
         app.io.execute(() -> {
             String result;
-            try { result = app.db.messagingHistory(); }
+            try { result = app.db.history(java.time.LocalDate.now(dev.poco.asistente.core.Reminders.ZONE).toString()) + "\n" + app.db.messagingHistory(); }
             catch (RuntimeException e) { result = "No pude leer el registro de WhatsApp."; }
             String display = result;
             app.main.post(() -> {
@@ -367,6 +370,7 @@ public final class MainActivity extends Activity {
     private void settings() {
         body.addView(title("Ajustes"));
         LinearLayout form = new LinearLayout(this); page(form);
+        phoneCard(form);
 
         LinearLayout gemini = ui.card(); form.addView(gemini);
         gemini.addView(ui.cardTitle(Icons.KEY, "Clave de Gemini", false));
@@ -525,5 +529,41 @@ public final class MainActivity extends Activity {
         try { version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception ignored) { }
         about.addView(label("Asistente " + version + " — firma de depuración pública; la firma privada sigue pendiente."));
         about.addView(label(Icons.CREDIT));
+    }
+    private void refreshPhoneStatus() {
+        if (phoneToggle != null) phoneToggle.setChecked(app.settings.phoneEnabled());
+        if (phoneStatus == null) return;
+        boolean notices = getSystemService(android.app.NotificationManager.class).isNotificationListenerAccessGranted(
+                new android.content.ComponentName(this, dev.poco.asistente.phone.PhoneNotifications.class));
+        boolean calendar = checkSelfPermission(android.Manifest.permission.READ_CALENDAR) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        phoneStatus.setText("Accesibilidad: " + (dev.poco.asistente.phone.PhoneAccessibility.connected() ? "conectada" : "sin conectar")
+                + "\nNotificaciones: " + (notices ? "permitidas" : "sin permiso") + "\nAgenda: " + (calendar ? "lectura permitida" : "sin permiso"));
+    }
+    private void phoneCard(LinearLayout form) {
+        LinearLayout card = ui.card(); form.addView(card);
+        card.addView(ui.cardTitle(Icons.PHONE, "Control del teléfono", false));
+        card.addView(label("Abrir apps, reloj, música y lecturas. PARAR lo apaga. No lee ni toca la pantalla."));
+        phoneToggle = toggle("Control del teléfono"); phoneToggle.setChecked(app.settings.phoneEnabled()); card.addView(phoneToggle);
+        phoneToggle.setOnCheckedChangeListener((view, enabled) -> {
+            if (enabled == app.settings.phoneEnabled()) return;
+            if (enabled) {
+                // Invalidate work admitted while control was off before enabling from the visible app.
+                app.stop(); app.settings.setPhoneEnabled(true); app.changed();
+            } else app.stop();
+            refreshPhoneStatus();
+        });
+        phoneStatus = label(""); card.addView(phoneStatus);
+        card.addView(button("Accesibilidad", false, () -> phoneSetting(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+        card.addView(button("Notificaciones", false, () -> phoneSetting(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)));
+        card.addView(button("Permitir lectura de agenda", false, () -> requestPermissions(new String[]{android.Manifest.permission.READ_CALENDAR}, 44)));
+        card.addView(label("Activá «Asistente: abrir apps» y «Asistente: leer avisos». Si Android lo bloquea, permití ajustes restringidos en la información de Asistente."));
+        refreshPhoneStatus();
+    }
+    private void phoneSetting(String action) {
+        try { startActivity(new Intent(action)); }
+        catch (RuntimeException e) { if (phoneStatus != null) phoneStatus.setText("Abrí ese permiso desde Ajustes del teléfono → Asistente."); }
+    }
+    @Override public void onRequestPermissionsResult(int code, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(code, permissions, results); refreshPhoneStatus();
     }
 }

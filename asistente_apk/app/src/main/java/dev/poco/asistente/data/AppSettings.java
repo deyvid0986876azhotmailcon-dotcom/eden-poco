@@ -18,6 +18,14 @@ public final class AppSettings implements dev.poco.asistente.core.Proactive.Sett
         bridgeVault = new KeyVault(context, "bridge_vault", "dev.poco.asistente.bridge.v1");
     }
     public boolean bridgeEnabled() { return prefs.getBoolean("bridge_enabled", false); }
+    @Override public boolean phoneEnabled() { return prefs.getBoolean("phone_enabled", false); }
+    @Override public void disablePhone() { setPhoneEnabled(false); }
+    public void setPhoneEnabled(boolean enabled) {
+        // Commit before returning so a process restart cannot restore control after PARAR.
+        boolean saved = prefs.edit().putBoolean("phone_enabled", enabled).commit();
+        if (!enabled) dev.poco.asistente.phone.PhoneNotifications.clear();
+        if (!saved) throw new IllegalStateException("No pude guardar el estado del control del teléfono.");
+    }
     public String audioReplyMode() { return prefs.getString("audio_reply_mode", dev.poco.asistente.core.AudioProtocol.ON_AUDIO); }
     public void saveAudioReplyMode(String mode) {
         if (!Arrays.asList("nunca", "audio", "siempre").contains(mode)) throw new IllegalArgumentException("Modo de audio inválido.");

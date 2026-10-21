@@ -31,6 +31,10 @@ class TestStore implements Store {
         receipts.put(op, result); return result;
     }
     @Override public String history(String date) { return String.join("\n", receipts.values()); }
+    @Override public void beginAction(String id, String tool, long time) {
+        if (receipts.putIfAbsent(id, "Pedido iniciado; resultado incierto.") != null) throw new IllegalStateException("Pedido repetido");
+    }
+    @Override public void finishAction(String id, String result) { receipts.put(id, result); }
     static final class MutableClock extends Clock {
         long millis = Instant.parse("2026-10-17T12:00:00Z").toEpochMilli();
         @Override public ZoneId getZone() { return ZoneOffset.UTC; }

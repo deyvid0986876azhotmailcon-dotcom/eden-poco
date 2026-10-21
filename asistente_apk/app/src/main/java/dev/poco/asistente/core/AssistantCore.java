@@ -17,6 +17,8 @@ public final class AssistantCore {
         String apiKey() throws Exception;
         String model();
         String currency();
+        default boolean phoneEnabled() { return false; }
+        default void disablePhone() {}
     }
     private final Store store;
     private final Settings settings;
@@ -31,8 +33,11 @@ public final class AssistantCore {
         this(store, settings, cloud, clock, () -> System.nanoTime() / 1_000_000L);
     }
     public AssistantCore(Store store, Settings settings, Cloud cloud, Clock clock, LongSupplier elapsedMillis) {
+        this(store, settings, cloud, clock, elapsedMillis, PhoneTools.UNAVAILABLE);
+    }
+    public AssistantCore(Store store, Settings settings, Cloud cloud, Clock clock, LongSupplier elapsedMillis, PhoneTools.Port phone) {
         this.store = store; this.settings = settings; this.cloud = cloud; this.clock = clock;
-        executor = new ToolExecutor(store, clock, elapsedMillis);
+        executor = new ToolExecutor(store, clock, elapsedMillis, settings::phoneEnabled, phone);
     }
     public String receive(String text) { return receive(text, Source.LOCAL_USER, UUID.randomUUID().toString()); }
 
@@ -42,16 +47,29 @@ public final class AssistantCore {
         // the call needs the local time too, or «en 2 minutos» lands on UTC (3 hours off in Asunción)
         String context = "Fecha y hora local: " + java.time.ZonedDateTime.now(clock) + "\n" + Summary.render(store.rows(), LocalDate.now(clock), false);
         if (context.length() > 6000) context = context.substring(0, 6000) + "\n[contexto recortado]";
-        return GeminiProtocol.request("", context, LocalDate.now(clock), settings.currency(), store.conversation(), store.memories());
+        return GeminiProtocol.request("", context, LocalDate.now(clock), settings.currency(), store.conversation(), store.memories(), settings.phoneEnabled());
     }
-    public org.json.JSONArray liveDeclarations() throws Exception { return GeminiProtocol.declarations(); }
+    public org.json.JSONArray liveDeclarations() throws Exception { return GeminiProtocol.declarations(settings.phoneEnabled()); }
     /** A tool Gemini asked for during a call; only the safe ones LiveSession offers, validated by the executor. */
     public String callTool(String tool, org.json.JSONObject args) {
+        // Legacy callers cannot feed external data back into a live session without its guard.
+        if (PhoneTools.external(tool)) return "Para esa lectura necesitás iniciar una llamada nueva.";
+        return callTool(tool, args, new ExternalData.Guard());
+    }
+    public String callTool(String tool, org.json.JSONObject args, ExternalData.Guard guard) {
+        return callTool(tool, args, guard, generation.get());
+    }
+    public String callTool(String tool, org.json.JSONObject args, ExternalData.Guard guard, long ticket) {
         boolean allowed = false;
         for (String t : dev.poco.asistente.call.LiveSession.CALL_TOOLS) allowed |= t.equals(tool);
         if (!allowed) return "Eso no lo puedo hacer en una llamada; pedímelo por WhatsApp.";
-        synchronized (actionGate) {
-            try { return executor.execute("llamada", "llamada:" + UUID.randomUUID(), tool, args); }
+        synchronized (guard) {
+            if (!guard.allowsTools()) return "Después de leer contenido externo, solo conversamos. Para otra acción, iniciá una llamada nueva o escribime.";
+            try {
+                if ("buscar_en_internet".equals(tool)) SearchProtocol.requireUserQuery(Validation.string(args, "consulta", 300), guard.userText());
+                if (PhoneTools.external(tool)) guard.expose();
+                return dispatch("llamada", "llamada:" + UUID.randomUUID(), tool, args, ticket);
+            }
             catch (IllegalArgumentException e) { return e.getMessage(); }
             catch (Exception e) { return "No pude hacerlo."; }
         }
@@ -83,7 +101,7 @@ public final class AssistantCore {
                         && text != null && !text.trim().isEmpty() && text.length() <= 4000
                         && requestId != null && requestId.matches("[A-Za-z0-9_-]{1,120}")
                         && !Rules.normalize(text).equals("olvida la conversacion")) {
-                    try { store.exchange(source.name() + ":" + requestId, text, answer); }
+                    try { store.exchange(source.name() + ":" + requestId, text, ExternalData.history(answer)); }
                     catch (Exception e) { return answer + "\nNo pude guardar el historial de conversación."; }
                 }
             }
@@ -174,13 +192,14 @@ public final class AssistantCore {
                 if (key == null || key.isEmpty()) return "No entendí el pedido con las reglas locales. Podés repetirlo como en «ayuda» o pegar tu clave de Gemini en Ajustes.";
                 String context = "Fecha y hora local: " + java.time.ZonedDateTime.now(clock) + "\n" + Summary.render(store.rows(), LocalDate.now(clock), false);
                 if (context.length() > 6000) context = context.substring(0, 6000) + "\n[contexto recortado]";
-                GeminiProtocol.Reply reply = cloud.generate(key, settings.model(), GeminiProtocol.request(text, context, LocalDate.now(clock), settings.currency(), store.conversation(), store.memories()), () -> ticket != generation.get());
+                GeminiProtocol.Reply reply = cloud.generate(key, settings.model(), GeminiProtocol.request(text, context, LocalDate.now(clock), settings.currency(), store.conversation(), store.memories(), settings.phoneEnabled()), () -> ticket != generation.get());
                 synchronized (actionGate) {
                     if (ticket != generation.get()) return "Pedido cancelado. No ejecuté la respuesta de Gemini.";
                     // which models were busy before one answered is not for David: he gets only the answer
                     if (reply.tool == null) return reply.text;
-                    return executor.execute(actor, operation, reply.tool, reply.args);
                 }
+                if ("buscar_en_internet".equals(reply.tool)) SearchProtocol.requireUserQuery(Validation.string(reply.args, "consulta", 300), text);
+                return dispatch(actor, operation, reply.tool, reply.args, ticket);
             } catch (IllegalArgumentException e) {
                 return e.getMessage(); // only local validation/network messages, never raw server bodies
             } catch (Exception e) {
@@ -195,8 +214,42 @@ public final class AssistantCore {
         }
     }
     public String stop() {
-        synchronized (actionGate) { generation.incrementAndGet(); proactivePaused = true; executor.cancel(); }
-        return "Cancelé las confirmaciones pendientes y la respuesta en curso. En esta fase no hay control del teléfono.";
+        synchronized (actionGate) {
+            generation.incrementAndGet(); proactivePaused = true; executor.cancel();
+            try { settings.disablePhone(); }
+            catch (RuntimeException e) { return "Cancelé los pedidos. No pude guardar el apagado del control; revisá el interruptor en Ajustes antes de reiniciar la app."; }
+        }
+        return "Cancelé las confirmaciones pendientes y la respuesta en curso. Apagué el control del teléfono; solo se vuelve a encender desde la app.";
+    }
+    private String dispatch(String actor, String operation, String tool, org.json.JSONObject args, long ticket) throws Exception {
+        org.json.JSONObject checked;
+        synchronized (actionGate) {
+            if (ticket != generation.get()) return "Pedido cancelado.";
+            if (!"buscar_en_internet".equals(tool)) return executor.execute(actor, operation, tool, args);
+            executor.requirePhone();
+            String previous = store.receipt(operation);
+            if (previous != null) return previous;
+            checked = executor.beginPhone(operation, tool, args);
+        }
+        // Never hold actionGate during network I/O: PARAR can invalidate this request immediately.
+        String result;
+        try {
+            GeminiProtocol.Reply reply = cloud.generate(settings.apiKey(), settings.model(), SearchProtocol.request(checked.getString("consulta")),
+                    () -> ticket != generation.get() || !settings.phoneEnabled());
+            if (reply.tool != null || reply.text == null) throw new IllegalArgumentException("La búsqueda devolvió una acción; la descarté.");
+            result = ExternalData.isExternal(reply.text) ? reply.text : ExternalData.wrap(reply.text);
+        } catch (Exception e) {
+            String message = e.getMessage() == null ? "" : e.getMessage();
+            result = message.contains("429") ? "La búsqueda no tiene cupo disponible con tu clave de Gemini. Probá más tarde."
+                    : "No pude completar la búsqueda con Gemini. Revisá la clave o probá más tarde.";
+        }
+        synchronized (actionGate) {
+            if (ticket != generation.get() || !settings.phoneEnabled()) {
+                store.finishAction(operation, "Búsqueda cancelada; no entregué su resultado.");
+                return "Pedido cancelado.";
+            }
+            return executor.finishPhone(operation, tool, result);
+        }
     }
     public boolean clearConversation(long ticket) throws Exception {
         synchronized (requestGate) { synchronized (actionGate) {

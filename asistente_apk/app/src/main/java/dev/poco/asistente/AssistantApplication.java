@@ -36,7 +36,8 @@ public final class AssistantApplication extends Application {
         super.onCreate();
         settings = new AppSettings(this);
         db = new AssistantDb(this);
-        core = new AssistantCore(db, settings, new GeminiClient(), Clock.system(dev.poco.asistente.core.Reminders.ZONE), SystemClock::elapsedRealtime);
+        core = new AssistantCore(db, settings, new GeminiClient(), Clock.system(dev.poco.asistente.core.Reminders.ZONE), SystemClock::elapsedRealtime,
+                new dev.poco.asistente.phone.AndroidPhone(this));
         proactive = new dev.poco.asistente.core.Proactive(db, settings, new GeminiClient(), Clock.system(dev.poco.asistente.core.Reminders.ZONE), core);
         proactive.onReminderCall = text -> main.post(() -> dev.poco.asistente.call.CallLauncher.ring(this, text));
         whatsapp = new WhatsAppBridge(this);

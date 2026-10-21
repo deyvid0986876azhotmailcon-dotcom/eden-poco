@@ -59,7 +59,7 @@ public final class WhatsAppBridge {
                     app.db.noticeState(id, "cancelado", null);
                     log(sender, "Respuesta cancelada; revisar Resumen por operaciones ya terminadas."); return;
                 }
-                app.db.noticeState(id, "pendiente", response); // durable BEFORE the first PendingIntent
+                app.db.noticeState(id, "pendiente", pendingText(response, 0)); // external readings stay only in memory
             }
             deliver(id, sender, response, reply, token);
         } catch (RuntimeException e) {
@@ -75,20 +75,23 @@ public final class WhatsAppBridge {
         for (int i = 0; i < chunks.size(); i++) {
             synchronized (app.controlGate) {
                 if (!active(token)) {
-                    app.db.noticeState(id, "cancelado; respuesta pendiente", response.substring(offset));
+                    app.db.noticeState(id, "cancelado; respuesta pendiente", pendingText(response, offset));
                     log(sender, "Envío cancelado; resto disponible en Registro."); return;
                 }
-                app.db.noticeState(id, "enviando", response.substring(offset));
+                app.db.noticeState(id, "enviando", pendingText(response, offset));
                 try { reply.send(app, chunks.get(i)); }
                 catch (Exception e) {
-                    app.db.noticeState(id, "pendiente; envío fallido", response.substring(offset));
+                    app.db.noticeState(id, "pendiente; envío fallido", pendingText(response, offset));
                     log(sender, "Respuesta fallida en parte " + (i + 1) + "/" + chunks.size() + "; resto en Registro."); return;
                 }
                 offset += chunks.get(i).length();
-                app.db.noticeState(id, offset == response.length() ? "enviado a Responder" : "pendiente", response.substring(offset));
+                app.db.noticeState(id, offset == response.length() ? "enviado a Responder" : "pendiente", pendingText(response, offset));
                 log(sender, "Respuesta enviada a Responder " + (i + 1) + "/" + chunks.size() + " (entrega no confirmada).");
             }
         }
     }
     private void log(String sender, String event) { app.db.messagingLog(sender, event); app.changed(); }
+    private static String pendingText(String response, int offset) {
+        return dev.poco.asistente.core.ExternalData.isExternal(response) ? "" : response.substring(offset);
+    }
 }

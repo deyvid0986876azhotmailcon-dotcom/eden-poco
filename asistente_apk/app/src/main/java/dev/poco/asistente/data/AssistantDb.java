@@ -280,9 +280,21 @@ public final class AssistantDb extends SQLiteOpenHelper implements dev.poco.asis
     }
     @Override public synchronized String history(String date) {
         StringBuilder text = new StringBuilder("Acciones de ").append(date).append(" (últimas 50):\n");
-        try (Cursor c = getReadableDatabase().rawQuery("SELECT accion,registro_id FROM operaciones WHERE fecha=? ORDER BY instante DESC LIMIT 50", new String[]{date})) {
-            while (c.moveToNext()) text.append(c.getString(0)).append(' ').append(c.getString(1)).append('\n');
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT resultado FROM operaciones WHERE fecha=? ORDER BY instante DESC LIMIT 50", new String[]{date})) {
+            while (c.moveToNext()) text.append(c.getString(0)).append('\n');
         }
         return text.toString();
+    }
+    @Override public synchronized void beginAction(String id, String tool, long time) {
+        ContentValues v = new ContentValues();
+        v.put("id", id); v.put("instante", time);
+        v.put("fecha", Instant.ofEpochMilli(time).atZone(dev.poco.asistente.core.Reminders.ZONE).toLocalDate().toString());
+        v.put("accion", tool); v.put("registro_id", "");
+        v.put("resultado", "Pedido de " + tool.replace('_', ' ') + " iniciado; resultado todavía sin confirmar. Revisá antes de repetirlo.");
+        getWritableDatabase().insertOrThrow("operaciones", null, v);
+    }
+    @Override public synchronized void finishAction(String id, String result) {
+        ContentValues v = new ContentValues(); v.put("resultado", result);
+        if (getWritableDatabase().update("operaciones", v, "id=?", new String[]{id}) != 1) throw new IllegalStateException("Falta el registro de la acción.");
     }
 }

@@ -20,6 +20,10 @@ public final class GeminiProtocol {
     }
     public static JSONObject request(String message, String context, LocalDate today, String currency,
             java.util.List<Memory.Exchange> history, java.util.List<Store.Row> memories) throws Exception {
+        return request(message, context, today, currency, history, memories, false);
+    }
+    public static JSONObject request(String message, String context, LocalDate today, String currency,
+            java.util.List<Memory.Exchange> history, java.util.List<Store.Row> memories, boolean phoneEnabled) throws Exception {
         String instruction = "Sos la asistente personal de finanzas y vida sana de David, que vive en Paraguay. "
                 + "Hablás como una chica de Asunción de 22 años que es su amiga de confianza: castellano paraguayo de ciudad, "
                 + "con voseo, cercana, alegre y con humor, en femenino cuando hablás de vos misma (contenta, segura). "
@@ -34,7 +38,8 @@ public final class GeminiProtocol {
                 + "David es muy flaco, quiere subir de peso y empieza el gimnasio. Sugerí superávit moderado y proteína en cada comida; "
                 + "recordá consultar a un médico o nutricionista para cantidades exactas. Ayudá con presupuesto, fondo de emergencia y gastos hormiga. "
                 + "No sos asesor de inversiones. No diagnostiques ni prescribas. "
-                + "Hoy es " + today + "; moneda por defecto " + currency + " (guaraníes si es PYG). Los mensajes pueden llegar por WhatsApp o por el chat de la app. No hay control del teléfono todavía. "
+                + "Hoy es " + today + "; moneda por defecto " + currency + " (guaraníes si es PYG). Los mensajes pueden llegar por WhatsApp o por el chat de la app. "
+                + (phoneEnabled ? "Control del teléfono habilitado: solo las funciones declaradas y por pedido explícito. " : "Control del teléfono apagado; solo David puede encenderlo desde Ajustes de la app. ")
                 + "Proponé como máximo una función. Exigí pedido explícito salvo para recordar datos estables que David cuente. Si hay varias acciones pedí que las separe. "
                 + "No inventes montos, categorías, cargas, repeticiones, IDs ni fechas. Preguntá si falta un dato o es ambiguo; "
                 + "pedí que repita el pedido completo con la aclaración. Sin fecha explícita usá hoy; sin moneda usá la predeterminada. "
@@ -53,11 +58,14 @@ public final class GeminiProtocol {
                 + "<datos_locales>\n" + context + "\n</datos_locales>";
         return Json.object("systemInstruction", Json.object("parts", new JSONArray().put(Json.object("text", instruction))),
                 "contents", Memory.contents(history, message),
-                "tools", new JSONArray().put(Json.object("functionDeclarations", declarations())),
+                "tools", new JSONArray().put(Json.object("functionDeclarations", declarations(phoneEnabled))),
                 "toolConfig", Json.object("functionCallingConfig", Json.object("mode", "AUTO")),
                 "generationConfig", Json.object("temperature", 0.4, "maxOutputTokens", 1024));
     }
     public static JSONArray declarations() throws Exception {
+        return declarations(false);
+    }
+    public static JSONArray declarations(boolean phoneEnabled) throws Exception {
         JSONArray declarations = new JSONArray();
         String[] names = {"registrar_movimiento", "registrar_peso", "registrar_comida", "registrar_entreno", "fijar_presupuesto", "fijar_meta"};
         for (int i = 0; i < names.length; i++) declarations.put(Json.object("name", names[i], "description", "Proponer " + Validation.KINDS[i] + "; preguntar si falta información.", "parameters", Validation.schema(Validation.KINDS[i])));
@@ -90,6 +98,10 @@ public final class GeminiProtocol {
         Validation.field(reminder, rr, "repeticion", "STRING", false, "diaria o días ISO separados por comas (1=lunes,7=domingo)");
         Validation.field(reminder, rr, "hora", "STRING", false, "HH:mm para repetición");
         declarations.put(function("programar_recordatorio", "Programar a pedido de David", reminder, rr));
+        if (phoneEnabled) {
+            JSONArray phone = PhoneTools.declarations();
+            for (int i = 0; i < phone.length(); i++) declarations.put(phone.getJSONObject(i));
+        }
         return declarations;
     }
     private static JSONObject function(String name, String description, JSONObject props, JSONArray required) throws Exception {

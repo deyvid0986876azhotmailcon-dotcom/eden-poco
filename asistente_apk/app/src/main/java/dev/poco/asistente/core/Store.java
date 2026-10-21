@@ -19,6 +19,9 @@ public interface Store {
     // before == null inserts; after == null deletes. Must compare before.version.
     String mutate(String operationId, Row before, Row after, String result, long time) throws Exception;
     String history(String date) throws Exception;
+    // Claim BEFORE an external side effect. A crash leaves an uncertain receipt and never silently retries.
+    default void beginAction(String id, String tool, long time) throws Exception { throw new IllegalStateException("Registro de acciones no disponible."); }
+    default void finishAction(String id, String result) throws Exception { throw new IllegalStateException("Registro de acciones no disponible."); }
     default List<Row> memories() throws Exception { return java.util.Collections.emptyList(); }
     default List<Row> reminders() throws Exception { return java.util.Collections.emptyList(); }
     default List<Memory.Exchange> conversation() throws Exception { return java.util.Collections.emptyList(); }

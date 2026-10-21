@@ -14,6 +14,8 @@ public final class ToolExecutor {
     private final Store store;
     private final Clock clock;
     private final LongSupplier elapsedMillis;
+    private final java.util.function.BooleanSupplier phoneEnabled;
+    private final PhoneTools.Port phone;
     private final SecureRandom random = new SecureRandom();
     private final Map<String, Pending> pending = new HashMap<>();
     private static final long TTL = 5 * 60 * 1000;
@@ -25,12 +27,30 @@ public final class ToolExecutor {
     }
     public ToolExecutor(Store store, Clock clock) { this(store, clock, () -> System.nanoTime() / 1_000_000L); }
     public ToolExecutor(Store store, Clock clock, LongSupplier elapsedMillis) {
+        this(store, clock, elapsedMillis, () -> false, PhoneTools.UNAVAILABLE);
+    }
+    public ToolExecutor(Store store, Clock clock, LongSupplier elapsedMillis, java.util.function.BooleanSupplier phoneEnabled, PhoneTools.Port phone) {
         this.store = store; this.clock = clock; this.elapsedMillis = elapsedMillis;
+        this.phoneEnabled = phoneEnabled; this.phone = phone;
     }
 
     // Called only after AssistantCore authenticates the source. Model cannot set actor or operationId.
     public synchronized String execute(String actor, String operationId, String tool, JSONObject args) throws Exception {
         if (args == null) throw new IllegalArgumentException("Faltan los datos de la operación.");
+        if (PhoneTools.contains(tool)) {
+            requirePhone();
+            if (tool.equals("buscar_en_internet")) throw new IllegalArgumentException("La búsqueda necesita el canal aislado.");
+            String previous = store.receipt(operationId);
+            if (previous != null) return previous;
+            JSONObject checked = beginPhone(operationId, tool, args);
+            try {
+                String result = phone.execute(tool, checked);
+                return finishPhone(operationId, tool, result);
+            } catch (Exception e) {
+                store.finishAction(operationId, "No pude completar " + tool.replace('_', ' ') + ". Revisá antes de repetirlo.");
+                throw e;
+            }
+        }
         String receipt = store.receipt(operationId);
         if (receipt != null) return receipt;
         if (tool.equals("consultar_resumen")) {
@@ -116,6 +136,20 @@ public final class ToolExecutor {
         return store.mutate(operationId, p.row, null, done, clock.millis());
     }
     public synchronized void cancel() { pending.clear(); }
+    public void requirePhone() {
+        if (!phoneEnabled.getAsBoolean()) throw new IllegalArgumentException("El control del teléfono está apagado. Encendelo desde Ajustes de la app.");
+    }
+    public JSONObject beginPhone(String operation, String tool, JSONObject args) throws Exception {
+        requirePhone();
+        JSONObject checked = PhoneTools.validate(tool, args);
+        store.beginAction(operation, tool, clock.millis());
+        return checked;
+    }
+    public String finishPhone(String operation, String tool, String result) throws Exception {
+        // External contents are neither audit receipts nor conversation memory.
+        store.finishAction(operation, PhoneTools.external(tool) ? "Consulté " + tool.replace('_', ' ') + "; el contenido no se guarda en el registro." : result);
+        return PhoneTools.external(tool) && !ExternalData.isExternal(result) ? ExternalData.wrap(result) : result;
+    }
     private Store.Row requireRow(String id) throws Exception {
         Store.Row row = store.find(id);
         if (row == null) throw new IllegalArgumentException("No existe ese ID. Consultá resumen y copiá el ID completo.");
