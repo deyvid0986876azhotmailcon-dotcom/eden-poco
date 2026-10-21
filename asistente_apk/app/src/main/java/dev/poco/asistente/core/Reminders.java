@@ -11,6 +11,24 @@ public final class Reminders {
         if (text == null || !text.matches("(?:[01][0-9]|2[0-3]):[0-5][0-9]")) throw new IllegalArgumentException("Hora inválida: usá HH:mm.");
         return LocalTime.parse(text);
     }
+    /** «hoy a las 20:19», «mañana a las 8:00», «el 25/10 a las 9:30», «todos los días a las 7:00», «los lunes y jueves a las 18:00». */
+    public static String when(org.json.JSONObject d, java.time.LocalDate today) {
+        if (d.has("cuando")) {
+            LocalDateTime at = LocalDateTime.parse(d.optString("cuando"));
+            String hour = at.toLocalTime().toString();
+            if (at.toLocalDate().equals(today)) return "hoy a las " + hour;
+            if (at.toLocalDate().equals(today.plusDays(1))) return "mañana a las " + hour;
+            return "el " + at.format(java.time.format.DateTimeFormatter.ofPattern("dd/MM")) + " a las " + hour;
+        }
+        String hour = " a las " + d.optString("hora");
+        if ("diaria".equals(d.optString("repeticion"))) return "todos los días" + hour;
+        String[] names = {"", "lunes", "martes", "miércoles", "jueves", "viernes", "sábados", "domingos"};
+        java.util.List<String> list = new java.util.ArrayList<>();
+        for (int day : days(d.optString("repeticion"))) list.add(names[day]);
+        String joined = list.size() == 1 ? list.get(0)
+                : String.join(", ", list.subList(0, list.size() - 1)) + " y " + list.get(list.size() - 1);
+        return "los " + joined + hour;
+    }
     public static Set<Integer> days(String repetition) {
         Set<Integer> result = new TreeSet<>();
         if ("diaria".equals(repetition)) { for (int i = 1; i <= 7; i++) result.add(i); return result; }
