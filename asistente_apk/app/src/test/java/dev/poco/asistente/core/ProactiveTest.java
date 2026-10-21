@@ -43,6 +43,31 @@ public class ProactiveTest {
         return new Proactive(store, settings, cloud, clock, new AssistantCore(store, settings, cloud, clock));
     }
     private final Cloud noCloud = (k,m,b) -> { throw new AssertionError("Must not call Gemini"); };
+    @Test public void reminderCallsOnlyOnceAndOnlyAfterSuccessfulEnqueue() throws Exception {
+        ClockAt clock = new ClockAt("2026-10-20T12:00");
+        Settings settings = new Settings() { @Override public boolean callReminders() { return true; } };
+        Port store = new Port();
+        new ToolExecutor(store, clock).execute("local", "one", "programar_recordatorio",
+                Json.object("texto", "agua", "cuando", "2026-10-20T12:01"));
+        Store.Row reminder = store.reminders().get(0);
+        long due = reminder.data.getLong("proximo");
+        Proactive service = service(store, settings, clock, noCloud);
+        List<String> calls = new ArrayList<>(); service.onReminderCall = calls::add;
+        clock.set("2026-10-20T12:02");
+        service.poll(); service.poll(); assertEquals(1, calls.size());
+        reminder.data.put("proximo", due); // stale source with an already queued occurrence
+        service.poll(); assertEquals(1, calls.size());
+
+        Port rejected = new Port() {
+            @Override public void enqueue(String id, String text, String kind, boolean night, long now,
+                    Store.Row row, long next, String state) { /* concurrently cancelled source */ }
+        };
+        clock.set("2026-10-20T12:00");
+        new ToolExecutor(rejected, clock).execute("local", "two", "programar_recordatorio",
+                Json.object("texto", "cancelado", "cuando", "2026-10-20T12:01"));
+        Proactive skipped = service(rejected, settings, clock, noCloud); skipped.onReminderCall = calls::add;
+        clock.set("2026-10-20T12:02"); skipped.poll(); assertEquals(1, calls.size());
+    }
     @Test public void pollRespectsSilenceAndOnlyExplicitNightReminderEscapes() throws Exception {
         Port store = new Port(); Settings settings = new Settings(); settings.daily = true;
         ClockAt clock = new ClockAt("2026-10-20T22:00");

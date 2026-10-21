@@ -35,7 +35,9 @@ public final class LiveSocket implements AutoCloseable {
 
     /** Opens wss://host/path (path includes the query), checking the server's handshake answer. */
     public static LiveSocket connect(String host, String path) throws IOException {
-        SSLSocket socket = (SSLSocket) SSLSocketFactory.getDefault().createSocket(host, 443);
+        SSLSocket socket = (SSLSocket) SSLSocketFactory.getDefault().createSocket();
+        try {
+        socket.connect(new java.net.InetSocketAddress(host, 443), 30000);
         SSLParameters params = socket.getSSLParameters();
         params.setServerNames(java.util.Collections.singletonList(new SNIHostName(host)));
         params.setEndpointIdentificationAlgorithm("HTTPS"); // certificate must match the host
@@ -49,17 +51,28 @@ public final class LiveSocket implements AutoCloseable {
                 + "Sec-WebSocket-Key: " + key + "\r\nSec-WebSocket-Version: 13\r\n\r\n";
         ws.out.write(request.getBytes(StandardCharsets.US_ASCII)); ws.out.flush();
         String status = ws.line(), accept = null;
-        if (!status.startsWith("HTTP/1.1 101")) { ws.close(); throw new IOException("Live rechazó la conexión (" + status.replaceAll("[^ -~]", "") + ")"); }
+        if (!status.matches("HTTP/1\\.1 101(?: .*)?")) throw new IOException("Live rechazó la conexión");
+        boolean upgrade = false, connection = false;
+        int headerBytes = 0;
         for (String line = ws.line(); !line.isEmpty(); line = ws.line()) {
+            if ((headerBytes += line.length()) > 32768) throw new IOException("Cabeceras demasiado largas");
             int colon = line.indexOf(':');
             if (colon > 0 && line.substring(0, colon).trim().equalsIgnoreCase("Sec-WebSocket-Accept")) accept = line.substring(colon + 1).trim();
+            if (colon > 0 && line.substring(0, colon).trim().equalsIgnoreCase("Upgrade")) upgrade = line.substring(colon + 1).trim().equalsIgnoreCase("websocket");
+            if (colon > 0 && line.substring(0, colon).trim().equalsIgnoreCase("Connection"))
+                for (String token : line.substring(colon + 1).split(",")) connection |= token.trim().equalsIgnoreCase("upgrade");
         }
+        if (!upgrade || !connection) throw new IOException("Handshake inválido");
         try {
             byte[] digest = MessageDigest.getInstance("SHA-1").digest((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").getBytes(StandardCharsets.US_ASCII));
             if (!Base64.getEncoder().encodeToString(digest).equals(accept)) { ws.close(); throw new IOException("Respuesta de Live inválida"); }
         } catch (java.security.NoSuchAlgorithmException e) { throw new IOException(e); }
         socket.setSoTimeout(0); // the call can stay silent for a while; closing the socket ends the reader
         return ws;
+        } catch (IOException | RuntimeException e) {
+            try { socket.close(); } catch (IOException ignored) { }
+            throw e;
+        }
     }
 
     private String line() throws IOException {
@@ -78,6 +91,7 @@ public final class LiveSocket implements AutoCloseable {
     }
 
     private synchronized void frame(int opcode, byte[] payload) throws IOException {
+        if (closed) throw new IOException("Conexión cerrada");
         ByteArrayOutputStream f = new ByteArrayOutputStream(payload.length + 14);
         f.write(0x80 | opcode);
         if (payload.length < 126) f.write(0x80 | payload.length);
@@ -94,14 +108,24 @@ public final class LiveSocket implements AutoCloseable {
     public void readLoop(Listener listener) {
         String reason = "";
         ByteArrayOutputStream message = new ByteArrayOutputStream();
+        int messageOpcode = -1;
         try {
             while (!closed) {
                 int b0 = in.read(), b1 = in.read();
                 if (b0 < 0 || b1 < 0) { reason = "fin"; break; }
                 int opcode = b0 & 0x0f; boolean fin = (b0 & 0x80) != 0;
+                if ((b0 & 0x70) != 0 || !(opcode == 0 || opcode == 1 || opcode == 2 || opcode == 8 || opcode == 9 || opcode == 10))
+                    throw new IOException("Opcode o RSV inválido");
                 long length = b1 & 0x7f;
-                if (length == 126) length = (in.read() << 8) | in.read();
-                else if (length == 127) { length = 0; for (int i = 0; i < 8; i++) length = (length << 8) | in.read(); }
+                int encodedLength = (int) length;
+                if (opcode >= 8 && (!fin || length > 125)) throw new IOException("Control inválido");
+                if (length == 126) length = (octet() << 8) | octet();
+                else if (length == 127) {
+                    length = octet();
+                    if (length > 127) throw new IOException("Longitud inválida");
+                    for (int i = 1; i < 8; i++) length = (length << 8) | octet();
+                }
+                if ((encodedLength == 126 && length < 126) || (encodedLength == 127 && length < 65536)) throw new IOException("Longitud no mínima");
                 if ((b1 & 0x80) != 0) throw new IOException("El servidor no debe enmascarar");
                 if (length < 0 || length > MAX_MESSAGE) throw new IOException("Mensaje demasiado grande");
                 byte[] payload = new byte[(int) length];
@@ -111,15 +135,24 @@ public final class LiveSocket implements AutoCloseable {
                     read += n;
                 }
                 if (opcode == 0x8) { // close: the reason, if any, after a 2-byte code
-                    reason = payload.length > 2 ? new String(payload, 2, payload.length - 2, StandardCharsets.UTF_8) : "cerrado";
+                    if (payload.length == 1) throw new IOException("Cierre inválido");
+                    if (payload.length >= 2) {
+                        int code = ((payload[0] & 255) << 8) | (payload[1] & 255);
+                        if (!((code >= 1000 && code <= 1014 && code != 1004 && code != 1005 && code != 1006) || (code >= 3000 && code < 5000))) throw new IOException("Código de cierre inválido");
+                        utf8(java.util.Arrays.copyOfRange(payload, 2, payload.length));
+                    }
+                    reason = "cerrado"; // do not expose server text, which could echo credentials
+                    frame(0x8, payload);
                     break;
                 }
                 if (opcode == 0x9) { frame(0xA, payload); continue; } // ping -> pong
                 if (opcode == 0xA) continue;
                 if (opcode == 0x1 || opcode == 0x2 || opcode == 0x0) {
+                    if (opcode == 0 ? messageOpcode == -1 : messageOpcode != -1) throw new IOException("Fragmentación inválida");
+                    if (opcode != 0) messageOpcode = opcode;
                     if (message.size() + payload.length > MAX_MESSAGE) throw new IOException("Mensaje demasiado grande");
                     message.write(payload, 0, payload.length);
-                    if (fin) { listener.onText(message.toString("UTF-8")); message.reset(); }
+                    if (fin) { listener.onText(utf8(message.toByteArray())); message.reset(); messageOpcode = -1; }
                 }
             }
         } catch (IOException e) {
@@ -130,10 +163,21 @@ public final class LiveSocket implements AutoCloseable {
         }
     }
 
+    private int octet() throws IOException {
+        int value = in.read();
+        if (value < 0) throw new EOFException();
+        return value;
+    }
+
+    private static String utf8(byte[] bytes) throws IOException {
+        return StandardCharsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(bytes)).toString();
+    }
+
     @Override public void close() {
         if (closed) return;
         closed = true;
-        try { frame(0x8, new byte[]{0x03, (byte) 0xE8}); } catch (IOException ignored) { }
+        // Cancellation must unblock a writer even when it holds the frame monitor.
+        // A local hang-up aborts transport; peer Close frames are echoed by readLoop.
         try { socket.close(); } catch (IOException ignored) { }
     }
 }

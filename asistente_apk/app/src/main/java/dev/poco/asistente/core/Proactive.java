@@ -45,9 +45,15 @@ public final class Proactive {
             boolean night = Reminders.explicitNight(reminder.data);
             if (due >= 0 && due <= millis && (!Reminders.quiet(now) || night)) {
                 long next = Reminders.next(reminder.data, now.toInstant(), clock.getZone());
-                core.proactiveAction(ticket, () -> { store.enqueue("r_" + reminder.id + "_" + due, reminder.data.getString("texto"), "recordatorio", night, millis, reminder, next, null); return null; }, null);
-                java.util.function.Consumer<String> call = onReminderCall;
-                if (call != null && settings.callReminders() && !cancelled.getAsBoolean()) call.accept(reminder.data.getString("texto"));
+                core.proactiveAction(ticket, () -> {
+                    String id = "r_" + reminder.id + "_" + due;
+                    boolean alreadyQueued = store.queued(id);
+                    store.enqueue(id, reminder.data.getString("texto"), "recordatorio", night, millis, reminder, next, null);
+                    java.util.function.Consumer<String> call = onReminderCall;
+                    if (!alreadyQueued && store.queued(id) && call != null && settings.callReminders())
+                        call.accept(reminder.data.getString("texto"));
+                    return null;
+                }, null);
             }
         }
         long system = store.scheduleState("whatsapp", now.plusDays(10).toInstant().toEpochMilli());

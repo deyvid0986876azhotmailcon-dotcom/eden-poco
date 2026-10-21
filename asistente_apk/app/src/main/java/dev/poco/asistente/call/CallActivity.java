@@ -43,6 +43,7 @@ public final class CallActivity extends Activity implements LiveSession.Events {
     private Vibrator vibrator;
     private LiveSession session;
     private String reason;
+    private TextView aboutView;
     private boolean muted, finished;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Runnable missed = () -> { status.setText("Llamada perdida. Te lo dejé por WhatsApp."); stopRinging(); main.postDelayed(this::finish, 2500); };
@@ -70,7 +71,7 @@ public final class CallActivity extends Activity implements LiveSession.Events {
         status = ui.text(reason == null ? "Llamada" : "Te está llamando…", 16, ui.palette.muted, false); status.setGravity(Gravity.CENTER);
         root.addView(status);
         if (reason != null) {
-            TextView about = ui.text("«" + reason + "»", 15, ui.palette.text, false); about.setGravity(Gravity.CENTER);
+            TextView about = ui.text("«" + reason + "»", 15, ui.palette.text, false); about.setGravity(Gravity.CENTER); aboutView = about;
             LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2, -2); p.topMargin = ui.dp(12); root.addView(about, p);
         }
         root.addView(new android.view.View(this), new LinearLayout.LayoutParams(1, 0, 1f));
@@ -117,6 +118,7 @@ public final class CallActivity extends Activity implements LiveSession.Events {
     private void decline() { stopRinging(); finish(); }
 
     private void answer() {
+        if (finished || session != null) return;
         stopRinging();
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, MIC_REQUEST);
@@ -173,6 +175,7 @@ public final class CallActivity extends Activity implements LiveSession.Events {
     @Override public void onEnded(String why) {
         main.post(() -> {
             if (finished) return;
+            earMode(false);
             status.setText(why);
             main.postDelayed(this::finish, 1500);
         });
@@ -180,10 +183,21 @@ public final class CallActivity extends Activity implements LiveSession.Events {
 
     @Override protected void onDestroy() {
         finished = true;
+        main.removeCallbacksAndMessages(null);
         stopRinging();
         earMode(false);
         if (session != null) session.hangUp();
         super.onDestroy();
+    }
+
+    /** A second reminder while this one rings or talks: join it instead of losing it (singleTop). */
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        String more = intent.getStringExtra(EXTRA_REASON);
+        if (more == null || more.equals(reason)) return;
+        if (session != null) { session.addReminder(more); return; }
+        reason = reason == null ? more : reason + " · " + more;
+        if (aboutView != null) aboutView.setText("«" + reason + "»");
     }
 
     /** Opens the screen already answered: David calling her from the app. */

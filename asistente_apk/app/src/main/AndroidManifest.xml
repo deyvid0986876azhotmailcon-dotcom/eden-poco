@@ -36,6 +36,7 @@
         <!-- after a reboot the bridge service comes back on its own when David left it on -->
         <activity android:name=".call.CallActivity" android:exported="false" android:launchMode="singleTop"
             android:showWhenLocked="true" android:turnScreenOn="true" android:excludeFromRecents="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
             android:theme="@android:style/Theme.Material.NoActionBar" />
         <receiver android:name=".bridge.BootReceiver" android:exported="false">
             <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /></intent-filter>

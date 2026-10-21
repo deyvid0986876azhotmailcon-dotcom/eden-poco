@@ -34,8 +34,14 @@ public final class LiveSession {
     private final Events events;
     private volatile LiveSocket socket;
     private volatile boolean running, muted;
-    private AudioRecord mic;
-    private AudioTrack speaker;
+    private volatile AudioRecord mic;
+    private volatile AudioTrack speaker;
+    private AcousticEchoCanceler aec;
+    private NoiseSuppressor ns;
+    private boolean modeChanged;
+    private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable micFallback = this::openMic;
+    private final java.util.Map<String, JSONObject> toolAnswers = new java.util.HashMap<>();
     private Thread reader, recorder;
     private int previousMode;
 
@@ -44,7 +50,8 @@ public final class LiveSession {
     }
 
     /** Starts on a background thread; reason is what the call is about (a reminder), or null when David calls. */
-    public void start(String apiKey, String reason) {
+    public synchronized void start(String apiKey, String reason) {
+        if (reader != null) return;
         running = true;
         reader = new Thread(() -> run(apiKey, reason), "live-call");
         reader.start();
@@ -54,8 +61,9 @@ public final class LiveSession {
 
     private volatile boolean speakerOn;
     /** Earpiece (like a phone call) or loudspeaker; can change during the call. */
-    public void setSpeaker(boolean on) {
+    public synchronized void setSpeaker(boolean on) {
         speakerOn = on;
+        if (!running || !modeChanged) return;
         if (android.os.Build.VERSION.SDK_INT >= 31) {
             int wanted = on ? android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER : android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE;
             for (android.media.AudioDeviceInfo device : audio.getAvailableCommunicationDevices())
@@ -67,16 +75,23 @@ public final class LiveSession {
     private void run(String apiKey, String reason) {
         try {
             events.onState("Conectando…");
-            socket = LiveSocket.connect(HOST, "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + apiKey);
+            LiveSocket connected = LiveSocket.connect(HOST, "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + java.net.URLEncoder.encode(apiKey, "UTF-8"));
+            synchronized (this) {
+                if (!running) { connected.close(); return; }
+                socket = connected;
+            }
             socket.sendText(setup().toString());
             socket.readLoop(new LiveSocket.Listener() {
                 @Override public void onText(String text) { handle(text, reason); }
                 @Override public void onClosed(String why) { end(why == null || why.isEmpty() ? "La llamada terminó." : "La llamada terminó (" + why + ")."); }
             });
         } catch (IOException e) {
-            end("No pude conectar con Gemini: " + e.getMessage());
+            end("No pude conectar con Gemini.");
         } catch (Exception e) {
             end("No pude iniciar la llamada.");
+        } finally {
+            end("La llamada terminó.");
+            releaseAudio();
         }
     }
 
@@ -100,6 +115,7 @@ public final class LiveSession {
     }
 
     private void handle(String text, String reason) {
+        if (!running) return;
         try {
             JSONObject m = new JSONObject(text);
             if (m.has("setupComplete")) {
@@ -112,7 +128,7 @@ public final class LiveSession {
                         .put("turnComplete", true)).toString());
                 events.onState("En llamada");
                 // if she stays silent, David can still talk after a few seconds
-                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(this::openMic, 8000);
+                main.postDelayed(micFallback, 8000);
                 return;
             }
             JSONObject content = m.optJSONObject("serverContent");
@@ -125,7 +141,12 @@ public final class LiveSession {
                     JSONObject data = parts.getJSONObject(i).optJSONObject("inlineData");
                     if (data != null && data.optString("mimeType").startsWith("audio/pcm") && speaker != null) {
                         byte[] pcm = Base64.decode(data.getString("data"), Base64.DEFAULT);
-                        speaker.write(pcm, 0, pcm.length);
+                        for (int offset = 0; running && offset < pcm.length; ) {
+                            int n = speaker.write(pcm, offset, pcm.length - offset, AudioTrack.WRITE_NON_BLOCKING);
+                            if (n < 0) throw new IOException("Falló la reproducción");
+                            if (n == 0) Thread.sleep(5);
+                            else offset += n;
+                        }
                     }
                 }
             }
@@ -134,9 +155,20 @@ public final class LiveSession {
                 JSONArray calls = call.optJSONArray("functionCalls"), answers = new JSONArray();
                 for (int i = 0; calls != null && i < calls.length(); i++) {
                     JSONObject f = calls.getJSONObject(i);
-                    String result = core.callTool(f.getString("name"), f.optJSONObject("args") == null ? new JSONObject() : f.getJSONObject("args"));
-                    answers.put(new JSONObject().put("id", f.optString("id")).put("name", f.getString("name"))
-                            .put("response", new JSONObject().put("result", result)));
+                    String id = f.getString("id");
+                    if (id.isEmpty()) throw new IOException("Falta el ID de herramienta");
+                    JSONObject cached = toolAnswers.get(id);
+                    if (cached != null) { answers.put(cached); continue; }
+                    if (toolAnswers.size() >= 1024) throw new IOException("Demasiadas herramientas");
+                    String result;
+                    synchronized (this) {
+                        if (!running) return;
+                        result = core.callTool(f.getString("name"), f.optJSONObject("args") == null ? new JSONObject() : f.getJSONObject("args"));
+                    }
+                    JSONObject answer = new JSONObject().put("id", id).put("name", f.getString("name"))
+                            .put("response", new JSONObject().put("result", result));
+                    toolAnswers.put(id, answer);
+                    answers.put(answer);
                 }
                 socket.sendText(new JSONObject().put("toolResponse", new JSONObject().put("functionResponses", answers)).toString());
             }
@@ -150,13 +182,14 @@ public final class LiveSession {
     private synchronized void startAudio() {
         if (!running || mic != null) return;
         previousMode = audio.getMode();
+        modeChanged = true;
         audio.setMode(AudioManager.MODE_IN_COMMUNICATION);
         setSpeaker(speakerOn); // starts on the earpiece, like a phone call
         int inMin = AudioRecord.getMinBufferSize(IN_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
         mic = new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, IN_RATE, AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT, Math.max(inMin, IN_RATE / 5));
-        if (AcousticEchoCanceler.isAvailable()) { AcousticEchoCanceler aec = AcousticEchoCanceler.create(mic.getAudioSessionId()); if (aec != null) aec.setEnabled(true); }
-        if (NoiseSuppressor.isAvailable()) { NoiseSuppressor ns = NoiseSuppressor.create(mic.getAudioSessionId()); if (ns != null) ns.setEnabled(true); }
+        if (AcousticEchoCanceler.isAvailable()) { aec = AcousticEchoCanceler.create(mic.getAudioSessionId()); if (aec != null) aec.setEnabled(true); }
+        if (NoiseSuppressor.isAvailable()) { ns = NoiseSuppressor.create(mic.getAudioSessionId()); if (ns != null) ns.setEnabled(true); }
         int outMin = AudioTrack.getMinBufferSize(OUT_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
         speaker = new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
@@ -170,7 +203,8 @@ public final class LiveSession {
     /** The microphone opens once she finished her first sentence: open earlier and Live waits for David to talk first. */
     private synchronized void openMic() {
         if (!running || mic == null || recorder != null) return;
-        mic.startRecording();
+        try { mic.startRecording(); }
+        catch (RuntimeException e) { end("No pude abrir el micrófono."); return; }
         recorder = new Thread(this::record, "live-mic");
         recorder.start();
     }
@@ -180,8 +214,10 @@ public final class LiveSession {
         byte[] silence = new byte[chunk.length];
         while (running) {
             int n;
-            try { n = mic.read(chunk, 0, chunk.length); } catch (RuntimeException e) { return; } // released by end()
-            if (n <= 0) continue;
+            try { n = mic.read(chunk, 0, chunk.length); }
+            catch (RuntimeException e) { end("Se cortó el micrófono."); return; }
+            if (n < 0) { end("Se cortó el micrófono."); return; }
+            if (n == 0) continue;
             try {
                 String data = Base64.encodeToString(muted ? silence : chunk, 0, n, Base64.NO_WRAP);
                 socket.sendText("{\"realtimeInput\":{\"audio\":{\"data\":\"" + data + "\",\"mimeType\":\"audio/pcm;rate=16000\"}}}");
@@ -189,16 +225,52 @@ public final class LiveSession {
         }
     }
 
+    /** Another reminder came due while talking: she says it too. */
+    public void addReminder(String text) {
+        LiveSocket s = socket;
+        if (!running || s == null) return;
+        try {
+            s.sendText(new JSONObject().put("clientContent", new JSONObject()
+                    .put("turns", new JSONArray().put(new JSONObject().put("role", "user").put("parts", new JSONArray().put(new JSONObject()
+                            .put("text", "Llegó otro recordatorio para David mientras hablan: «" + text + "». Decíselo.")))))
+                    .put("turnComplete", true)).toString());
+        } catch (Exception ignored) { }
+    }
+
     public void hangUp() { end("Colgaste."); }
 
     private synchronized void end(String why) {
         if (!running) return;
         running = false;
+        main.removeCallbacks(micFallback);
         if (socket != null) socket.close();
-        if (mic != null) { try { mic.stop(); } catch (RuntimeException ignored) { } mic.release(); mic = null; }
-        if (speaker != null) { try { speaker.stop(); } catch (RuntimeException ignored) { } speaker.release(); speaker = null; }
-        if (android.os.Build.VERSION.SDK_INT >= 31) audio.clearCommunicationDevice(); else audio.setSpeakerphoneOn(false);
-        audio.setMode(previousMode);
+        if (mic != null) { try { mic.stop(); } catch (RuntimeException ignored) { } }
+        if (speaker != null) { try { speaker.pause(); speaker.flush(); } catch (RuntimeException ignored) { } }
         events.onEnded(why);
+    }
+
+    /** Reader owns playback; release only after both audio workers have stopped using the objects. */
+    private void releaseAudio() {
+        Thread recording;
+        synchronized (this) { recording = recorder; }
+        if (recording != null) {
+            boolean interrupted = false;
+            for (;;) {
+                try { recording.join(); break; }
+                catch (InterruptedException e) { interrupted = true; }
+            }
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+        synchronized (this) {
+            if (aec != null) { aec.release(); aec = null; }
+            if (ns != null) { ns.release(); ns = null; }
+            if (mic != null) { mic.release(); mic = null; }
+            if (speaker != null) { speaker.release(); speaker = null; }
+            if (modeChanged) {
+                if (android.os.Build.VERSION.SDK_INT >= 31) audio.clearCommunicationDevice(); else audio.setSpeakerphoneOn(false);
+                audio.setMode(previousMode);
+                modeChanged = false;
+            }
+        }
     }
 }
