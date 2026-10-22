@@ -121,4 +121,10 @@ public class AudioProtocolTest {
                 .getJSONObject("voiceConfig").getJSONObject("prebuiltVoiceConfig").getString("voiceName"));
         assertFalse(request.has("systemInstruction")); // the TTS models reject it
     }
+    @Test public void spokenSummaryDoesNotGreetOnEveryVoiceNote() throws Exception {
+        String prompt = AudioProtocol.spokenRequest("Anoté un gasto de 25.000 en almuerzo.").getJSONArray("contents")
+                .getJSONObject(0).getJSONArray("parts").getJSONObject(0).getString("text");
+        assertTrue(prompt.contains("no empieces con saludos ni con su nombre"));
+        assertTrue(prompt.contains("solo saludá si la respuesta misma es un saludo"));
+    }
 }

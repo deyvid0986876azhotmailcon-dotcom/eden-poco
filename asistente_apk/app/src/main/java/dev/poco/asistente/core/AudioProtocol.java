@@ -42,6 +42,9 @@ public final class AudioProtocol {
         return Json.object("contents", array(Json.object("role", "user", "parts", array(Json.object("text",
                 "Convertí esta respuesta en lo que dirías en una nota de voz de WhatsApp: corta (una a tres frases), natural, "
                 + "como una chica de Asunción de 22 años que le habla a su amigo David, con voseo. Decí lo importante directo. "
+                // This step never sees the conversation, so it greeted on every voice note («Hola David» each time).
+                + "Es una charla que ya viene en curso: no empieces con saludos ni con su nombre («hola», «hola David», «che David»); "
+                + "solo saludá si la respuesta misma es un saludo. "
                 + "Nada de códigos, IDs, referencias, comillas, listas ni símbolos; los montos en palabras de uso común "
                 + "(por ejemplo «veinticinco mil guaraníes»). Si la respuesta pide confirmar con un código, decí solo que se lo "
                 + "dejaste escrito. Devolvé solo el texto a decir, sin comillas ni explicaciones.\n\nRespuesta:\n" + written)))),
