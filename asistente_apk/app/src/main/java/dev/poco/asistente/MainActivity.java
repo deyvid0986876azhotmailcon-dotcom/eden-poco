@@ -538,7 +538,7 @@ public final class MainActivity extends Activity {
         about.addView(ui.cardTitle(Icons.INFO, "Acerca de", false));
         String version = "";
         try { version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception ignored) { }
-        about.addView(label("Asistente " + version + " — firma de depuración pública; la firma privada sigue pendiente."));
+        about.addView(label("Asistente " + version + " — firmada con tu clave privada."));
         about.addView(label(Icons.CREDIT));
     }
     private void refreshPhoneStatus() {
