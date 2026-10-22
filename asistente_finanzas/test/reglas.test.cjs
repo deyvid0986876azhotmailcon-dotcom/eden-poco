@@ -40,9 +40,33 @@ test('correos de seguridad del banco nunca se devuelven', () => {
 
 test('un correo del banco que no se entiende se marca para preguntar, sin números largos', () => {
   const m = interpretar('Débito automático 4455667788', correo('DEBITO', [fila('Monto', 'Gs 50.000')]));
-  assert.deepStrictEqual({ ...m }, { tipo: 'desconocido', asunto: 'Débito automático' });
+  assert.deepStrictEqual({ ...m }, { tipo: 'desconocido', asunto: 'Correo del banco sin regla' });
   const incompleto = interpretar('PAGO de SERVICIOS', correo('PAGO', [fila('Servicio', 'ANDE')]));
   assert.strictEqual(incompleto.tipo, 'desconocido');
+});
+
+test('un asunto desconocido no filtra nombres, cuentas separadas ni referencias alfanuméricas', () => {
+  const m = interpretar('Cuenta 123-456 de Ana Pérez ref. ABXY-ZZZZ', 'Sin regla');
+  assert.deepStrictEqual({ ...m }, { tipo: 'desconocido', asunto: 'Correo del banco sin regla' });
+});
+
+test('lee todas las páginas aunque la primera sean solo correos de seguridad', () => {
+  const pages = [];
+  const env = { Gmail: { Users: { Messages: {
+    list: (_, options) => {
+      pages.push(options.pageToken || 'primera');
+      return options.pageToken ? { messages: [{ id: 'movimiento2' }] }
+        : { messages: [{ id: 'seguridad1' }], nextPageToken: 'segunda' };
+    },
+    get: (_, id) => ({ payload: { headers: [
+      { name: 'From', value: 'operbancaweb@familiar.com.py' },
+      { name: 'Subject', value: id === 'seguridad1' ? 'Código de acceso' : 'Aviso sin regla' }
+    ] } })
+  } } } };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'Code.gs'), 'utf8'), env);
+  const items = env.leer_(3);
+  assert.deepStrictEqual(pages, ['primera', 'segunda']);
+  assert.strictEqual(items.length, 1); assert.strictEqual(items[0].id, 'movimiento2');
 });
 
 test('montos y fechas', () => {

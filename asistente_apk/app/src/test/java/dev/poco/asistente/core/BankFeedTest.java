@@ -82,4 +82,43 @@ public class BankFeedTest {
         assertEquals("transferencias", BankFeed.category(new BankFeed.Item("x", "gasto", 1, "", "Transferencia a BANCO ITAU")));
         assertEquals("ingresos", BankFeed.category(new BankFeed.Item("x", "ingreso", 1, "", "Transferencia de BANCO BASA")));
     }
+
+    @Test public void failedNoticeRollsBackRecordsAndReceiptsAndRetryIsComplete() throws Exception {
+        ProactiveTest.Port failing = new ProactiveTest.Port() {
+            boolean fail = true;
+            @Override public void enqueue(String id, String text, String kind, boolean night, long now,
+                    Store.Row row, long next, String state) throws Exception {
+                if (fail) { fail = false; throw new java.io.IOException("disk full"); }
+                super.enqueue(id, text, kind, night, now, row, next, state);
+            }
+        };
+        AssistantCore c = new AssistantCore(failing, new ProactiveTest.Settings(), (k,m,b) -> { throw new AssertionError(); }, clock);
+        BankFeed feed = new BankFeed(failing, c, () -> BATCH);
+        assertThrows(java.io.IOException.class, () -> feed.run(clock.millis(), c.cancellationToken(), () -> false));
+        assertTrue(failing.rows().isEmpty()); assertTrue(failing.receipts.isEmpty()); assertTrue(failing.out.isEmpty());
+        feed.run(clock.millis() + BankFeed.INTERVAL, c.cancellationToken(), () -> false);
+        assertEquals(2, failing.rows().size()); assertEquals(1, failing.out.size());
+    }
+
+    @Test public void stalledFetchDoesNotDelayPollOrPararAndLateBatchIsDiscarded() throws Exception {
+        java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch finished = new java.util.concurrent.CountDownLatch(1);
+        ProactiveTest.Settings settings = new ProactiveTest.Settings();
+        Proactive proactive = new Proactive(store, settings, (k,m,b) -> { throw new AssertionError(); }, clock, core);
+        proactive.bank = new BankFeed(store, core, () -> {
+            entered.countDown(); release.await(5, java.util.concurrent.TimeUnit.SECONDS); return BATCH;
+        }) ;
+        // The bank worker holds the feed monitor throughout run; acquiring it after release waits for completion.
+        java.util.concurrent.ExecutorService worker = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            store.enqueue("due", "Tomá agua", "recordatorio", true, clock.millis(), null, 0, null);
+            assertEquals(1, worker.submit(proactive::poll).get(1, java.util.concurrent.TimeUnit.SECONDS).length());
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            worker.submit(core::stop).get(1, java.util.concurrent.TimeUnit.SECONDS);
+            release.countDown();
+            worker.submit(() -> { synchronized (proactive.bank) { finished.countDown(); } }).get(5, java.util.concurrent.TimeUnit.SECONDS);
+            assertEquals(0, finished.getCount()); assertTrue(store.rows().isEmpty()); assertEquals(1, store.out.size());
+        } finally { release.countDown(); worker.shutdownNow(); }
+    }
 }

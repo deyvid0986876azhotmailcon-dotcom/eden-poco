@@ -212,7 +212,10 @@ public final class AssistantCore {
                 if (key == null || key.isEmpty()) return "No entendí el pedido con las reglas locales. Podés repetirlo como en «ayuda» o pegar tu clave de Gemini en Ajustes.";
                 String context = "Fecha y hora local: " + java.time.ZonedDateTime.now(clock) + "\n" + Summary.render(store.rows(), LocalDate.now(clock), false);
                 if (context.length() > 6000) context = context.substring(0, 6000) + "\n[contexto recortado]";
-                GeminiProtocol.Reply reply = cloud.generate(key, settings.model(), GeminiProtocol.request(text, context, LocalDate.now(clock), settings.currency(), store.conversation(), store.memories(), settings.phoneEnabled()), () -> ticket != generation.get());
+                org.json.JSONObject request = chatting
+                        ? ProProtocol.routingRequest(text, java.time.ZonedDateTime.now(clock), settings.currency(), store.conversation(), store.memories(), settings.phoneEnabled())
+                        : GeminiProtocol.request(text, context, LocalDate.now(clock), settings.currency(), store.conversation(), store.memories(), settings.phoneEnabled());
+                GeminiProtocol.Reply reply = cloud.generate(key, settings.model(), request, () -> ticket != generation.get());
                 synchronized (actionGate) {
                     if (ticket != generation.get()) return "Pedido cancelado. No ejecuté la respuesta de Gemini.";
                     // which models were busy before one answered is not for David: he gets only the answer

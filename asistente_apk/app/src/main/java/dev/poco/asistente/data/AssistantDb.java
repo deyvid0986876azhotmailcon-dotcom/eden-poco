@@ -87,6 +87,11 @@ public final class AssistantDb extends SQLiteOpenHelper implements dev.poco.asis
         db.execSQL("INSERT OR IGNORE INTO proactivo_estado(clave,proximo) VALUES (?,?)", new Object[]{key, initial});
         try (Cursor c = db.rawQuery("SELECT proximo FROM proactivo_estado WHERE clave=?", new String[]{key})) { c.moveToFirst(); return c.getLong(0); }
     }
+    @Override public synchronized void bankTransaction(java.util.concurrent.Callable<Void> action) throws Exception {
+        SQLiteDatabase db = getWritableDatabase(); db.beginTransaction();
+        try { action.call(); db.setTransactionSuccessful(); }
+        finally { db.endTransaction(); }
+    }
     @Override public synchronized boolean queued(String id) {
         try (Cursor c = getReadableDatabase().rawQuery("SELECT 1 FROM salientes WHERE id=?", new String[]{id})) { return c.moveToFirst(); }
     }

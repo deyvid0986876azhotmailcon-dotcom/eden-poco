@@ -154,8 +154,54 @@ public class ProCoreTest {
     }
     @Test public void confirmationFilterCoversFormattingWithoutRemovingOrdinaryConditionalSpeech() {
         assertEquals("Si querés, charlamos.", ProProtocol.answer("Si querés, charlamos.\n**SÍ** `0123456789abcdef`"));
-        for (String code : new String[]{"SÍ <CÓDIGO>", "si abc123", "S\u200bÍ ABCDEF0123456789", "sí ABCXYZ"})
+        for (String code : new String[]{"SÍ <CÓDIGO>", "si abcdef0123456789", "S\u200bÍ ABCDEF0123456789",
+                "**SÍ** `0123456789ABCDEF`", "{\"respuesta\":\"SÍ 0123456789ABCDEF\"}",
+                "«SÍ 01234567\u200b89ABCDEF»", "SÍ ＡＢＣＤＥＦ０１２３４５６７８９",
+                "{\"respuesta\":\"Confirmá\\nS\\u00cd 01234567\\u200b89ABCDEF\"}"})
             assertEquals("Hola", ProProtocol.answer("Hola\n" + code));
+        for (String line : new String[]{"Sí, 2026 fue un año duro", "Sí, DALE", "Si abc123", "sí ABCXYZ"})
+            assertEquals(line, ProProtocol.answer(line));
+    }
+    @Test public void chatRouterDoesNotSendOldSecretsOrFinancialSummary() throws Exception {
+        store.exchange("old", "mi clave es SECRETO_ANTERIOR", "mi banco Familiar");
+        store.mutate("note", null, new Store.Row("note", "memoria", 1,
+                Json.object("texto", "mi token SECRETO_LIBRETA", "categoria", "otro")), "ok", clock.millis());
+        AssistantCore core = core((k, m, b) -> {
+            String sent = b.toString();
+            assertFalse(sent.contains("SECRETO_ANTERIOR")); assertFalse(sent.contains("SECRETO_LIBRETA"));
+            assertFalse(sent.contains("mi banco Familiar")); assertFalse(sent.contains("superprivado"));
+            assertTrue(b.has("tools")); return text("charla");
+        }, (t, p, m, c) -> "Te escucho", PhoneTools.UNAVAILABLE);
+        core.receive("gasté 35000 en superprivado");
+        core.receive("charlemos");
+        assertEquals("Te escucho", core.receive("Cómo estás"));
+    }
+    @Test public void chatRouterDeletionStillNeedsTheExactUserConfirmation() throws Exception {
+        String id = "12345678-1234-1234-1234-123456789abc";
+        store.mutate("seed", null, new Store.Row(id, "peso", 1, Json.object("kg", 58, "fecha", "2026-10-17")), "ok", clock.millis());
+        AssistantCore core = core((k, m, b) -> new GeminiProtocol.Reply(null, "borrar_registro", Json.object("id", id), ""),
+                (t,p,m,c) -> { throw new AssertionError(); }, PhoneTools.UNAVAILABLE);
+        core.receive("charlemos");
+        String proposal = core.receive("Quitá ese registro");
+        java.util.regex.Matcher code = java.util.regex.Pattern.compile("SÍ [A-F0-9]{16}").matcher(proposal);
+        assertTrue(code.find()); assertNotNull(store.find(id));
+        core.receive("SÍ 0000000000000000"); assertNotNull(store.find(id));
+        core.receive(code.group()); assertNull(store.find(id));
+    }
+    @Test public void stopDuringChatRoutingDiscardsLateTool() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        AssistantCore core = core((k, m, b) -> {
+            entered.countDown(); release.await(5, TimeUnit.SECONDS);
+            return new GeminiProtocol.Reply(null, "registrar_peso", Json.object("kg", 90), "");
+        }, (t,p,m,c) -> { throw new AssertionError(); }, PhoneTools.UNAVAILABLE);
+        core.receive("charlemos");
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<String> answer = workers.submit(() -> core.receive("Anotá mi peso por favor"));
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            workers.submit(core::stop).get(1, TimeUnit.SECONDS); release.countDown();
+            assertTrue(answer.get(5, TimeUnit.SECONDS).contains("cancelado")); assertTrue(store.rows().isEmpty());
+        } finally { release.countDown(); workers.shutdownNow(); }
     }
     @Test public void inChatModeARequestStillRunsItsToolAndOnlyConversationGoesToPro() throws Exception {
         // 2026-10-21: «necesito que busques el clima para mañana» in chat mode got a friendly refusal from Pro

@@ -24,6 +24,16 @@ public class ProactiveTest {
     static class Port extends TestStore implements Proactive.Port {
         final Map<String, JSONObject> out = new LinkedHashMap<>();
         final Map<String, Long> state = new HashMap<>();
+        public void bankTransaction(java.util.concurrent.Callable<Void> action) throws Exception {
+            Map<String, Row> oldData = new LinkedHashMap<>(data);
+            Map<String, String> oldReceipts = new LinkedHashMap<>(receipts);
+            Map<String, JSONObject> oldOut = new LinkedHashMap<>(out);
+            try { action.call(); }
+            catch (Exception e) {
+                data.clear(); data.putAll(oldData); receipts.clear(); receipts.putAll(oldReceipts);
+                out.clear(); out.putAll(oldOut); throw e;
+            }
+        }
         public long scheduleState(String key, long initial) { state.putIfAbsent(key, initial); return state.get(key); }
         public boolean queued(String id) { return out.containsKey(id); }
         public void enqueue(String id, String text, String kind, boolean night, long now, Store.Row reminder, long next, String key) throws Exception {

@@ -20,6 +20,20 @@ public final class BankFeed {
     private final AssistantCore core;
     private final Source source;
     private long last = Long.MIN_VALUE / 2;
+    private final java.util.concurrent.atomic.AtomicBoolean running = new java.util.concurrent.atomic.AtomicBoolean();
+
+    /** A stalled bank endpoint must not hold the shared inbox or delay reminder delivery. */
+    public void schedule(long now, long ticket, BooleanSupplier cancelled) {
+        if (!running.compareAndSet(false, true)) return;
+        Thread worker = new Thread(() -> {
+            try { run(now, ticket, cancelled); }
+            catch (Exception ignored) { /* Retry next interval. */ }
+            finally { running.set(false); }
+        }, "bank-feed");
+        worker.setDaemon(true);
+        try { worker.start(); }
+        catch (RuntimeException e) { running.set(false); throw e; }
+    }
 
     public BankFeed(Proactive.Port store, AssistantCore core, Source source) {
         this.store = store; this.core = core; this.source = source;
@@ -34,23 +48,29 @@ public final class BankFeed {
     }
 
     /** Called from Proactive.poll. Network outside the action gate; nothing happens while paused (PARAR). */
-    public void run(long now, long ticket, BooleanSupplier cancelled) throws Exception {
+    public synchronized void run(long now, long ticket, BooleanSupplier cancelled) throws Exception {
         if (now - last < INTERVAL || cancelled.getAsBoolean()) return;
         last = now;
         List<Item> items;
         try { items = parse(source.fetch()); }
         catch (Exception e) { return; } // no internet or reader down: the next round retries
-        List<String> lines = new ArrayList<>();
-        for (Item item : items) {
-            if (cancelled.getAsBoolean()) return;
-            String line;
-            try { line = core.proactiveAction(ticket, () -> record(item, now), null); }
-            catch (IllegalArgumentException e) { continue; } // one movement the executor rejects does not lose the rest
-            if (line != null) lines.add(line);
-        }
-        if (lines.isEmpty() || cancelled.getAsBoolean()) return;
-        String text = (lines.size() == 1 ? "Del banco: " + lines.get(0) : "Del banco anoté:\n• " + String.join("\n• ", lines));
-        core.proactiveAction(ticket, () -> { store.enqueue("b_" + now, text, "banco", false, now, null, 0, null); return null; }, null);
+        if (cancelled.getAsBoolean()) return;
+        core.proactiveAction(ticket, () -> {
+            store.bankTransaction(() -> {
+                List<String> lines = new ArrayList<>();
+                for (Item item : items) {
+                    String line;
+                    try { line = record(item, now); }
+                    catch (IllegalArgumentException e) { continue; } // invalid movement, keep the others
+                    if (line != null) lines.add(line);
+                }
+                if (lines.isEmpty()) return null;
+                String text = lines.size() == 1 ? "Del banco: " + lines.get(0) : "Del banco anoté:\n• " + String.join("\n• ", lines);
+                store.enqueue("b_" + java.util.UUID.randomUUID(), text, "banco", false, now, null, 0, null);
+                return null;
+            });
+            return null;
+        }, null);
     }
 
     private String record(Item item, long now) throws Exception {

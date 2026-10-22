@@ -20,11 +20,11 @@ function probar() {
   Logger.log('Movimientos encontrados en 30 días: ' + movimientos.length + ' (' +
       movimientos.filter(m => m.tipo === 'gasto').length + ' gastos, ' +
       movimientos.filter(m => m.tipo === 'ingreso').length + ' ingresos)');
-  // Solo los asuntos (sin números) de lo que todavía no se entiende, para sumar reglas.
+  // Count unknown mail without exposing its original subject.
   const cuenta = {};
   movimientos.filter(m => m.tipo === 'desconocido').forEach(m => { cuenta[m.asunto] = (cuenta[m.asunto] || 0) + 1; });
   Object.keys(cuenta).sort((a, b) => cuenta[b] - cuenta[a]).forEach(a => Logger.log('Sin regla: ' + cuenta[a] + ' × «' + a + '»'));
-  etiquetas_(Object.keys(cuenta));
+  // Unknown subjects are deliberately generic; do not search the inbox for those placeholders.
 }
 
 /** Para armar reglas nuevas: SOLO los nombres de los campos («Monto:», «Comercio:»), nunca sus valores. */
@@ -45,21 +45,27 @@ function etiquetas_(asuntos) {
 }
 
 function leer_(dias) {
-  const lista = Gmail.Users.Messages.list('me', { q: 'from:' + REMITENTE + ' newer_than:' + dias + 'd', maxResults: 100 });
   const salida = [];
-  (lista.messages || []).forEach(function (ref) {
-    try {
-      const msg = Gmail.Users.Messages.get('me', ref.id, { format: 'full' });
-      const cabeceras = (msg.payload && msg.payload.headers) || [];
-      const de = valorCabecera_(cabeceras, 'From').toLowerCase();
-      if (de.indexOf('<' + REMITENTE + '>') < 0 && de.trim() !== REMITENTE) return; // el filtro de búsqueda no alcanza
-      const movimiento = interpretar(valorCabecera_(cabeceras, 'Subject'), cuerpo_(msg.payload));
-      if (movimiento) { movimiento.id = ref.id; salida.push(movimiento); }
-    } catch (e) {
-      // un correo raro no frena a los demás; se marca para que el asistente pregunte
-      salida.push({ id: ref.id, tipo: 'desconocido', asunto: 'Correo del banco que no pude leer' });
-    }
-  });
+  var pagina;
+  do {
+    const opciones = { q: 'from:' + REMITENTE + ' newer_than:' + dias + 'd', maxResults: 100 };
+    if (pagina) opciones.pageToken = pagina;
+    const lista = Gmail.Users.Messages.list('me', opciones);
+    (lista.messages || []).forEach(function (ref) {
+      try {
+        const msg = Gmail.Users.Messages.get('me', ref.id, { format: 'full' });
+        const cabeceras = (msg.payload && msg.payload.headers) || [];
+        const de = valorCabecera_(cabeceras, 'From').toLowerCase();
+        if (de.indexOf('<' + REMITENTE + '>') < 0 && de.trim() !== REMITENTE) return; // el filtro de búsqueda no alcanza
+        const movimiento = interpretar(valorCabecera_(cabeceras, 'Subject'), cuerpo_(msg.payload));
+        if (movimiento) { movimiento.id = ref.id; salida.push(movimiento); }
+      } catch (e) {
+        // un correo raro no frena a los demás; se marca para que el asistente pregunte
+        salida.push({ id: ref.id, tipo: 'desconocido', asunto: 'Correo del banco que no pude leer' });
+      }
+    });
+    pagina = lista.nextPageToken;
+  } while (pagina);
   return salida;
 }
 
@@ -170,7 +176,9 @@ function interpretar(asunto, html) {
   }
   if (resultado && resultado.monto && resultado.fecha) { resultado.moneda = 'PYG'; return resultado; }
   // Del banco pero sin entender: el asistente le pregunta a David antes de anotar nada.
-  return { tipo: 'desconocido', asunto: limpiar_(asunto) || 'Correo del banco' };
+  // An unrecognized subject is free text: it can contain a person's name, account or reference.
+  // Removing long digit runs does not make it safe (e.g. «Cuenta 123-456 de Ana Pérez»).
+  return { tipo: 'desconocido', asunto: 'Correo del banco sin regla' };
 }
 
 /** Sin números largos (cuentas, referencias) y con largo acotado. */

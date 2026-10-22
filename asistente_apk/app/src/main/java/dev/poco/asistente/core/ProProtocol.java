@@ -22,6 +22,15 @@ public final class ProProtocol {
                 || n.contains("@") || n.contains("://") || text.matches("(?s).*[\\p{Cf}].*");
     }
     public static String safeContext(String text) { return sensitive(text) ? "[dato privado omitido]" : Memory.clip(text, 900); }
+    public static JSONObject routingRequest(String message, java.time.ZonedDateTime now, String currency,
+            List<Memory.Exchange> history, List<Store.Row> memories, boolean phoneEnabled) throws Exception {
+        if (sensitive(message)) throw new IllegalArgumentException(PRIVATE);
+        List<Memory.Exchange> safeHistory = new java.util.ArrayList<>();
+        for (Memory.Exchange e : history) safeHistory.add(new Memory.Exchange(safeContext(e.user), safeContext(e.model)));
+        List<Store.Row> safeMemories = new java.util.ArrayList<>();
+        for (Store.Row row : memories) if (!sensitive(row.data.optString("texto"))) safeMemories.add(row);
+        return GeminiProtocol.request(message, "Fecha y hora local: " + now, now.toLocalDate(), currency, safeHistory, safeMemories, phoneEnabled);
+    }
     public static String chatPrompt(String message, List<Memory.Exchange> history, List<Store.Row> memories) throws Exception {
         if (sensitive(message)) throw new IllegalArgumentException(PRIVATE);
         JSONArray conversation = new JSONArray(), notebook = new JSONArray();
@@ -63,13 +72,18 @@ public final class ProProtocol {
         StringBuilder result = new StringBuilder();
         for (String line : text.split("\\R")) {
             // Strip the entire line, including quoted/Markdown/JSON-embedded confirmation codes.
-            String visible = java.text.Normalizer.normalize(line.replaceAll("[\\p{Cf}]", ""), java.text.Normalizer.Form.NFKC);
+            // Inspect JSON escapes too, without changing the text that is ultimately displayed.
+            java.util.regex.Matcher escapes = Pattern.compile("\\\\u([0-9a-fA-F]{4})|\\\\([nrt])").matcher(line);
+            StringBuffer decoded = new StringBuffer();
+            while (escapes.find()) escapes.appendReplacement(decoded, java.util.regex.Matcher.quoteReplacement(
+                    escapes.group(1) == null ? " " : String.valueOf((char) Integer.parseInt(escapes.group(1), 16))));
+            escapes.appendTail(decoded);
+            String visible = java.text.Normalizer.normalize(decoded.toString(), java.text.Normalizer.Form.NFKC).replaceAll("[\\p{Cf}]", "");
             java.util.regex.Matcher confirmation = Pattern.compile("(?iu)\\bs[ií][\\s\\p{Punct}\\p{P}]+([\\p{L}0-9_-]+)").matcher(visible);
             boolean code = false;
             while (confirmation.find()) {
                 String value = confirmation.group(1);
-                code |= value.matches("(?i)[a-f0-9]{6,}") || value.matches(".*[0-9].*")
-                        || (value.length() >= 4 && value.equals(value.toUpperCase(java.util.Locale.ROOT)))
+                code |= value.matches("(?i)[a-f0-9]{16}")
                         || Rules.normalize(value).equals("codigo");
             }
             if (code) continue;

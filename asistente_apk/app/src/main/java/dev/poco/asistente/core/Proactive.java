@@ -15,6 +15,10 @@ public final class Proactive {
         void enqueue(String id, String text, String kind, boolean night, long now, Row reminder, long next, String state) throws Exception;
         JSONArray lease(long now, boolean quiet) throws Exception;
         void acknowledge(List<String> ids, long now) throws Exception;
+        /** Commit bank records, receipts and their outgoing notice together; no network inside. */
+        default void bankTransaction(java.util.concurrent.Callable<Void> action) throws Exception {
+            throw new IllegalStateException("Transacción bancaria no disponible.");
+        }
     }
     public interface Settings extends AssistantCore.Settings {
         boolean dailySummary();
@@ -71,7 +75,7 @@ public final class Proactive {
         }
         BankFeed feed = bank;
         if (feed != null && !cancelled.getAsBoolean()) {
-            try { feed.run(millis, ticket, cancelled); }
+            try { feed.schedule(millis, ticket, cancelled); }
             catch (Exception e) { /* the bank must never stop reminders */ }
         }
         if (cancelled.getAsBoolean()) return new JSONArray();
