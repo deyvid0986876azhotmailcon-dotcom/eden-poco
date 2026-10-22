@@ -1,11 +1,52 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { privateDirectory } = require('./lib.cjs');
 const DAY = 86400000;
 const HEADER = Buffer.from('SQLite format 3\0');
 const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+
+function validScript(value) {
+  return !!value && typeof value.url === 'string'
+    && /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(value.url)
+    && typeof value.token === 'string' && /^[A-Za-z0-9_-]{20,64}$/.test(value.token);
+}
+
+async function uploadScript(config, file, fetcher = fetch, timeout = 60000) {
+  if (!validScript(config) || !/^asistente-\d{4}-\d{2}-\d{2}\.db$/.test(path.basename(file))) throw new Error('respaldo invalido');
+  if (fs.statSync(file).size > 20 * 1024 * 1024) throw new Error('respaldo demasiado grande');
+  const bytes = fs.readFileSync(file);
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    let response = await fetcher(`${config.url}?t=${config.token}`, {
+      method: 'POST', redirect: 'manual', signal: controller.signal,
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ nombre: path.basename(file), datos: bytes.toString('base64'), sha256 })
+    });
+    if (response.status === 302) {
+      const location = response.headers.get('location');
+      // Do not forward the POST, token or database to any redirect destination.
+      const target = new URL(location);
+      await response.body?.cancel();
+      if (!location.startsWith('https://script.googleusercontent.com/')
+          || target.origin !== 'https://script.googleusercontent.com' || target.username || target.password) throw new Error('redireccion invalida');
+      response = await fetcher(target.href, { method: 'GET', redirect: 'error', signal: controller.signal });
+    }
+    if (response.status !== 200) { await response.body?.cancel(); throw new Error('subida fallida'); }
+    let result = '', size = 0;
+    for await (const chunk of response.body) {
+      size += chunk.length;
+      if (size > 65536) { controller.abort(); throw new Error('respuesta demasiado grande'); }
+      result += Buffer.from(chunk).toString('utf8');
+    }
+    const data = JSON.parse(result);
+    if (data?.ok !== true || data.sha256 !== sha256) throw new Error('confirmacion invalida');
+  } finally { controller.abort(); clearTimeout(timer); }
+}
 
 function rclone(args) {
   return new Promise((resolve, reject) => {
@@ -62,16 +103,24 @@ class Backups {
     this.state = path.join(root, 'respaldo-exito.json');
     this.active = null; this.timer = null; this.stopped = false; this.attemptDay = null;
     this.last = 0;
+    this.retryAt = 0;
     try {
       const state = JSON.parse(fs.readFileSync(this.state, 'utf8'));
       if (Number.isSafeInteger(state.timestamp) && state.timestamp > 0) this.last = state.timestamp;
     } catch { /* Missing/corrupt state means a fresh backup is required. */ }
   }
-  request() {
+  request(retry = false) {
     if (this.stopped) return Promise.resolve(false);
     if (this.active) return this.active;
+    this.retryAt = 0;
     this.attemptDay = dateKey(this.now());
-    this.active = this.perform().finally(() => { this.active = null; });
+    this.active = this.perform().then(ok => {
+      if (!ok) {
+        if (retry) this.log('Respaldo: no se pudo subir');
+        else if (!this.stopped) this.retryAt = this.now().getTime() + 10 * 60000;
+      }
+      return ok;
+    }).finally(() => { this.active = null; });
     return this.active;
   }
   async perform() {
@@ -87,10 +136,15 @@ class Backups {
       stage = 'archivo local';
       fs.renameSync(temporary, file); temporary = null;
       fs.chmodSync(file, 0o600);
-      stage = 'rclone copy';
-      await this.run(['copy', file, 'drive:Asistente/respaldos']);
-      stage = 'rclone delete';
-      await this.run(['delete', '--min-age', '30d', 'drive:Asistente/respaldos']);
+      if (validScript(this.config.respaldo_script)) {
+        stage = 'subida por script';
+        await uploadScript(this.config.respaldo_script, file, this.fetcher);
+      } else {
+        stage = 'rclone copy';
+        await this.run(['copy', file, 'drive:Asistente/respaldos']);
+        stage = 'rclone delete';
+        await this.run(['delete', '--min-age', '30d', 'drive:Asistente/respaldos']);
+      }
       stage = 'retencion local';
       const files = fs.readdirSync(this.directory, { withFileTypes: true })
         .filter(entry => entry.isFile() && /^asistente-\d{4}-\d{2}-\d{2}\.db$/.test(entry.name))
@@ -113,6 +167,7 @@ class Backups {
   }
   tick(startup = false) {
     const now = this.now(), day = dateKey(now);
+    if (this.retryAt) return now.getTime() >= this.retryAt ? this.request(true) : Promise.resolve(false);
     const [hour, minute] = (this.config.respaldo_hora || '03:00').split(':').map(Number);
     const scheduled = new Date(now); scheduled.setHours(hour, minute, 0, 0);
     const overdue = !this.last || now.getTime() - this.last > DAY;
@@ -125,7 +180,7 @@ class Backups {
     // Re-evaluate local wall time each minute (timezone changes, sleep and DST included).
     this.timer = setInterval(() => { void this.tick(); }, 60000);
   }
-  stop() { this.stopped = true; clearInterval(this.timer); return this.active; }
+  stop() { this.stopped = true; this.retryAt = 0; clearInterval(this.timer); return this.active; }
 }
 
 function signalBackup(root, processApi = process) {
@@ -133,4 +188,4 @@ function signalBackup(root, processApi = process) {
   if (!/^[1-9][0-9]*$/.test(pid) || !Number.isSafeInteger(Number(pid))) throw new Error('candado invalido');
   processApi.kill(Number(pid), 'SIGUSR1');
 }
-module.exports = { Backups, download, signalBackup, dateKey, rclone };
+module.exports = { Backups, download, signalBackup, dateKey, rclone, validScript, uploadScript };

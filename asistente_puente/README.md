@@ -83,10 +83,31 @@ El proceso principal incluye un programador interno, sin cron. Agregar opcionalm
 `"respaldo_hora": "03:00"` a `~/.asistente_puente/config.json` (formato HH:mm de 24 horas)
 y reiniciar el puente. Si falta, usa 03:00, hora local del teléfono. Comprueba la hora
 cada minuto; al arrancar también respalda si no hay un éxito guardado o tiene más de
-24 horas. Hace como máximo un intento automático por día de ejecución; tras un fallo,
-se puede pedir otro manualmente o esperar al siguiente día. Necesita Asistente activo.
+24 horas. Hace un intento automático por día y, si falla, un solo reintento diez
+minutos después (comprobado cada minuto). Si también falla, registra
+`Respaldo: no se pudo subir`. Un pedido manual reemplaza el reintento pendiente;
+los reintentos pendientes no se conservan al reiniciar. Necesita Asistente activo.
 
-Claude debe instalar `rclone` en el PATH de Termux y configurar el remoto `drive` para
+Para subir sin rclone, agregar `respaldo_script` al config:
+
+```json
+"respaldo_script": {
+  "url": "https://script.google.com/macros/s/ID_DEL_SCRIPT/exec",
+  "token": "REEMPLAZAR_POR_TOKEN_DEL_SCRIPT"
+}
+```
+
+Reemplazar ambos valores por los del despliegue propio. El token admite 20–64
+letras ASCII, números, guion y guion bajo. La URL debe tener exactamente ese
+formato, sin parámetros. Con configuración válida se envía la base (máximo
+20 MiB) en base64 con SHA-256; solo se acepta éxito con el mismo hash. La subida
+tiene un plazo total de 60 segundos y solo sigue el 302 por GET a
+`https://script.googleusercontent.com/`. No registra token, URL ni respuestas
+privadas. El Apps Script administra la retención remota de 30 días; el puente
+conserva siete copias locales tras el éxito. No se invoca rclone en este modo.
+Si falta `respaldo_script` o es inválido, se conserva el modo rclone descrito abajo.
+
+Para el modo rclone, Claude debe instalar `rclone` en el PATH de Termux y configurar el remoto `drive` para
 Google Drive con scope `drive.file` (`pkg install rclone`, luego `rclone config`).
 Las credenciales de rclone quedan en Termux; no se guardan en este repositorio.
 No se requiere rclone para las pruebas Node. Si falta o falla, el puente sigue funcionando.

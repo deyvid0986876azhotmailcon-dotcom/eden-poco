@@ -7,6 +7,10 @@ const { Backups, signalBackup, download } = require('../respaldo.cjs');
 const { configuration } = require('../lib.cjs');
 const config = { puerto: 8765, token: 'a'.repeat(43), remitente: '123456789@s.whatsapp.net' };
 const body = Buffer.alloc(4096); body.write('SQLite format 3\0');
+const { createHash } = require('node:crypto');
+const { validScript, uploadScript } = require('../respaldo.cjs');
+const script = { url: 'https://script.google.com/macros/s/test-id/exec', token: 'secret_'.repeat(5) };
+const digest = createHash('sha256').update(body).digest('hex');
 function response(bytes = body, status = 200, size = bytes.length) {
   return new Response(bytes, { status, headers: { 'Content-Type': 'application/vnd.sqlite3', 'Content-Length': String(size) } });
 }
@@ -66,7 +70,8 @@ test('configured local hour is honored and a failed automatic attempt is not rep
   await scheduled.tick(); assert.equal(h.logs.length, 1);
   assert.equal(fs.existsSync(scheduled.state), false);
   h.clock.date = new Date(2026, 9, 20, 21, 15);
-  await scheduled.tick(); assert.equal(h.logs.length, 2);
+  await scheduled.tick(); assert.equal(h.logs.length, 3);
+  assert.equal(h.logs.at(-1), 'Respaldo: no se pudo subir');
 });
 test('invalid or truncated SQLite and HTTP failures never reach rclone or leave partial files', async t => {
   for (const getResponse of [() => response(Buffer.alloc(4096)), () => response(body, 503), () => response(body, 200, 8192)]) {
@@ -108,4 +113,93 @@ test('download timeout covers the response body', async t => {
   const fetcher = async (_, request) => ({ status: 200, headers: new Headers({ 'content-type': 'application/vnd.sqlite3', 'content-length': '4096' }),
     body: { async *[Symbol.asyncIterator]() { await new Promise((_, reject) => request.signal.addEventListener('abort', () => reject(new Error('timeout')), { once: true })); } } });
   await assert.rejects(download(config, path.join(h.root, 'timeout.part'), fetcher, 10));
+});
+
+test('script config validation and configuration acceptance', () => {
+  assert.deepEqual(configuration({ ...config, respaldo_script: script }).respaldo_script, script);
+  assert.equal(validScript(script), true);
+  for (const url of [script.url + '?t=x', script.url + '/', 'http://script.google.com/macros/s/id/exec',
+    'https://script.google.com.evil/macros/s/id/exec', 'https://script.google.com/macros/s/../exec']) {
+    assert.equal(validScript({ ...script, url }), false);
+  }
+  for (const token of ['', 'a'.repeat(19), 'a'.repeat(65), 'x&' + 'a'.repeat(20)]) assert.equal(validScript({ ...script, token }), false);
+});
+
+test('script exact POST, allowed GET redirect and success without rclone', async t => {
+  const calls = [];
+  const h = harness(t, { fetcher: async (url, request) => {
+    if (url.startsWith('http:')) return response();
+    calls.push({ url, request });
+    if (calls.length === 1) return new Response(null, { status: 302, headers: { location: 'https://script.googleusercontent.com/macros/echo?id=test' } });
+    return Response.json({ ok: true, bytes: body.length, sha256: digest });
+  } });
+  h.backups.config = { ...config, respaldo_script: script };
+  assert.equal(await h.backups.request(), true);
+  assert.equal(h.calls.length, 0);
+  assert.equal(calls[0].url, script.url + '?t=' + script.token);
+  assert.equal(calls[0].request.method, 'POST');
+  assert.equal(calls[0].request.redirect, 'manual');
+  assert.deepEqual(calls[0].request.headers, { 'Content-Type': 'text/plain;charset=utf-8' });
+  assert.deepEqual(JSON.parse(calls[0].request.body), { nombre: 'asistente-2026-10-19.db', datos: body.toString('base64'), sha256: digest });
+  assert.equal(calls[1].request.method, 'GET');
+  assert.equal(calls[1].request.redirect, 'error');
+  assert.equal(calls[1].request.body, undefined);
+  assert.equal(calls[1].request.headers, undefined);
+  assert.equal(calls[0].request.signal, calls[1].request.signal);
+});
+
+test('untrusted redirects, hash mismatch and private failures fail without leaking or rclone fallback', async t => {
+  for (const bad of ['https://evil.test/', 'https://script.googleusercontent.com.evil/',
+    'http://script.googleusercontent.com/', 'https://user@script.googleusercontent.com/',
+    'https://script.googleusercontent.com:444/', '/relative', 'hash', 'error']) {
+    let calls = 0;
+    const h = harness(t, { fetcher: async (url) => {
+      if (url.startsWith('http:')) return response();
+      calls++;
+      if (bad === 'error') throw new Error(script.url + '?t=' + script.token);
+      if (bad === 'hash') return Response.json({ ok: true, sha256: 'wrong' });
+      return new Response(null, { status: 302, headers: { location: bad } });
+    } });
+    h.backups.config = { ...config, respaldo_script: script };
+    assert.equal(await h.backups.request(), false);
+    assert.equal(calls, 1); assert.equal(h.calls.length, 0);
+    assert.equal(fs.existsSync(h.backups.state), false);
+    assert.deepEqual(h.logs, ['Respaldo fallido: subida por script']);
+  }
+});
+
+test('one retry after ten minutes, no third attempt; manual success cancels retry', async t => {
+  let fail = true;
+  const h = harness(t, { run: async () => { if (fail) throw new Error('offline'); } });
+  assert.equal(await h.backups.request(), false);
+  h.clock.date = new Date(2026, 9, 19, 3, 9); await h.backups.tick(); assert.equal(h.logs.length, 1);
+  h.clock.date = new Date(2026, 9, 19, 3, 10); await h.backups.tick(); assert.equal(h.logs.length, 3);
+  assert.equal(h.logs.at(-1), 'Respaldo: no se pudo subir');
+  h.clock.date = new Date(2026, 9, 19, 3, 20); await h.backups.tick(); assert.equal(h.logs.length, 3);
+  await h.backups.request(); assert.ok(h.backups.retryAt);
+  fail = false; assert.equal(await h.backups.request(), true); assert.equal(h.backups.retryAt, 0);
+});
+
+test('invalid script config retains rclone; stop cancels pending retry', async t => {
+  const h = harness(t);
+  h.backups.config = { ...config, respaldo_script: { ...script, token: 'invalid' } };
+  assert.equal(await h.backups.request(), true); assert.equal(h.calls.length, 2);
+  h.backups.run = async () => { throw new Error('offline'); };
+  await h.backups.request(); assert.ok(h.backups.retryAt);
+  h.backups.stop(); assert.equal(h.backups.retryAt, 0);
+});
+
+test('script size limit and total timeout cover redirected response body', async t => {
+  const h = harness(t), file = path.join(h.root, 'asistente-2026-10-19.db');
+  fs.writeFileSync(file, body);
+  let calls = 0;
+  const fetcher = async (_, request) => {
+    if (++calls === 1) return new Response(null, { status: 302, headers: { location: 'https://script.googleusercontent.com/result' } });
+    return { status: 200, body: { async *[Symbol.asyncIterator]() {
+      await new Promise((_, reject) => request.signal.addEventListener('abort', () => reject(new Error('timeout')), { once: true }));
+    } } };
+  };
+  await assert.rejects(uploadScript(script, file, fetcher, 20));
+  fs.truncateSync(file, 20 * 1024 * 1024 + 1);
+  await assert.rejects(uploadScript(script, file, async () => { assert.fail('must not upload'); }));
 });

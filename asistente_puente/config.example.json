@@ -1,6 +1,10 @@
 {
   "puerto": 8765,
   "respaldo_hora": "03:00",
+  "respaldo_script": {
+    "url": "https://script.google.com/macros/s/ID_DEL_SCRIPT/exec",
+    "token": "REEMPLAZAR_POR_TOKEN_DEL_SCRIPT"
+  },
   "token": "PEGAR_TOKEN_COPIADO_DESDE_AJUSTES",
   "remitente": "NUMERO_PERSONAL_CON_PAIS_SIN_MAS@s.whatsapp.net"
 }

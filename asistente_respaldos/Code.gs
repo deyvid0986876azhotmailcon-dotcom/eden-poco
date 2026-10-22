@@ -20,9 +20,10 @@ function doPost(e) {
     if (hash !== pedido.sha256) return json_({ error: 'la copia llegó dañada' });
     const carpeta = carpeta_();
     // la copia del mismo día reemplaza a la anterior (por ejemplo un respaldo manual)
-    const previas = carpeta.getFilesByName(pedido.nombre);
-    while (previas.hasNext()) previas.next().setTrashed(true);
-    carpeta.createFile(Utilities.newBlob(bytes, 'application/vnd.sqlite3', pedido.nombre));
+    archivos_(carpeta).filter(function (f) { return f.name === pedido.nombre; })
+        .forEach(function (f) { Drive.Files.update({ trashed: true }, f.id); });
+    Drive.Files.create({ name: pedido.nombre, parents: [carpeta], mimeType: 'application/vnd.sqlite3' },
+        Utilities.newBlob(bytes, 'application/vnd.sqlite3', pedido.nombre));
     limpiar_(carpeta, new Date());
     return json_({ ok: true, bytes: bytes.length, sha256: hash });
   } catch (err) {
@@ -32,22 +33,33 @@ function doPost(e) {
 
 /** Ejecutalo una vez desde el editor: pide el permiso y muestra cuántas copias hay. */
 function probar() {
-  const carpeta = carpeta_();
-  var n = 0; const it = carpeta.getFiles();
-  while (it.hasNext()) { it.next(); n++; }
-  Logger.log('Carpeta «' + CARPETA + '» lista; copias guardadas: ' + n);
+  Logger.log('Carpeta «' + CARPETA + '» lista; copias guardadas: ' + archivos_(carpeta_()).length);
 }
 
+/**
+ * DriveApp needs full Drive access even to create a folder; the advanced Drive service (API v3) works with
+ * drive.file. The script cannot browse the Drive root, so it creates its folder once and keeps the id.
+ */
 function carpeta_() {
-  const encontradas = DriveApp.getRootFolder().getFoldersByName(CARPETA);
-  return encontradas.hasNext() ? encontradas.next() : DriveApp.getRootFolder().createFolder(CARPETA);
+  const props = PropertiesService.getScriptProperties();
+  const id = props.getProperty('carpeta');
+  if (id) {
+    try { if (!Drive.Files.get(id, { fields: 'id,trashed' }).trashed) return id; } catch (e) { /* borrada: se crea otra */ }
+  }
+  const nueva = Drive.Files.create({ name: CARPETA, mimeType: 'application/vnd.google-apps.folder' }).id;
+  props.setProperty('carpeta', nueva);
+  return nueva;
+}
+
+/** Only files this script created are visible with drive.file; one page is plenty for 30 daily copies. */
+function archivos_(carpeta) {
+  return Drive.Files.list({ q: "'" + carpeta + "' in parents and trashed = false", fields: 'files(id,name)', pageSize: 200 }).files || [];
 }
 
 function limpiar_(carpeta, hoy) {
-  const nombres = [], archivos = {};
-  const it = carpeta.getFiles();
-  while (it.hasNext()) { const f = it.next(); nombres.push(f.getName()); archivos[f.getName()] = f; }
-  viejos(nombres, hoy).forEach(function (n) { archivos[n].setTrashed(true); });
+  const lista = archivos_(carpeta), porNombre = {};
+  lista.forEach(function (f) { porNombre[f.name] = f.id; });
+  viejos(lista.map(function (f) { return f.name; }), hoy).forEach(function (n) { Drive.Files.update({ trashed: true }, porNombre[n]); });
 }
 
 function json_(valor) {
