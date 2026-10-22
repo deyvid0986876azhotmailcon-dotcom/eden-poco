@@ -26,12 +26,17 @@ function leer_(dias) {
   const lista = Gmail.Users.Messages.list('me', { q: 'from:' + REMITENTE + ' newer_than:' + dias + 'd', maxResults: 100 });
   const salida = [];
   (lista.messages || []).forEach(function (ref) {
-    const msg = Gmail.Users.Messages.get('me', ref.id, { format: 'full' });
-    const cabeceras = (msg.payload && msg.payload.headers) || [];
-    const de = valorCabecera_(cabeceras, 'From').toLowerCase();
-    if (de.indexOf('<' + REMITENTE + '>') < 0 && de.trim() !== REMITENTE) return; // el filtro de búsqueda no alcanza
-    const movimiento = interpretar(valorCabecera_(cabeceras, 'Subject'), cuerpo_(msg.payload));
-    if (movimiento) { movimiento.id = ref.id; salida.push(movimiento); }
+    try {
+      const msg = Gmail.Users.Messages.get('me', ref.id, { format: 'full' });
+      const cabeceras = (msg.payload && msg.payload.headers) || [];
+      const de = valorCabecera_(cabeceras, 'From').toLowerCase();
+      if (de.indexOf('<' + REMITENTE + '>') < 0 && de.trim() !== REMITENTE) return; // el filtro de búsqueda no alcanza
+      const movimiento = interpretar(valorCabecera_(cabeceras, 'Subject'), cuerpo_(msg.payload));
+      if (movimiento) { movimiento.id = ref.id; salida.push(movimiento); }
+    } catch (e) {
+      // un correo raro no frena a los demás; se marca para que el asistente pregunte
+      salida.push({ id: ref.id, tipo: 'desconocido', asunto: 'Correo del banco que no pude leer' });
+    }
   });
   return salida;
 }
@@ -51,7 +56,15 @@ function cuerpo_(parte) {
   if (!parte.body || !parte.body.data) return '';
   var tipo = valorCabecera_(parte.headers || [], 'Content-Type');
   var juego = (tipo.match(/charset="?([\w-]+)/i) || [])[1] || 'UTF-8';
-  return Utilities.newBlob(Utilities.base64DecodeWebSafe(parte.body.data)).getDataAsString(juego);
+  // El servicio avanzado de Gmail a veces entrega los bytes ya decodificados y a veces base64url sin relleno.
+  var datos = parte.body.data, bytes;
+  if (Array.isArray(datos)) bytes = datos;
+  else {
+    var s = String(datos).replace(/-/g, '+').replace(/_/g, '/').replace(/=+$/, '');
+    while (s.length % 4) s += '=';
+    bytes = Utilities.base64Decode(s);
+  }
+  return Utilities.newBlob(bytes).getDataAsString(juego);
 }
 
 function json_(valor) {
