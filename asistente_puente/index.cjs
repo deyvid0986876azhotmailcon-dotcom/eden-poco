@@ -5,6 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { ProRunner, createProServer } = require('./pro.cjs');
 const { OwnerChat, PendingPoller } = require('./pendientes.cjs');
+const { Guardian } = require('./guardian.cjs');
 const { isStop } = require('./lib.cjs');
 const { downloadAudio, sendReply, LISTEN_FAILED } = require('./audio.cjs');
 const { Backups, signalBackup } = require('./respaldo.cjs');
@@ -17,7 +18,7 @@ const qrFile = path.join(os.homedir(), 'storage', 'downloads', 'asistente_qr.png
 let lockOwned = false, exiting = false, connection = null, reconnect = null, attempts = 0;
 let config, ledger, makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, logger, QRCode;
 let downloading = 0;
-let backups, ownerChat, pending, pro, proServer;
+let backups, ownerChat, pending, guardian, pro, proServer;
 const queue = new DeliveryQueue(async (message, current) => {
   let response;
   if (message.media) {
@@ -133,14 +134,14 @@ async function connect() {
 }
 function shutdown(code = 0) {
   if (exiting) return;
-  exiting = true; queue.cancel(); pending?.stop(); clearTimeout(reconnect);
+  exiting = true; queue.cancel(); pending?.stop(); guardian?.stop(); clearTimeout(reconnect);
   if (connection) {
     connection.active = false; clearTimeout(connection.stable);
     try { connection.socket?.end(new Error('Cierre local')); } catch { }
   }
   if (lockOwned) clearQr();
   // Wait for auth writes before releasing ownership; SIGKILL leaves a lock for manual inspection.
-  Promise.allSettled([connection?.writes, backups?.stop(), pending?.running, proServer?.close()]).finally(() => {
+  Promise.allSettled([connection?.writes, backups?.stop(), pending?.running, guardian?.running, proServer?.close()]).finally(() => {
     if (lockOwned) {
       try { fs.unlinkSync(path.join(root, 'running.lock')); } catch { }
     }
@@ -171,6 +172,8 @@ async function main() {
   ownerChat = new OwnerChat(root, config.remitente);
   pending = new PendingPoller(root, config, ownerChat, () => connection, log);
   pending.start();
+  guardian = new Guardian(config, ownerChat, () => connection, log);
+  guardian.start();
   process.on('SIGUSR1', () => { void backups.request(); });
   process.on('SIGINT', () => shutdown()); process.on('SIGTERM', () => shutdown());
   backups.start();

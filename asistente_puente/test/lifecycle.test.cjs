@@ -17,7 +17,7 @@ async function harness(prelocked = false, manual = false) {
   fs.mkdirSync(root); fs.mkdirSync(path.dirname(png), { recursive: true });
   fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify(config));
   if (prelocked) { fs.writeFileSync(path.join(root, 'running.lock'), 'other'); fs.writeFileSync(png, 'other QR'); }
-  const sockets = [], logs = [], posts = [], timers = new Set(), exits = [], backupCalls = [], proCalls = [];
+  const sockets = [], logs = [], posts = [], timers = new Set(), exits = [], backupCalls = [], proCalls = [], guardianCalls = [];
   const fakeProcess = new EventEmitter();
   fakeProcess.argv = ['node', 'index.cjs', ...(manual ? ['--respaldo-ahora'] : [])];
   fakeProcess.umask = () => {}; fakeProcess.pid = 123; fakeProcess.exit = code => exits.push(code);
@@ -31,6 +31,13 @@ async function harness(prelocked = false, manual = false) {
     setTimeout: (fn, delay) => { const timer = { fn, delay }; timers.add(timer); return timer; },
     clearTimeout: timer => timers.delete(timer),
     require: name => {
+      if (name === './guardian.cjs') {
+        const { Guardian } = require('../guardian.cjs');
+        return { Guardian: class extends Guardian {
+          start() { guardianCalls.push('start'); }
+          stop() { guardianCalls.push('stop'); return super.stop(); }
+        } };
+      }
       if (name === './pro.cjs') return {
         ProRunner: class { cancel() { proCalls.push('cancel'); } },
         createProServer: configured => {
@@ -68,7 +75,7 @@ async function harness(prelocked = false, manual = false) {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'index.cjs'), 'utf8')
     + '\nglobalThis.hooks = { shutdown, session: () => connection, queue: () => queue.tail };', sandbox);
   await tick();
-  return { home, root, auth, png, config, sockets, logs, posts, timers, exits, backupCalls, proCalls, fakeProcess, hooks: sandbox.hooks,
+  return { home, root, auth, png, config, sockets, logs, posts, timers, exits, backupCalls, proCalls, guardianCalls, fakeProcess, hooks: sandbox.hooks,
     async close() {
       sandbox.hooks.shutdown(); await tick();
       assert.equal(path.dirname(path.resolve(home)), path.resolve(__dirname)); fs.rmSync(home, { recursive: true });
@@ -180,6 +187,7 @@ test('Pro starts and stops with bridge; authenticated PARAR cancels CLI immediat
   const h = await harness();
   try {
     assert.deepEqual(h.proCalls, ['start']);
+    assert.deepEqual(h.guardianCalls, ['start']);
     const socket = h.sockets[0];
     socket.ev.emit('connection.update', { connection: 'open' }); await h.hooks.session().events;
     socket.ev.emit('messages.upsert', { type: 'notify', messages: [{
@@ -189,5 +197,6 @@ test('Pro starts and stops with bridge; authenticated PARAR cancels CLI immediat
     assert.deepEqual(h.proCalls, ['start', 'cancel']);
     await h.hooks.queue(); h.hooks.shutdown(); await tick();
     assert.deepEqual(h.proCalls, ['start', 'cancel', 'close']);
+    assert.deepEqual(h.guardianCalls, ['start', 'stop']);
   } finally { await h.close(); }
 });
