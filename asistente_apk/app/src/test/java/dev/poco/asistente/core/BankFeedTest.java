@@ -24,7 +24,7 @@ public class BankFeedTest {
         long now = clock.millis();
         feed.run(now, core.cancellationToken(), () -> false);
         assertEquals(2, store.rows().size());
-        JSONObject expense = store.rows().stream().filter(r -> r.data.getString("tipo").equals("gasto")).findFirst().get().data;
+        JSONObject expense = store.rows().stream().filter(r -> "gasto".equals(r.data.optString("tipo"))).findFirst().get().data;
         assertEquals(8550000L, expense.getLong("centavos"));
         assertEquals("compras", expense.getString("categoria"));
         assertEquals("2026-10-20", expense.getString("fecha"));
