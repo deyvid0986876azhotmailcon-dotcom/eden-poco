@@ -50,12 +50,13 @@ class OutgoingLedger {
     this.states.set(id, state);
   }
 }
-async function request(config, endpoint, body, fetcher = fetch) {
+async function request(config, endpoint, body, fetcher = fetch, whatsapp) {
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 90000);
   try {
     const response = await fetcher(`http://127.0.0.1:${config.puerto}${endpoint}`, {
       method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal: controller.signal,
-      headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json',
+        ...(endpoint === '/pendientes' && whatsapp ? { 'X-WhatsApp': whatsapp } : {}) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) })
     });
     if (!response.ok) throw new Error('HTTP fallido');
@@ -70,16 +71,17 @@ async function request(config, endpoint, body, fetcher = fetch) {
   } finally { clearTimeout(timer); }
 }
 class PendingPoller {
-  constructor(root, config, chat, session, log, fetcher = fetch) {
+  constructor(root, config, chat, session, log, fetcher = fetch, whatsapp = () => session()?.opened ? 'conectado' : 'desconectado') {
+    this.whatsapp = whatsapp; this.stopped = false;
     this.config = config; this.chat = chat; this.session = session; this.log = log; this.fetcher = fetcher;
     this.ledger = new OutgoingLedger(root, config.remitente); this.busy = false; this.epoch = 0; this.paused = false;
   }
   pause() { this.epoch++; this.paused = true; }
   resume() { this.paused = false; }
   start() { if (!this.timer) this.timer = setInterval(() => { void this.poll(); }, 60000); }
-  stop() { this.pause(); clearInterval(this.timer); this.timer = null; return this.running; }
+  stop() { this.stopped = true; this.pause(); clearInterval(this.timer); this.timer = null; return this.running; }
   poll() {
-    if (this.busy || this.paused) return Promise.resolve();
+    if (this.busy || this.stopped) return Promise.resolve();
     this.busy = true;
     this.running = this.run().catch(() => this.log('Salientes: fallo de sondeo o entrega; sin texto registrado'))
       .finally(() => { this.busy = false; });
@@ -88,8 +90,10 @@ class PendingPoller {
   async run() {
     const session = this.session(), epoch = this.epoch;
     const current = () => !this.paused && epoch === this.epoch && this.session() === session && session?.opened;
+    const status = this.whatsapp();
+    if (!['conectado', 'desconectado', 'desvinculado'].includes(status)) throw new Error('Estado inválido');
+    const items = await request(this.config, '/pendientes', undefined, this.fetcher, status);
     if (!current()) return;
-    const items = await request(this.config, '/pendientes', undefined, this.fetcher);
     if (!Array.isArray(items) || items.length > 20 || items.some(item => !item || Object.keys(item).sort().join(',') !== 'id,texto'
         || typeof item.id !== 'string' || !ID.test(item.id) || typeof item.texto !== 'string' || !item.texto.trim() || item.texto.length > 60000)
         || new Set(items.map(item => item.id)).size !== items.length) throw new Error('Salientes inválidos');

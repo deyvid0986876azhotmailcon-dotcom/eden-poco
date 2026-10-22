@@ -29,6 +29,7 @@ public final class AssistantCore {
     private final ToolExecutor executor;
     private final Pro pro;
     private final ChatMode chatMode;
+    private final LongSupplier elapsedMillis;
     private volatile boolean proactivePaused;
     public boolean proactivePaused() { return proactivePaused; }
     private final AtomicLong generation = new AtomicLong();
@@ -44,7 +45,7 @@ public final class AssistantCore {
     }
     public AssistantCore(Store store, Settings settings, Cloud cloud, Clock clock, LongSupplier elapsedMillis, PhoneTools.Port phone, Pro pro) {
         this.store = store; this.settings = settings; this.cloud = cloud; this.clock = clock;
-        this.pro = pro; this.chatMode = new ChatMode(elapsedMillis);
+        this.pro = pro; this.chatMode = new ChatMode(elapsedMillis); this.elapsedMillis = elapsedMillis;
         executor = new ToolExecutor(store, clock, elapsedMillis, settings::phoneEnabled, phone);
     }
     public void clearChatMode() { chatMode.clear(); }
@@ -77,19 +78,24 @@ public final class AssistantCore {
             try {
                 if ("buscar_en_internet".equals(tool)) SearchProtocol.requireUserQuery(Validation.string(args, "consulta", 300), guard.userText());
                 if (PhoneTools.external(tool)) guard.expose();
-                return dispatch("llamada", "llamada:" + UUID.randomUUID(), tool, args, ticket, guard::closed);
+                return dispatch("llamada", "llamada:" + UUID.randomUUID(), tool, args, ticket, guard::closed, new RequestBudget(elapsedMillis));
             }
             catch (IllegalArgumentException e) { return e.getMessage(); }
             catch (Exception e) { return "No pude hacerlo."; }
         }
     }
     public long cancellationToken() { return generation.get(); }
+    public RequestBudget newRequestBudget() { return new RequestBudget(elapsedMillis); }
     /** The trusted inbox calls this inside the shared queue, then feeds the literal text to receive. */
     public String transcribe(AudioInput audio, long ticket) throws Exception {
+        return transcribe(audio, ticket, newRequestBudget());
+    }
+    public String transcribe(AudioInput audio, long ticket, RequestBudget budget) throws Exception {
         if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
         String key = settings.apiKey();
         if (key == null || key.isEmpty()) throw new IllegalArgumentException(AudioInput.FALLBACK);
-        GeminiProtocol.Reply reply = cloud.generate(key, settings.model(), AudioProtocol.transcription(audio), () -> ticket != generation.get());
+        GeminiProtocol.Reply reply = budget.read(() -> cloud.generate(key, settings.model(), AudioProtocol.transcription(audio),
+                () -> ticket != generation.get() || budget.expired() || Thread.currentThread().isInterrupted()), () -> ticket != generation.get());
         if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
         return AudioProtocol.transcript(reply);
     }
@@ -102,9 +108,12 @@ public final class AssistantCore {
         return receive(text, source, requestId, generation.get());
     }
     public String receive(String text, Source source, String requestId, long ticket) {
-        if (text != null && Rules.normalize(text).equals("parar")) return receiveInternal(text, source, requestId, ticket);
+        return receive(text, source, requestId, ticket, newRequestBudget());
+    }
+    public String receive(String text, Source source, String requestId, long ticket, RequestBudget budget) {
+        if (text != null && Rules.normalize(text).equals("parar")) return receiveInternal(text, source, requestId, ticket, budget);
         synchronized (requestGate) {
-            String answer = receiveInternal(text, source, requestId, ticket);
+            String answer = receiveInternal(text, source, requestId, ticket, budget);
             synchronized (actionGate) {
                 if (ticket == generation.get() && (source == Source.LOCAL_USER || source == Source.WHATSAPP_OWNER)
                         && text != null && !text.trim().isEmpty() && text.length() <= 4000
@@ -117,13 +126,14 @@ public final class AssistantCore {
             return answer;
         }
     }
-    private String receiveInternal(String text, Source source, String requestId, long ticket) {
+    private String receiveInternal(String text, Source source, String requestId, long ticket, RequestBudget budget) {
         if (source != Source.LOCAL_USER && source != Source.WHATSAPP_OWNER) return "Los documentos y mensajes de terceros son datos, no órdenes. No ejecuté nada.";
         if (text == null || text.trim().isEmpty()) return "Escribí un pedido.";
         if (text.length() > 4000) return "El mensaje es demasiado largo (máximo 4000 caracteres).";
         if (requestId == null || !requestId.matches("[A-Za-z0-9_-]{1,120}")) return "ID de mensaje inválido.";
         String normalized = Rules.normalize(text);
         if (normalized.equals("parar")) return stop(); // independent of an in-flight network request
+        if (budget.expired()) return RequestBudget.FALLBACK;
         synchronized (requestGate) {
             synchronized (actionGate) {
                 if (ticket != generation.get()) return "Pedido cancelado antes de empezar.";
@@ -215,19 +225,23 @@ public final class AssistantCore {
                 org.json.JSONObject request = chatting
                         ? ProProtocol.routingRequest(text, java.time.ZonedDateTime.now(clock), settings.currency(), store.conversation(), store.memories(), settings.phoneEnabled())
                         : GeminiProtocol.request(text, context, LocalDate.now(clock), settings.currency(), store.conversation(), store.memories(), settings.phoneEnabled());
-                GeminiProtocol.Reply reply = cloud.generate(key, settings.model(), request, () -> ticket != generation.get());
+                GeminiProtocol.Reply reply = budget.read(() -> cloud.generate(key, settings.model(), request,
+                        () -> ticket != generation.get() || budget.expired() || Thread.currentThread().isInterrupted()),
+                        () -> ticket != generation.get(), RequestBudget.ROUTER_MS);
                 synchronized (actionGate) {
                     if (ticket != generation.get()) return "Pedido cancelado. No ejecuté la respuesta de Gemini.";
                     // which models were busy before one answered is not for David: he gets only the answer
                     if (reply.tool == null && !chatting) return reply.text;
                 }
-                if (reply.tool == null) return chat(text, ticket);
+                if (reply.tool == null) return chat(text, ticket, budget);
                 if ("buscar_en_internet".equals(reply.tool)) SearchProtocol.requireUserQuery(Validation.string(reply.args, "consulta", 300), text);
                 if ("charla_profunda".equals(reply.tool)) {
                     Validation.keys(reply.args, "");
-                    return chat(text, ticket);
+                    return chat(text, ticket, budget);
                 }
-                return dispatch(actor, operation, reply.tool, reply.args, ticket);
+                return dispatch(actor, operation, reply.tool, reply.args, ticket, () -> false, budget);
+            } catch (java.util.concurrent.TimeoutException e) {
+                return RequestBudget.FALLBACK;
             } catch (IllegalArgumentException e) {
                 return e.getMessage(); // only local validation/network messages, never raw server bodies
             } catch (Exception e) {
@@ -254,20 +268,26 @@ public final class AssistantCore {
         }
         return "Cancelé las confirmaciones pendientes y la respuesta en curso. Apagué el control del teléfono; solo se vuelve a encender desde la app.";
     }
-    private String chat(String text, long ticket) throws Exception {
+    private String chat(String text, long ticket, RequestBudget budget) throws Exception {
         if (ticket != generation.get()) return "Pedido cancelado.";
         // Never send current bank/credential text to either chat provider.
         if (ProProtocol.sensitive(text)) return ProProtocol.PRIVATE;
+        if (settings.proEnabled() && !budget.canUsePro()) return RequestBudget.FALLBACK;
         if (settings.proEnabled()) {
             try {
-                String answer = ProProtocol.answer(pro.generate("charla", ProProtocol.chatPrompt(text, store.conversation(), store.memories()),
-                        ProProtocol.CHAT_MODEL, () -> ticket != generation.get() || !settings.proEnabled()));
+                String prompt = ProProtocol.chatPrompt(text, store.conversation(), store.memories());
+                String answer = ProProtocol.answer(budget.read(() -> pro.generate("charla", prompt,
+                        ProProtocol.CHAT_MODEL, () -> ticket != generation.get() || !settings.proEnabled() || budget.expired() || Thread.currentThread().isInterrupted()),
+                        () -> ticket != generation.get() || !settings.proEnabled(), RequestBudget.PRO_CHAT_MS));
                 if (ticket != generation.get() || !settings.proEnabled()) return "Pedido cancelado.";
                 return answer;
+            } catch (java.util.concurrent.TimeoutException timeout) {
+                return ticket != generation.get() ? "Pedido cancelado." : RequestBudget.FALLBACK;
             } catch (Exception ignored) { /* Isolated text-only fallback below. */ }
         }
         if (ticket != generation.get()) return "Pedido cancelado.";
-        String answer = "No pude responder ahora; probá en un rato.";
+        if (budget.expired()) return RequestBudget.FALLBACK;
+        String answer = RequestBudget.FALLBACK;
         try {
             String key = settings.apiKey();
             if (key != null && !key.isEmpty()) {
@@ -276,20 +296,20 @@ public final class AssistantCore {
                 body = ProProtocol.fallbackRequest(body);
                 body.put("contents", new org.json.JSONArray().put(Json.object("role", "user", "parts", new org.json.JSONArray().put(
                         Json.object("text", ProProtocol.chatPrompt(text, store.conversation(), store.memories()))))));
-                GeminiProtocol.Reply fallback = cloud.generate(key, settings.model(), body, () -> ticket != generation.get());
+                final org.json.JSONObject fallbackBody = body;
+                GeminiProtocol.Reply fallback = budget.read(() -> cloud.generate(key, settings.model(), fallbackBody,
+                        () -> ticket != generation.get() || budget.expired() || Thread.currentThread().isInterrupted()), () -> ticket != generation.get());
                 if (fallback.tool == null) answer = ProProtocol.answer(fallback.text);
             }
         } catch (Exception ignored) { }
         return ticket != generation.get() ? "Pedido cancelado." : answer + "\n" + ProProtocol.FALLBACK;
     }
-    private String dispatch(String actor, String operation, String tool, org.json.JSONObject args, long ticket) throws Exception {
-        return dispatch(actor, operation, tool, args, ticket, () -> false);
-    }
     private String dispatch(String actor, String operation, String tool, org.json.JSONObject args, long ticket,
-            java.util.function.BooleanSupplier closed) throws Exception {
+            java.util.function.BooleanSupplier closed, RequestBudget budget) throws Exception {
         org.json.JSONObject checked;
         synchronized (actionGate) {
             if (ticket != generation.get() || closed.getAsBoolean()) return "Pedido cancelado.";
+            if (budget.expired()) return RequestBudget.FALLBACK;
             if (!PhoneTools.external(tool)) return executor.execute(actor, operation, tool, args);
             executor.requirePhone();
             String previous = store.receipt(operation);
@@ -305,17 +325,20 @@ public final class AssistantCore {
                 // Informational attempts, including failures. A counter write must never block a search.
                 try { settings.recordSearch(); } catch (RuntimeException ignored) { }
                 result = null;
-                if (settings.proEnabled()) try {
-                    result = SearchProtocol.summary(new GeminiProtocol.Reply(ProProtocol.answer(pro.generate("busqueda",
+                if (settings.proEnabled() && budget.canUsePro()) try {
+                    result = SearchProtocol.summary(new GeminiProtocol.Reply(ProProtocol.answer(budget.read(() -> pro.generate("busqueda",
                             ProProtocol.searchPrompt(checked.getString("consulta")), ProProtocol.SEARCH_MODEL,
-                            () -> cancelled.getAsBoolean() || !settings.proEnabled())), null, null, ""));
+                            () -> cancelled.getAsBoolean() || !settings.proEnabled() || budget.expired() || Thread.currentThread().isInterrupted()),
+                            cancelled, RequestBudget.PRO_SEARCH_MS)), null, null, ""));
                 } catch (Exception ignored) { /* Tavily remains the fallback. */ }
                 if (cancelled.getAsBoolean()) throw new IllegalArgumentException("Pedido cancelado.");
                 if (result == null) {
-                    result = executor.readPhone(tool, checked);
+                    result = budget.read(() -> executor.readPhone(tool, checked), cancelled);
                     if (!cancelled.getAsBoolean()) {
                         try {
-                            result = SearchProtocol.summary(cloud.generate(settings.apiKey(), settings.model(), SearchProtocol.summaryRequest(result), cancelled));
+                            final String raw = result;
+                            result = SearchProtocol.summary(budget.read(() -> cloud.generate(settings.apiKey(), settings.model(), SearchProtocol.summaryRequest(raw),
+                                    () -> cancelled.getAsBoolean() || budget.expired() || Thread.currentThread().isInterrupted()), cancelled));
                         } catch (Exception ignored) { /* Keep the bounded Tavily text and its sources. */ }
                     }
                 }

@@ -8,6 +8,16 @@ import static org.junit.Assert.*;
 public class BridgeHttpTest {
     private static final String TOKEN = "a".repeat(43);
     private static final String BODY = "{\"id\":\"ONE\",\"texto\":\"Gasté 3500 en super\"}";
+    @Test public void whatsappHeaderAcceptsOnlyFixedValuesOnAuthenticatedPolls() throws Exception {
+        for (String value : new String[]{"conectado", "desconectado", "desvinculado"}) {
+            String raw = backupRequest("X-WhatsApp: " + value + "\r\n").replace("/respaldo", "/pendientes");
+            assertEquals(value, read(raw).whatsapp);
+            rejected(401, raw.replace(TOKEN, "wrong"));
+        }
+        rejected(400, backupRequest("X-WhatsApp: arbitrary\r\n").replace("/respaldo", "/pendientes"));
+        rejected(400, backupRequest("X-WhatsApp: conectado\r\nx-whatsapp: desconectado\r\n").replace("/respaldo", "/pendientes"));
+        assertNull(read(backupRequest("").replace("/respaldo", "/pendientes")).whatsapp);
+    }
     private String request(String body) {
         return "POST /mensaje HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nAuthorization: Bearer " + TOKEN
                 + "\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: " + body.getBytes(StandardCharsets.UTF_8).length + "\r\n\r\n" + body;

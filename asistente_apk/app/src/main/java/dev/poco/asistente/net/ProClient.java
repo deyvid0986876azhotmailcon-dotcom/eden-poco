@@ -25,9 +25,10 @@ public final class ProClient implements Pro {
     @Override public String generate(String type, String prompt, String model, BooleanSupplier cancelled) throws Exception {
         if (!"charla".equals(type) && !"busqueda".equals(type)) throw new IllegalArgumentException("Pedido Pro inválido.");
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos("charla".equals(type) ? 70 : 45);
+        Thread caller = Thread.currentThread();
         try (Socket socket = new Socket(Proxy.NO_PROXY)) {
             ScheduledFuture<?> watch = DEADLINES.scheduleAtFixedRate(() -> {
-                if (cancelled.getAsBoolean() || System.nanoTime() >= deadline) close(socket);
+                if (caller.isInterrupted() || cancelled.getAsBoolean() || System.nanoTime() >= deadline) close(socket);
             }, 0, 100, TimeUnit.MILLISECONDS);
             try {
                 if (cancelled.getAsBoolean()) throw new IOException();

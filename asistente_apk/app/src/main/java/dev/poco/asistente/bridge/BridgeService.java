@@ -33,6 +33,11 @@ import java.util.concurrent.TimeoutException;
 public final class BridgeService extends Service {
     public static final String STOP = "dev.poco.asistente.bridge.STOP";
     private static final String CHANNEL = "whatsapp_bridge";
+    private static final String HEALTH_CHANNEL = "whatsapp_health";
+    private static final int HEALTH_ID = 411;
+    private static final long HEALTH_CHECK_SECONDS = 60;
+    private BridgeHealth health;
+    private String healthNotice;
     private AssistantApplication app;
     private volatile boolean closed;
     private volatile ServerSocket server;
@@ -59,8 +64,32 @@ public final class BridgeService extends Service {
         if (Build.VERSION.SDK_INT >= 34) startForeground(410, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         else startForeground(410, notification);
         if (!app.settings.bridgeEnabled()) { stopSelf(); return START_NOT_STICKY; }
-        if (!started) { started = true; listener.execute(this::serve); }
+        if (!started) {
+            health = new BridgeHealth(System.currentTimeMillis());
+            manager.createNotificationChannel(new NotificationChannel(HEALTH_CHANNEL, "Problemas de WhatsApp", NotificationManager.IMPORTANCE_HIGH));
+            manager.cancel(HEALTH_ID);
+            started = true; listener.execute(this::serve);
+            deadlines.scheduleWithFixedDelay(this::checkHealth, HEALTH_CHECK_SECONDS, HEALTH_CHECK_SECONDS, TimeUnit.SECONDS);
+        }
         return START_STICKY;
+    }
+    private synchronized void checkHealth() {
+        if (closed || health == null) return;
+        String notice = health.notice(System.currentTimeMillis());
+        if (java.util.Objects.equals(notice, healthNotice)) return;
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        try {
+            if (notice == null) manager.cancel(HEALTH_ID);
+            else {
+                PendingIntent open = PendingIntent.getActivity(this, HEALTH_ID, new Intent(this, MainActivity.class),
+                        PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                manager.notify(HEALTH_ID, new Notification.Builder(this, HEALTH_CHANNEL)
+                        .setSmallIcon(android.R.drawable.stat_notify_error).setContentTitle("Asistente: WhatsApp")
+                        .setContentText(notice).setStyle(new Notification.BigTextStyle().bigText(notice))
+                        .setContentIntent(open).setOnlyAlertOnce(true).build());
+            }
+            healthNotice = notice;
+        } catch (SecurityException ignored) { /* Notifications disabled by the owner. */ }
     }
     private void serve() {
         try (ServerSocket socket = new ServerSocket()) {
@@ -89,6 +118,7 @@ public final class BridgeService extends Service {
         }
     }
     private void handle(Socket socket, String token, long arrivalToken) {
+        dev.poco.asistente.core.RequestBudget budget = app.core.newRequestBudget();
         long startedAt = android.os.SystemClock.elapsedRealtime();
         ScheduledFuture<?> deadline = null;
         CompletableFuture<String> result = null;
@@ -104,6 +134,7 @@ public final class BridgeService extends Service {
                 incomingAudio = request.audio != null;
                 if (request.backup) { deliverBackup(client); return; }
                 if (request.pending || request.confirm) {
+                    if (request.pending) { health.poll(request.whatsapp, System.currentTimeMillis()); checkHealth(); }
                     if (!app.settings.bridgeEnabled() || arrivalToken != app.core.cancellationToken()) throw new BridgeHttp.Failure(503);
                     if (request.confirm) {
                         app.db.acknowledge(request.ids, System.currentTimeMillis());
@@ -127,8 +158,8 @@ public final class BridgeService extends Service {
                         client.getOutputStream().flush(); app.bridgeLog("Audio rechazado: formato o duración no verificables"); return;
                     }
                     if (android.os.SystemClock.elapsedRealtime() - startedAt >= 80000) throw new TimeoutException();
-                    result = app.bridge.acceptAudio(request.id, request.audio, arrivalToken);
-                } else result = app.bridge.accept(request.id, request.text, arrivalToken);
+                    result = app.bridge.acceptAudio(request.id, request.audio, arrivalToken, budget);
+                } else result = app.bridge.accept(request.id, request.text, arrivalToken, budget);
                 response = result.get(Math.max(1, 80000 - (android.os.SystemClock.elapsedRealtime() - startedAt)), TimeUnit.MILLISECONDS);
                 stopped = BridgeInbox.wasStopped(result);
                 audio = voice.generate(app, response, request.audio != null, arrivalToken,
@@ -207,6 +238,7 @@ public final class BridgeService extends Service {
         app.stop();
         for (Socket client : clients) close(client);
         listener.shutdownNow(); handlers.shutdownNow(); deadlines.shutdownNow(); voice.close();
+        getSystemService(NotificationManager.class).cancel(HEALTH_ID);
         app.bridgeLog("Aceptado: servicio detenido");
         stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy();
     }

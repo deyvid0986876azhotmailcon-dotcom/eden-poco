@@ -16,6 +16,10 @@ public final class BankFeed {
     /** The raw JSON body from the reader, or an exception. */
     public interface Source { String fetch() throws Exception; }
     public static final long INTERVAL = 30 * 60 * 1000L;
+    public static final int FAILURE_NOTICE_THRESHOLD = 6;
+    public static final String FAILURE_NOTICE = "No pude leer los correos del banco desde hace unas horas; los movimientos de ese rato los anoto cuando vuelva.";
+    private int failures;
+    private boolean failureNotified;
     private final Proactive.Port store;
     private final AssistantCore core;
     private final Source source;
@@ -53,8 +57,21 @@ public final class BankFeed {
         last = now;
         List<Item> items;
         try { items = parse(source.fetch()); }
-        catch (Exception e) { return; } // no internet or reader down: the next round retries
+        catch (Exception e) {
+            if (cancelled.getAsBoolean()) return;
+            failures = Math.min(FAILURE_NOTICE_THRESHOLD, failures + 1);
+            if (failures >= FAILURE_NOTICE_THRESHOLD && !failureNotified) {
+                core.proactiveAction(ticket, () -> {
+                    if (cancelled.getAsBoolean()) return null;
+                    store.enqueue("b_" + java.util.UUID.randomUUID(), FAILURE_NOTICE, "banco", false, now, null, 0, null);
+                    failureNotified = true;
+                    return null;
+                }, null);
+            }
+            return;
+        }
         if (cancelled.getAsBoolean()) return;
+        failures = 0; failureNotified = false;
         core.proactiveAction(ticket, () -> {
             store.bankTransaction(() -> {
                 List<String> lines = new ArrayList<>();

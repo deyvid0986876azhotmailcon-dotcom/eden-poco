@@ -17,6 +17,32 @@ public class BankFeedTest {
     private BankFeed feed(AtomicReference<String> body, AtomicInteger calls) {
         return new BankFeed(store, core, () -> { calls.incrementAndGet(); return body.get(); });
     }
+    @Test public void sixFailuresWarnOnceRecoveryResetsAndInvalidTokenCounts() throws Exception {
+        AtomicReference<String> body = new AtomicReference<>("{\"error\":\"no autorizado\"}");
+        BankFeed feed = feed(body, new AtomicInteger());
+        long now = clock.millis();
+        for (int i = 0; i < 5; i++) feed.run(now + i * BankFeed.INTERVAL, core.cancellationToken(), () -> false);
+        assertTrue(store.out.isEmpty());
+        for (int i = 5; i < 10; i++) feed.run(now + i * BankFeed.INTERVAL, core.cancellationToken(), () -> false);
+        assertEquals(1, store.out.size());
+        assertEquals(BankFeed.FAILURE_NOTICE, store.out.values().iterator().next().getString("texto"));
+        body.set("{\"version\":1,\"movimientos\":[]}");
+        feed.run(now + 10 * BankFeed.INTERVAL, core.cancellationToken(), () -> false);
+        assertEquals(1, store.out.size());
+        body.set("invalid");
+        for (int i = 11; i < 17; i++) feed.run(now + i * BankFeed.INTERVAL, core.cancellationToken(), () -> false);
+        assertEquals(2, store.out.size());
+    }
+    @Test public void pararDuringSixthFailureDoesNotEnqueueHealthNotice() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        BankFeed feed = new BankFeed(store, core, () -> {
+            if (calls.incrementAndGet() == BankFeed.FAILURE_NOTICE_THRESHOLD) core.stop();
+            throw new java.io.IOException();
+        });
+        long ticket = core.cancellationToken();
+        for (int i = 0; i < 6; i++) feed.run(clock.millis() + i * BankFeed.INTERVAL, ticket, () -> ticket != core.cancellationToken());
+        assertEquals(6, calls.get()); assertTrue(store.out.isEmpty());
+    }
 
     @Test public void recordsEachMailOnceAndSendsOneMessagePerBatch() throws Exception {
         AtomicInteger calls = new AtomicInteger();

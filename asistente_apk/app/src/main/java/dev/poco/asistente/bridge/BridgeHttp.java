@@ -23,6 +23,7 @@ public final class BridgeHttp {
         public Failure(int status) { super("HTTP " + status); this.status = status; }
     }
     public static final class Request {
+        public String whatsapp;
         public dev.poco.asistente.core.AudioInput audio;
         public final boolean backup, pending, confirm;
         public final java.util.List<String> ids;
@@ -55,7 +56,12 @@ public final class BridgeHttp {
         if (token == null || token.isEmpty() || !constantEquals("Bearer " + token, authorization)) throw new Failure(401);
         if (readOnly) {
             if (headers.containsKey("content-length") && !headers.get("content-length").equals("0")) throw new Failure(400);
-            return new Request(first[1], null, null, java.util.Collections.emptyList());
+            Request request = new Request(first[1], null, null, java.util.Collections.emptyList());
+            if (request.pending) {
+                request.whatsapp = headers.get("x-whatsapp");
+                if (request.whatsapp != null && !BridgeHealth.valid(request.whatsapp)) throw new Failure(400);
+            }
+            return request;
         }
         String type = headers.getOrDefault("content-type", "");
         boolean audio = first[1].equals("/audio");

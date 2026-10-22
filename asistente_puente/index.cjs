@@ -18,6 +18,7 @@ const qrFile = path.join(os.homedir(), 'storage', 'downloads', 'asistente_qr.png
 let lockOwned = false, exiting = false, connection = null, reconnect = null, attempts = 0;
 let config, ledger, makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, logger, QRCode;
 let downloading = 0;
+let whatsappState = 'desconectado';
 let backups, ownerChat, pending, guardian, pro, proServer;
 const queue = new DeliveryQueue(async (message, current) => {
   let response;
@@ -96,11 +97,14 @@ async function connect() {
         }
       }
       if (update.connection === 'open') {
+        whatsappState = 'conectado';
         session.opened = true; session.connectedAt = Math.floor(Date.now() / 1000);
         session.stable = setTimeout(() => { attempts = 0; }, 60000);
         clearQr(); log('WhatsApp vinculado; se aceptan únicamente mensajes nuevos del remitente configurado');
       }
       if (update.connection === 'close') {
+        whatsappState = update.lastDisconnect?.error?.output?.statusCode === DisconnectReason.loggedOut ? 'desvinculado'
+          : whatsappState === 'desvinculado' ? 'desvinculado' : 'desconectado';
         session.active = false; session.opened = false;
         clearTimeout(session.stable); clearQr();
         await session.writes;
@@ -170,7 +174,7 @@ async function main() {
   ledger = new Ledger(path.join(root, 'seen.ids'));
   backups = new Backups(root, config, log);
   ownerChat = new OwnerChat(root, config.remitente);
-  pending = new PendingPoller(root, config, ownerChat, () => connection, log);
+  pending = new PendingPoller(root, config, ownerChat, () => connection, log, fetch, () => whatsappState);
   pending.start();
   guardian = new Guardian(config, ownerChat, () => connection, log);
   guardian.start();

@@ -25,6 +25,47 @@ public class ProCoreTest {
         return new AssistantCore(store, settings, cloud, clock, elapsed::get, phone, pro);
     }
     private GeminiProtocol.Reply text(String text) { return new GeminiProtocol.Reply(text, null, null, ""); }
+    @Test public void queuedChatWithTooLittleTimeSkipsProAndNetworkFallback() {
+        AtomicInteger routing = new AtomicInteger();
+        AssistantCore c = core((k,m,b) -> { routing.incrementAndGet(); elapsed.addAndGet(10_000); return text("chat"); },
+                (t,p,m,x) -> { throw new AssertionError("Pro must not start"); }, PhoneTools.UNAVAILABLE);
+        c.receive("charlemos"); RequestBudget budget = c.newRequestBudget(); elapsed.set(50_000);
+        assertEquals(RequestBudget.FALLBACK, c.receive("Hola", AssistantCore.Source.WHATSAPP_OWNER, "budget_chat", c.cancellationToken(), budget));
+        assertEquals(1, routing.get());
+    }
+    @Test public void lateProChatUsesShortFallbackAndDoesNotStartAnotherModel() {
+        AtomicInteger routing = new AtomicInteger();
+        AssistantCore c = core((k,m,b) -> { routing.incrementAndGet(); elapsed.addAndGet(29_000); return text("chat"); },
+                (t,p,m,x) -> { elapsed.addAndGet(41_000); return "late"; }, PhoneTools.UNAVAILABLE);
+        c.receive("charlemos"); assertEquals(RequestBudget.FALLBACK, c.receive("Hola")); assertEquals(1, routing.get());
+    }
+    @Test public void searchSharesBudgetAcrossRoutingProTavilyAndSummary() {
+        AtomicInteger cloudCalls = new AtomicInteger(), tavily = new AtomicInteger();
+        AssistantCore c = core((k,m,b) -> {
+            if (cloudCalls.incrementAndGet() == 1) {
+                elapsed.addAndGet(10_000);
+                return new GeminiProtocol.Reply(null, "buscar_en_internet", Json.object("consulta", "Saturno"), "");
+            }
+            elapsed.addAndGet(20_000); return text("late summary");
+        }, (t,p,m,x) -> { elapsed.addAndGet(40_000); throw new java.io.IOException(); },
+                (t,a) -> { tavily.incrementAndGet(); elapsed.addAndGet(5_000); return ExternalData.wrap("Tavily. Fuentes: example.org"); });
+        String answer = c.receive("buscá Saturno");
+        assertTrue(answer, answer.contains("Tavily")); assertFalse(answer.contains("late summary"));
+        assertEquals(1, tavily.get()); assertEquals(2, cloudCalls.get());
+    }
+    @Test public void exhaustedSearchDoesNotStartTavilyAndLateRouterCannotMutate() {
+        AssistantCore c = core((k,m,b) -> {
+            elapsed.addAndGet(29_000);
+            return new GeminiProtocol.Reply(null, "buscar_en_internet", Json.object("consulta", "Saturno"), "");
+        }, (t,p,m,x) -> { elapsed.addAndGet(41_000); return "late"; },
+                (t,a) -> { throw new AssertionError("No Tavily after deadline"); });
+        assertTrue(c.receive("buscá Saturno").contains(SearchProtocol.FAILURE));
+        AssistantCore late = core((k,m,b) -> {
+            elapsed.addAndGet(RequestBudget.ROUTER_MS);
+            return new GeminiProtocol.Reply(null, "registrar_peso", Json.object("kg", 90), "");
+        }, Pro.UNAVAILABLE, PhoneTools.UNAVAILABLE);
+        assertEquals(RequestBudget.FALLBACK, late.receive("Anotá mi peso por favor")); assertTrue(store.rows().isEmpty());
+    }
     @Test public void switchesExpireAfterInactivityAndLocalCommandsRetainPriority() throws Exception {
         AtomicInteger proCalls = new AtomicInteger(), cloudCalls = new AtomicInteger();
         AssistantCore core = core((k, m, b) -> { cloudCalls.incrementAndGet(); return text("Gratis"); },

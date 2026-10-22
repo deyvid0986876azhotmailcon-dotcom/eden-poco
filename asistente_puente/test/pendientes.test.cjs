@@ -63,8 +63,22 @@ test('concurrent polls coalesce; PARAR and disconnected session suppress late se
   const poller = new PendingPoller(root, config, { chat: config.remitente }, () => session, () => {}, fetcher);
   const running = poller.poll(); await poller.poll(); assert.equal(requests, 1);
   poller.pause(); release(); await running; assert.equal(sends, 0);
-  await poller.poll(); assert.equal(requests, 1);
-  poller.resume(); session.opened = false; await poller.poll(); assert.equal(requests, 1);
+  const paused = poller.poll(); release(); await paused; assert.equal(requests, 2); assert.equal(sends, 0);
+  poller.resume(); session.opened = false;
+  const disconnected = poller.poll(); release(); await disconnected; assert.equal(requests, 3); assert.equal(sends, 0);
+});
+test('health header continues while disconnected, logged out or paused, without delivery or ACK', async t => {
+  const root = fixture(t), headers = []; let status = 'desconectado', sends = 0;
+  const session = { opened: false, socket: { async sendMessage() { sends++; } } };
+  const poller = new PendingPoller(root, config, {}, () => session, () => {}, async (url, options) => {
+    assert.equal(options.method, 'GET'); assert.ok(url.endsWith('/pendientes'));
+    headers.push(options.headers['X-WhatsApp']);
+    return response([{ id: 'notice', texto: 'text' }]);
+  }, () => status);
+  await poller.poll(); status = 'desvinculado'; await poller.poll();
+  poller.pause(); status = 'conectado'; session.opened = true; await poller.poll();
+  assert.deepEqual(headers, ['desconectado', 'desvinculado', 'conectado']); assert.equal(sends, 0);
+  poller.stop(); await poller.poll(); assert.equal(headers.length, 3);
 });
 test('invalid batches fail closed and pending endpoint is bounded/authenticated', async t => {
   const root = fixture(t); let sends = 0;

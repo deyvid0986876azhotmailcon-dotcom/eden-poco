@@ -33,12 +33,18 @@ public final class BridgeInbox {
         return accept(id, text, core.cancellationToken());
     }
     public CompletableFuture<String> accept(String id, String text, long arrivalToken) {
-        return accept(id, text, null, arrivalToken);
+        return accept(id, text, arrivalToken, core.newRequestBudget());
+    }
+    public CompletableFuture<String> accept(String id, String text, long arrivalToken, dev.poco.asistente.core.RequestBudget budget) {
+        return accept(id, text, null, arrivalToken, budget);
     }
     public CompletableFuture<String> acceptAudio(String id, dev.poco.asistente.core.AudioInput audio, long arrivalToken) {
-        return accept(id, "", audio, arrivalToken);
+        return acceptAudio(id, audio, arrivalToken, core.newRequestBudget());
     }
-    private CompletableFuture<String> accept(String id, String text, dev.poco.asistente.core.AudioInput audio, long arrivalToken) {
+    public CompletableFuture<String> acceptAudio(String id, dev.poco.asistente.core.AudioInput audio, long arrivalToken, dev.poco.asistente.core.RequestBudget budget) {
+        return accept(id, "", audio, arrivalToken, budget);
+    }
+    private CompletableFuture<String> accept(String id, String text, dev.poco.asistente.core.AudioInput audio, long arrivalToken, dev.poco.asistente.core.RequestBudget budget) {
         synchronized (gate) {
             if (!enabled.getAsBoolean()) throw new IllegalStateException("Puente apagado");
             // Reserve room for PARAR even when the ordinary queue is full.
@@ -64,7 +70,7 @@ public final class BridgeInbox {
                     }
                     String understood = text;
                     if (audio != null) {
-                        try { understood = core.transcribe(audio, ticket); result.heard = understood; }
+                        try { understood = core.transcribe(audio, ticket, budget); result.heard = understood; }
                         catch (Exception e) {
                             result.complete(dev.poco.asistente.core.AudioInput.FALLBACK); return;
                         }
@@ -80,7 +86,7 @@ public final class BridgeInbox {
                             }
                         }
                     }
-                    String response = core.receive(understood, AssistantCore.Source.WHATSAPP_OWNER, requestId, ticket);
+                    String response = core.receive(understood, AssistantCore.Source.WHATSAPP_OWNER, requestId, ticket, budget);
                     synchronized (gate) {
                         result.complete(ticket == core.cancellationToken() ? response : "Pedido cancelado; consultá Resumen.");
                     }
