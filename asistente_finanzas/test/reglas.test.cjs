@@ -53,3 +53,24 @@ test('montos y fechas', () => {
   assert.strictEqual(fecha('20/10/2026 18:40'), '2026-10-20T18:40');
   assert.strictEqual(fecha('sin fecha'), null);
 });
+
+test('pago con QR -> gasto con el comercio; entre cuentas propias se ignora', () => {
+  const qr = interpretar('Pago a través de QR', correo('PAGO QR', [fila('Debitado de la Cuenta', '******1111'), fila('Comercio', 'SUPERMERCADO EJEMPLO'),
+    fila('Monto', 'Gs 85.500'), fila('Fecha', '19/10/2026 12:15'), fila('N&uacute;mero de Operaci&oacute;n', '44444444')]));
+  assert.deepStrictEqual({ ...qr }, { tipo: 'gasto', monto: 85500, fecha: '2026-10-19T12:15', detalle: 'SUPERMERCADO EJEMPLO', moneda: 'PYG' });
+  assert.strictEqual(interpretar('Transferencia entre cuentas propias', correo('PROPIAS', [fila('Monto a enviar', 'Gs 100.000')])), null);
+});
+
+test('transferencias que salen -> gasto con el banco de destino, sin la persona; a uno mismo se ignora', () => {
+  const otros = interpretar('Transferencia a otros bancos', correo('TRANSFERENCIA A OTRAS ENTIDADES', [fila('Nro. de Operaci&oacute;n', '700000002'),
+    fila('Fecha y hora de Operaci&oacute;n', '17/10/2026 09:30:00'), fila('Entidad Pagadora', 'BANCO FAMILIAR S.A.E.C.A.'), fila('Cliente Pagador', 'TITULAR PRUEBA'),
+    fila('Moneda y Monto', 'PYG 150.000'), fila('Entidad Beneficiaria', 'BANCO ITAU'), fila('Cliente Beneficiario', 'AMIGO PRUEBA')]));
+  assert.deepStrictEqual({ ...otros }, { tipo: 'gasto', monto: 150000, fecha: '2026-10-17T09:30', detalle: 'Transferencia a BANCO ITAU', moneda: 'PYG' });
+  assert.ok(!JSON.stringify(otros).match(/AMIGO|TITULAR|700000002/));
+  const otra = interpretar('Transferencia a otra cuenta', correo('TRANSFERENCIA', [fila('Fecha', '16/10/2026'), fila('Cuenta D&eacute;bito', '******1111'),
+    fila('Remitente', 'TITULAR PRUEBA'), fila('Monto a enviar', 'Gs 40.000'), fila('Cuenta Cr&eacute;dito', '******2222'), fila('Beneficiario', 'AMIGO PRUEBA')]));
+  assert.deepStrictEqual({ ...otra }, { tipo: 'gasto', monto: 40000, fecha: '2026-10-16T00:00', detalle: 'Transferencia a otra cuenta', moneda: 'PYG' });
+  const propia = interpretar('Transferencia a otros bancos', correo('T', [fila('Cliente Pagador', 'Titular Prueba'), fila('Cliente Beneficiario', 'TITULAR  PRUEBA'),
+    fila('Moneda y Monto', 'PYG 1.000.000'), fila('Fecha y hora de Operaci&oacute;n', '15/10/2026 10:00:00')]));
+  assert.strictEqual(propia, null);
+});

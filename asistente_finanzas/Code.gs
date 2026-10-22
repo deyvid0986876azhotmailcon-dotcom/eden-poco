@@ -20,6 +20,28 @@ function probar() {
   Logger.log('Movimientos encontrados en 30 días: ' + movimientos.length + ' (' +
       movimientos.filter(m => m.tipo === 'gasto').length + ' gastos, ' +
       movimientos.filter(m => m.tipo === 'ingreso').length + ' ingresos)');
+  // Solo los asuntos (sin números) de lo que todavía no se entiende, para sumar reglas.
+  const cuenta = {};
+  movimientos.filter(m => m.tipo === 'desconocido').forEach(m => { cuenta[m.asunto] = (cuenta[m.asunto] || 0) + 1; });
+  Object.keys(cuenta).sort((a, b) => cuenta[b] - cuenta[a]).forEach(a => Logger.log('Sin regla: ' + cuenta[a] + ' × «' + a + '»'));
+  etiquetas_(Object.keys(cuenta));
+}
+
+/** Para armar reglas nuevas: SOLO los nombres de los campos («Monto:», «Comercio:»), nunca sus valores. */
+function etiquetas_(asuntos) {
+  // un correo por asunto: Gmail corta a ~200 lecturas por minuto
+  asuntos.forEach(function (asunto) {
+    const lista = Gmail.Users.Messages.list('me', { q: 'from:' + REMITENTE + ' subject:"' + asunto.replace(/"/g, '') + '" newer_than:30d', maxResults: 1 });
+    const ref = (lista.messages || [])[0];
+    if (!ref) return;
+    const msg = Gmail.Users.Messages.get('me', ref.id, { format: 'full' });
+    const nombres = [];
+    textoPlano(cuerpo_(msg.payload)).split(/[\n\t]/).forEach(function (pedazo) {
+      const m = pedazo.match(/^\s*([A-Za-zÁÉÍÓÚáéíóúÑñº°.\s]{2,40}):/);
+      if (m && nombres.indexOf(m[1].trim()) < 0) nombres.push(m[1].trim());
+    });
+    Logger.log('Campos de «' + asunto + '»: ' + nombres.join(' | '));
+  });
 }
 
 function leer_(dias) {
@@ -110,8 +132,8 @@ function monto(valor) {
 
 /** «20/10/2026 18:40» o «18/10/2026 01:03:36» -> «2026-10-20T18:40». */
 function fecha(valor) {
-  var m = String(valor || '').match(/(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})/);
-  return m ? m[3] + '-' + m[2] + '-' + m[1] + 'T' + m[4] + ':' + m[5] : null;
+  var m = String(valor || '').match(/(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+  return m ? m[3] + '-' + m[2] + '-' + m[1] + 'T' + (m[4] || '00') + ':' + (m[5] || '00') : null;
 }
 
 var SEGURIDAD = /codigo|clave|token|contrasena|\bpin\b|acceso|inicio de sesion|ingreso a|verificacion|seguridad|bloqueo|otp/;
@@ -123,7 +145,21 @@ function interpretar(asunto, html) {
   var cuerpo = normalizar(texto);
   if (SEGURIDAD.test(cuerpo) && !/pago de servicios|transferencia/.test(a)) return null;
   var resultado = null;
-  if (a.indexOf('pago de servicios') >= 0) {
+  // mover plata entre cuentas propias no es gasto ni ingreso
+  if (a.indexOf('entre cuentas propias') >= 0) return null;
+  if (a.indexOf('transferencia a otros bancos') >= 0 || a.indexOf('transferencia a otra cuenta') >= 0) {
+    // Mandarse plata a uno mismo en otro banco tampoco es gasto. Los nombres se comparan acá y nunca salen.
+    var pagador = normalizar(campo(texto, ['Cliente Pagador', 'Remitente']));
+    var beneficiario = normalizar(campo(texto, ['Cliente Beneficiario', 'Beneficiario']));
+    if (pagador && beneficiario && pagador === beneficiario) return null;
+    var destino = limpiar_(campo(texto, ['Entidad Beneficiaria']));
+    resultado = { tipo: 'gasto', monto: monto(campo(texto, ['Moneda y Monto', 'Monto a enviar', 'Monto'])),
+      fecha: fecha(campo(texto, ['Fecha y hora de Operación', 'Fecha y hora de Operacion', 'Fecha'])),
+      detalle: destino ? 'Transferencia a ' + destino : 'Transferencia a otra cuenta' };
+  } else if (a.indexOf('pago a traves de qr') >= 0) {
+    resultado = { tipo: 'gasto', monto: monto(campo(texto, ['Monto'])), fecha: fecha(campo(texto, ['Fecha'])),
+      detalle: limpiar_(campo(texto, ['Comercio'])) || 'Pago con QR' };
+  } else if (a.indexOf('pago de servicios') >= 0) {
     resultado = { tipo: 'gasto', monto: monto(campo(texto, ['Monto'])), fecha: fecha(campo(texto, ['Fecha'])),
       detalle: limpiar_(campo(texto, ['Servicio'])) || 'Pago de servicios' };
   } else if (a.indexOf('transferencia de otros bancos') >= 0 || cuerpo.indexOf('transferencia de otras entidades recibida') >= 0) {
