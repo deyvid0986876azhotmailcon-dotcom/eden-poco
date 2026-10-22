@@ -16,6 +16,19 @@ public final class AppSettings implements dev.poco.asistente.core.Proactive.Sett
     public AppSettings(Context context) {
         prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE); vault = new KeyVault(context);
         bridgeVault = new KeyVault(context, "bridge_vault", "dev.poco.asistente.bridge.v1");
+        bankVault = new KeyVault(context, "bank_vault", "dev.poco.asistente.bank.v1");
+    }
+    private final KeyVault bankVault;
+    /** Bank mail reader (asistente_finanzas): {deployment id, token}, or null when not set up. */
+    public synchronized String[] bankReader() throws Exception {
+        String saved = bankVault.load();
+        int dot = saved.lastIndexOf('.'); // neither part has dots: the vault only takes [A-Za-z0-9._-]
+        return dot < 1 ? null : new String[]{saved.substring(0, dot), saved.substring(dot + 1)};
+    }
+    public synchronized void saveBankReader(String deployment, String token) throws Exception {
+        if (!deployment.matches("[A-Za-z0-9_-]{20,120}") || !token.matches("[A-Za-z0-9_-]{20,64}"))
+            throw new IllegalArgumentException("Datos del lector del banco inválidos.");
+        bankVault.save(deployment + "." + token);
     }
     public boolean bridgeEnabled() { return prefs.getBoolean("bridge_enabled", false); }
     @Override public boolean proEnabled() { return prefs.getBoolean("pro_enabled", true); }

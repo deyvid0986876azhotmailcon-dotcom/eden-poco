@@ -40,6 +40,11 @@ public final class AssistantApplication extends Application {
                 new dev.poco.asistente.phone.AndroidPhone(this), new dev.poco.asistente.net.ProClient(settings::bridgeToken));
         proactive = new dev.poco.asistente.core.Proactive(db, settings, new GeminiClient(), Clock.system(dev.poco.asistente.core.Reminders.ZONE), core);
         proactive.onReminderCall = text -> main.post(() -> dev.poco.asistente.call.CallLauncher.ring(this, text));
+        importBankReader();
+        try {
+            if (settings.bankReader() != null)
+                proactive.bank = new dev.poco.asistente.core.BankFeed(db, core, new dev.poco.asistente.net.BankClient(settings::bankReader));
+        } catch (Exception e) { bridgeLog("Banco: no pude abrir la configuración cifrada"); }
         whatsapp = new WhatsAppBridge(this);
         bridge = new BridgeInbox(core, messages, controlGate, settings::bridgeEnabled, id -> {
             if (!db.claimNotice(id, "Puente")) return false;
@@ -56,6 +61,24 @@ public final class AssistantApplication extends Application {
     }
     public void changed() { main.post(() -> { for (Runnable listener : listeners) listener.run(); }); }
     public void messagingError() { append("Sistema: falló el almacenamiento de WhatsApp. Revisá Registro y Resumen antes de repetir un pedido."); changed(); }
+    /**
+     * One-time setup of the bank mail reader: files/banco_importar.txt (deployment id, then token, one per line),
+     * placed with adb run-as. It goes into the encrypted vault and the file is deleted whatever happens.
+     */
+    private void importBankReader() {
+        java.io.File file = new java.io.File(getFilesDir(), "banco_importar.txt");
+        if (!file.exists()) return;
+        try {
+            String[] lines = new String(java.nio.file.Files.readAllBytes(file.toPath()), java.nio.charset.StandardCharsets.UTF_8).trim().split("\\s+");
+            if (lines.length != 2) throw new IllegalArgumentException();
+            settings.saveBankReader(lines[0], lines[1]);
+            bridgeLog("Banco: lector configurado");
+        } catch (Exception e) {
+            bridgeLog("Banco: no pude importar la configuración del lector");
+        } finally {
+            if (!file.delete()) bridgeLog("Banco: no pude borrar el archivo de importación");
+        }
+    }
     public void bridgeLog(String event) {
         try { db.messagingLog("Puente", event); }
         catch (RuntimeException e) { messagingError(); }

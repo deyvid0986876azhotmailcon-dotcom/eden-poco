@@ -232,6 +232,11 @@ public final class AssistantCore {
             }
         }
     }
+    /** A movement from the bank mail reader (BankFeed, inside proactiveAction): same executor and validation as WhatsApp. */
+    String recordBank(String operation, org.json.JSONObject args) throws Exception {
+        if (!operation.matches("banco:[A-Za-z0-9]{8,40}")) throw new IllegalArgumentException("Operación del banco inválida.");
+        return executor.execute("banco", operation, "registrar_movimiento", args);
+    }
     public <T> T proactiveAction(long ticket, java.util.concurrent.Callable<T> action, T cancelled) throws Exception {
         synchronized (actionGate) {
             if (proactivePaused || ticket != generation.get()) return cancelled;

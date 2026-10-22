@@ -25,6 +25,8 @@ public final class Proactive {
     }
     /** Set by the app: rings a call for a due reminder. Core stays free of Android. */
     public volatile java.util.function.Consumer<String> onReminderCall;
+    /** Set by the app when the bank mail reader is configured; null leaves polling as it was. */
+    public volatile BankFeed bank;
     private final Port store;
     private final Settings settings;
     private final Cloud cloud;
@@ -66,6 +68,11 @@ public final class Proactive {
             LocalDate weekly = daily.with(TemporalAdjusters.previousOrSame(DayOfWeek.SUNDAY));
             if (settings.dailySummary()) summary("d_", daily, false, millis, cancelled, ticket);
             if (settings.weeklySummary() && daily.getDayOfWeek() == DayOfWeek.SUNDAY) summary("w_", weekly, true, millis, cancelled, ticket);
+        }
+        BankFeed feed = bank;
+        if (feed != null && !cancelled.getAsBoolean()) {
+            try { feed.run(millis, ticket, cancelled); }
+            catch (Exception e) { /* the bank must never stop reminders */ }
         }
         if (cancelled.getAsBoolean()) return new JSONArray();
         return core.proactiveAction(ticket, () -> store.lease(clock.millis(), Reminders.quiet(ZonedDateTime.now(clock))), new JSONArray());
