@@ -18,6 +18,7 @@ import org.json.JSONObject;
 public final class AndroidPhone implements PhoneTools.Port {
     private final AssistantApplication app;
     public AndroidPhone(AssistantApplication app) { this.app = app; }
+    @Override public JSONObject prepare(String tool, JSONObject args) throws Exception { return new AndroidActions(app, this).prepare(tool, args); }
     private List<PhonePolicy.App> apps() {
         List<PhonePolicy.App> apps = new ArrayList<>();
         Intent query = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
@@ -31,6 +32,8 @@ public final class AndroidPhone implements PhoneTools.Port {
     @Override public String execute(String tool, JSONObject a) throws Exception {
         if (!app.settings.phoneEnabled()) throw new IllegalArgumentException("El control del teléfono está apagado.");
         switch (tool) {
+            case "llamar": case "mensaje_whatsapp": case "agendar": case "no_molestar": case "brillo": case "wifi": case "bluetooth":
+                return new AndroidActions(app, this).execute(tool, a);
             case "abrir_app":
                 PhonePolicy.App found = PhonePolicy.resolve(a.getString("nombre"), apps());
                 launchApp(found.pkg); return "Pedí abrir " + found.label + ". Si no apareció, revisá los permisos de Asistente en HyperOS.";
@@ -83,7 +86,7 @@ public final class AndroidPhone implements PhoneTools.Port {
         if (intent == null) throw new IllegalArgumentException("No encontré esa app instalada.");
         launchResolved(intent);
     }
-    private void launchResolved(Intent intent) {
+    void launchResolved(Intent intent) {
         String pkg = intent.getComponent() == null ? intent.getPackage() : intent.getComponent().getPackageName();
         if (PhonePolicy.blocked(pkg)) throw new IllegalArgumentException("Esa no la puedo abrir.");
         ResolveInfo target = app.getPackageManager().resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY);

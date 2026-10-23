@@ -558,7 +558,7 @@ public final class MainActivity extends Activity {
     private void phoneCard(LinearLayout form) {
         LinearLayout card = ui.card(); form.addView(card);
         card.addView(ui.cardTitle(Icons.PHONE, "Control del teléfono", false));
-        card.addView(label("Abrir apps, reloj, música y lecturas. PARAR lo apaga. No lee ni toca la pantalla."));
+        card.addView(label("Abrir apps, reloj, música y lecturas. Llamadas, borradores de WhatsApp, eventos y ajustes piden confirmación. PARAR lo apaga. No lee ni toca la pantalla."));
         phoneToggle = toggle("Control del teléfono"); phoneToggle.setChecked(app.settings.phoneEnabled()); card.addView(phoneToggle);
         phoneToggle.setOnCheckedChangeListener((view, enabled) -> {
             if (enabled == app.settings.phoneEnabled()) return;
@@ -572,6 +572,19 @@ public final class MainActivity extends Activity {
         card.addView(button("Accesibilidad", false, () -> phoneSetting(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         card.addView(button("Notificaciones", false, () -> phoneSetting(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)));
         card.addView(button("Permitir lectura de agenda", false, () -> requestPermissions(new String[]{android.Manifest.permission.READ_CALENDAR}, 44)));
+        card.addView(button("Permitir contactos y llamadas", false, () -> requestPermissions(new String[]{android.Manifest.permission.READ_CONTACTS, android.Manifest.permission.CALL_PHONE}, 45)));
+        card.addView(button("Permitir crear eventos", false, () -> requestPermissions(new String[]{android.Manifest.permission.READ_CALENDAR, android.Manifest.permission.WRITE_CALENDAR}, 46)));
+        card.addView(button("Acceso a No molestar", false, () -> phoneSetting(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)));
+        card.addView(button("Modificar brillo del sistema", false, () -> {
+            try { startActivity(new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, android.net.Uri.parse("package:" + getPackageName()))); }
+            catch (RuntimeException e) { phoneStatus.setText("Abrí Modificar ajustes del sistema desde los permisos de Asistente."); }
+        }));
+        card.addView(label("Número del bot (se bloqueará como destinatario). Obligatorio para preparar WhatsApp. Solo móviles paraguayos y espacio principal."));
+        EditText botNumber = field("+5959…"); botNumber.setSingleLine(true); botNumber.setText(app.settings.phoneBotNumber()); card.addView(botNumber);
+        card.addView(button("Guardar número del bot", false, () -> {
+            try { app.stop(); app.settings.savePhoneBotNumber(botNumber.getText().toString().trim()); phoneStatus.setText("Número guardado. Volvé a encender Control del teléfono."); }
+            catch (RuntimeException e) { phoneStatus.setText(e.getMessage()); }
+        }));
         card.addView(label("Activá «Asistente: abrir apps» y «Asistente: leer avisos». Si Android lo bloquea, permití ajustes restringidos en la información de Asistente."));
         refreshPhoneStatus();
     }
