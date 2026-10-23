@@ -19,11 +19,12 @@ function doPost(e) {
     const hash = hex(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes));
     if (hash !== pedido.sha256) return json_({ error: 'la copia llegó dañada' });
     const carpeta = carpeta_();
-    // la copia del mismo día reemplaza a la anterior (por ejemplo un respaldo manual)
-    archivos_(carpeta).filter(function (f) { return f.name === pedido.nombre; })
+    // la copia del mismo día reemplaza a la anterior (por ejemplo un respaldo manual): primero se guarda la
+    // nueva y recién después se retiran las anteriores, así un fallo al guardar nunca deja el día sin copia
+    const nueva = Drive.Files.create({ name: pedido.nombre, parents: [carpeta], mimeType: 'application/vnd.sqlite3' },
+        Utilities.newBlob(bytes, 'application/vnd.sqlite3', pedido.nombre)).id;
+    archivos_(carpeta).filter(function (f) { return f.name === pedido.nombre && f.id !== nueva; })
         .forEach(function (f) { Drive.Files.update({ trashed: true }, f.id); });
-    Drive.Files.create({ name: pedido.nombre, parents: [carpeta], mimeType: 'application/vnd.sqlite3' },
-        Utilities.newBlob(bytes, 'application/vnd.sqlite3', pedido.nombre));
     limpiar_(carpeta, new Date());
     return json_({ ok: true, bytes: bytes.length, sha256: hash });
   } catch (err) {
