@@ -9,7 +9,7 @@ mkdir -p "$HOME/.asistente_puente" || exit 1
 pgrep -f 'node index.cjs' >/dev/null
 case $? in
     0) exit 0 ;; # No rotar el registro de un puente que sigue escribiendo.
-    1) rm -f "$HOME/.asistente_puente/running.lock" || exit 1 ;;
+    1) ;; # el candado viejo lo limpia iniciar.sh, una vez que ganó su propio candado (dos arranques a la vez)
     *) echo 'No se pudo comprobar si el puente sigue activo; se conserva el candado.' >&2; exit 1 ;;
 esac
 # En cada arranque se guarda solo la ultima parte; no limita el crecimiento durante la sesion.
