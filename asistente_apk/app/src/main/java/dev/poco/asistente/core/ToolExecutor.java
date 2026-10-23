@@ -88,7 +88,7 @@ public final class ToolExecutor {
             String what = row.kind.equals("memoria") ? "me olvido de «" + row.data.optString("texto") + "»"
                     : row.kind.equals("recordatorio") ? "cancelo el recordatorio «" + row.data.optString("texto") + "»"
                     : "borro " + Receipt.describe(row.kind, row.data, LocalDate.now(clock));
-            return "¿Seguro que " + what + "? Si es así, respondé:\nSÍ " + code + "\n(vale 5 minutos; PARAR cancela)";
+            return "¿Seguro que " + what + "?\nRespondé «sí» y lo hago. También vale:\nSÍ " + code + "\n(vale 5 minutos; PARAR cancela)";
         }
         if (tool.equals("corregir_registro")) {
             Validation.keys(args, "id,cambios");
@@ -122,6 +122,17 @@ public final class ToolExecutor {
                 + " (ref. " + Receipt.ref(row.id) + ")";
         if (kind.equals("comida") && (row.data.has("calorias") || row.data.has("proteina"))) result += " (nutrientes estimados)";
         return store.mutate(operationId, null, row, result, clock.millis());
+    }
+    /** True while this actor has an unexpired proposal: a plain «sí» then confirms it instead of being chat. */
+    public synchronized boolean hasPending(String actor) {
+        Pending p = pending.get(actor);
+        return p != null && elapsedMillis.getAsLong() < p.expires;
+    }
+    /** David asked (2026-10-23) to answer «sí» instead of typing the code: confirms only this actor's latest proposal. */
+    public synchronized String confirmLatest(String actor, String operationId) throws Exception {
+        Pending p = pending.get(actor);
+        if (p == null) return "No tengo nada pendiente para confirmar.";
+        return confirm(actor, operationId, p.code);
     }
     /** Never exposed as a Gemini function: only an exact, direct user confirmation can call this. */
     public synchronized String confirm(String actor, String operationId, String code) throws Exception {
@@ -177,7 +188,7 @@ public final class ToolExecutor {
             voice.propose(code, description);
             return "Leé exactamente esta acción en voz alta, y luego pedí que diga sí, confirmo: " + description;
         }
-        return description + "\nPara confirmar, respondé:\nSÍ " + code + "\n(vale 5 minutos; PARAR cancela)";
+        return description + "\n¿Lo hago? Respondé «sí». También vale:\nSÍ " + code + "\n(vale 5 minutos; PARAR cancela)";
     }
     public synchronized void cancelActor(String actor) { pending.remove(actor); }
     public void requirePhone() {

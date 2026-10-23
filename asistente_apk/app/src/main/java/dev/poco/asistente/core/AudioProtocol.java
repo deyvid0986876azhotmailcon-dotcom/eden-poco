@@ -46,8 +46,8 @@ public final class AudioProtocol {
                 + "Es una charla que ya viene en curso: no empieces con saludos ni con su nombre («hola», «hola David», «che David»); "
                 + "solo saludá si la respuesta misma es un saludo. "
                 + "Nada de códigos, IDs, referencias, comillas, listas ni símbolos; los montos en palabras de uso común "
-                + "(por ejemplo «veinticinco mil guaraníes»). Si la respuesta pide confirmar con un código, decí solo que se lo "
-                + "dejaste escrito. Devolvé solo el texto a decir, sin comillas ni explicaciones.\n\nRespuesta:\n" + written)))),
+                + "(por ejemplo «veinticinco mil guaraníes»). Si la respuesta pide confirmar, decí en pocas palabras qué vas a hacer y "
+                + "preguntá si está seguro, que te conteste «sí»; nunca digas el código. Devolvé solo el texto a decir, sin comillas ni explicaciones.\n\nRespuesta:\n" + written)))),
                 "generationConfig", Json.object("temperature", 0.5, "maxOutputTokens", 300));
     }
     public static String spokenText(JSONObject response) throws Exception {

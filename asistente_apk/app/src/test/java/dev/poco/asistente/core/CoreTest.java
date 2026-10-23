@@ -59,8 +59,9 @@ public class CoreTest {
         String id = store.rows().get(0).id;
         String proposal = core.receive("borrar " + id);
         String code = proposal.substring(proposal.indexOf("SÍ ") + 3, proposal.indexOf("\n(vale"));
-        core.receive("sí"); assertEquals(1, store.rows().size());
-        assertTrue(core.receive("SÍ " + code).startsWith("Borré")); assertTrue(store.rows().isEmpty());
+        assertTrue(proposal.contains("Respondé «sí»"));
+        assertTrue(core.receive("Sí, dale.").startsWith("Borré")); assertTrue(store.rows().isEmpty());
+        assertTrue(core.receive("SÍ " + code).contains("no corresponde")); // consumed, never replayed
     }
     @Test public void stopAlsoCancelsQueuedWork() {
         AssistantCore core = new AssistantCore(store, settings(""), (key, model, body) -> { throw new AssertionError(); }, clock);

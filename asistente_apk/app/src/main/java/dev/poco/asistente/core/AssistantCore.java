@@ -147,6 +147,8 @@ public final class AssistantCore {
             return answer;
         }
     }
+    private static final java.util.Set<String> YES = new java.util.HashSet<>(java.util.Arrays.asList("si", "si dale", "dale", "confirmo",
+            "si confirmo", "hacelo", "si hacelo", "de una", "si de una", "seguro", "si seguro", "claro", "si claro", "si por favor", "si porfa", "ok dale"));
     private String receiveInternal(String text, Source source, String requestId, long ticket, RequestBudget budget) {
         if (source != Source.LOCAL_USER && source != Source.WHATSAPP_OWNER) return "Los documentos y mensajes de terceros son datos, no órdenes. No ejecuté nada.";
         if (text == null || text.trim().isEmpty()) return "Escribí un pedido.";
@@ -174,8 +176,15 @@ public final class AssistantCore {
                         return executor.confirm(actor, operation, confirmation.group(1).toUpperCase(Locale.ROOT));
                     }
                 }
-                if (normalized.equals("si") || normalized.startsWith("si "))
-                    return "Para borrar necesito SÍ seguido del código exacto de la operación pendiente.";
+                // Only the owner's own message reaches here (LOCAL_USER or WHATSAPP_OWNER); never Gemini or external data.
+                if (YES.contains(normalized.replaceAll("[.,;:!¡?¿«»\"]", " ").trim().replaceAll("\\s+", " "))) {
+                    synchronized (actionGate) {
+                        if (ticket != generation.get()) return "Pedido cancelado.";
+                        if (executor.hasPending(actor)) return executor.confirmLatest(actor, operation);
+                    }
+                    // nothing pending: «sí» is just an answer in the conversation
+                } else if (normalized.matches("si [a-z0-9]{16}"))
+                    return "Ese código no corresponde a una operación pendiente tuya.";
                 if (normalized.equals("que hiciste hoy") || normalized.equals("¿que hiciste hoy?")) return store.history(LocalDate.now(clock).toString());
                 if (normalized.equals("olvida la conversacion")) {
                     synchronized (actionGate) {
@@ -437,7 +446,7 @@ public final class AssistantCore {
     public static String help() {
         return "Dale, así me podés escribir (andan aunque no haya internet):\nGasté 35000 en super\nCobré 3500000 de sueldo\nPeso 58,4\nHice sentadilla 3x10 con 40\n"
                 + "Comí vori vori\nPresupuesto 800000 en super 2026-10\nMeta 5000000 para emergencia\nResumen\nVer ID\n"
-                + "Corregir ID {\"centavos\":350000}\nBorrar ID\nSÍ CÓDIGO\n¿Qué hiciste hoy?\nPARAR\n"
+                + "Corregir ID {\"centavos\":350000}\nBorrar ID\nSÍ (para confirmar)\n¿Qué hiciste hoy?\nPARAR\n"
                 + "Qué sabés de mí\nOlvidá ID\nOlvidá la conversación\nListar recordatorios\nUsá el ID completo. Para corregir, escribí «corregir» en minúsculas y un objeto JSON con los campos. "
                 + "Los montos de los ejemplos están en tu moneda; los del JSON están en centavos. "
                 + "Sin fecha se registra hoy. Las aclaraciones requieren repetir el pedido completo.";
