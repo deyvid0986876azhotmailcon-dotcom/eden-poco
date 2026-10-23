@@ -95,7 +95,7 @@ final class AndroidActions {
             case "llamar":
                 String number = ContactPolicy.mobile(a.getString("numero"));
                 TelecomManager telecom = app.getSystemService(TelecomManager.class);
-                if (android.os.Build.VERSION.SDK_INT >= 29 && telecom.isEmergencyNumber(number))
+                if (android.os.Build.VERSION.SDK_INT >= 29 && app.getSystemService(android.telephony.TelephonyManager.class).isEmergencyNumber(number))
                     throw new IllegalArgumentException("No llamo a números de emergencia.");
                 String dialer = telecom.getDefaultDialerPackage();
                 if (PhonePolicy.blocked(dialer)) throw new IllegalArgumentException("No encontré un marcador permitido.");
