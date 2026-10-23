@@ -135,7 +135,7 @@ public class NudgesTest {
             @Override public boolean nudges() { return true; }
         };
         for (int i = 0; i < 2000; i++) store.mutate("rem" + i, null,
-                row("recordatorio", "texto", "x".repeat(120), "proximo", clock.millis() + 3600000, "activo", true), "ok", 0);
+                row("recordatorio", "texto", "x".repeat(120), "cuando", "2026-10-23T08:45", "proximo", clock.millis() + 3600000, "activo", true), "ok", 0);
         Cloud noCloud = (k, m, b) -> { throw new AssertionError("Must not call Gemini"); };
         AssistantCore core = new AssistantCore(store, settings, noCloud, clock);
         Proactive service = new Proactive(store, settings, noCloud, clock, core);
