@@ -36,8 +36,7 @@ public final class BridgeService extends Service {
     private static final String HEALTH_CHANNEL = "whatsapp_health";
     private static final int HEALTH_ID = 411;
     private static final long HEALTH_CHECK_SECONDS = 60;
-    private BridgeHealth health;
-    private String healthNotice;
+    private BridgeWatchdog health;
     private AssistantApplication app;
     private volatile boolean closed;
     private volatile ServerSocket server;
@@ -47,6 +46,7 @@ public final class BridgeService extends Service {
     private final ThreadPoolExecutor handlers = new ThreadPoolExecutor(0, 8, 30, TimeUnit.SECONDS,
             new SynchronousQueue<>(), new ThreadPoolExecutor.AbortPolicy());
     private final ScheduledExecutorService deadlines = Executors.newSingleThreadScheduledExecutor();
+    private final ScheduledExecutorService healthChecks = Executors.newSingleThreadScheduledExecutor();
     private final BridgeVoice voice = new BridgeVoice();
     @Override public void onCreate() { super.onCreate(); app = (AssistantApplication) getApplication(); }
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
@@ -65,31 +65,72 @@ public final class BridgeService extends Service {
         else startForeground(410, notification);
         if (!app.settings.bridgeEnabled()) { stopSelf(); return START_NOT_STICKY; }
         if (!started) {
-            health = new BridgeHealth(System.currentTimeMillis());
+            health = new BridgeWatchdog(android.os.SystemClock::elapsedRealtime, new BridgeWatchdog.Actions() {
+                public boolean notice(String text) { return showHealthNotice(text); }
+                public void restart() { restartTermux(); }
+                public void log(String event) { app.bridgeLog(event); }
+            });
             manager.createNotificationChannel(new NotificationChannel(HEALTH_CHANNEL, "Problemas de WhatsApp", NotificationManager.IMPORTANCE_HIGH));
             manager.cancel(HEALTH_ID);
             started = true; listener.execute(this::serve);
-            deadlines.scheduleWithFixedDelay(this::checkHealth, HEALTH_CHECK_SECONDS, HEALTH_CHECK_SECONDS, TimeUnit.SECONDS);
+            app.bridgeLog("Salud: vigilancia iniciada (gracia de 10 minutos)");
+            healthChecks.scheduleWithFixedDelay(this::checkHealth, HEALTH_CHECK_SECONDS, HEALTH_CHECK_SECONDS, TimeUnit.SECONDS);
         }
         return START_STICKY;
     }
-    private synchronized void checkHealth() {
+    private void checkHealth() {
         if (closed || health == null) return;
-        String notice = health.notice(System.currentTimeMillis());
-        if (java.util.Objects.equals(notice, healthNotice)) return;
+        health.run();
+    }
+    private boolean showHealthNotice(String notice) {
         NotificationManager manager = getSystemService(NotificationManager.class);
-        try {
-            if (notice == null) manager.cancel(HEALTH_ID);
-            else {
-                PendingIntent open = PendingIntent.getActivity(this, HEALTH_ID, new Intent(this, MainActivity.class),
-                        PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-                manager.notify(HEALTH_ID, new Notification.Builder(this, HEALTH_CHANNEL)
-                        .setSmallIcon(android.R.drawable.stat_notify_error).setContentTitle("Asistente: WhatsApp")
-                        .setContentText(notice).setStyle(new Notification.BigTextStyle().bigText(notice))
-                        .setContentIntent(open).setOnlyAlertOnce(true).build());
+        if (notice == null) manager.cancel(HEALTH_ID);
+        else {
+            NotificationChannel channel = manager.getNotificationChannel(HEALTH_CHANNEL);
+            if (!manager.areNotificationsEnabled() || channel == null
+                    || channel.getImportance() == NotificationManager.IMPORTANCE_NONE) {
+                app.bridgeLog("Salud: aviso bloqueado por permisos o canal");
+                return false;
             }
-            healthNotice = notice;
-        } catch (SecurityException ignored) { /* Notifications disabled by the owner. */ }
+            PendingIntent open = PendingIntent.getActivity(this, HEALTH_ID, new Intent(this, MainActivity.class),
+                    PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+            manager.notify(HEALTH_ID, new Notification.Builder(this, HEALTH_CHANNEL)
+                    .setSmallIcon(android.R.drawable.stat_notify_error).setContentTitle("Asistente: WhatsApp")
+                    .setContentText(notice).setStyle(new Notification.BigTextStyle().bigText(notice))
+                    .setContentIntent(open).setOnlyAlertOnce(true).build());
+        }
+        return true;
+    }
+    private Intent termuxIntent() {
+        Intent intent = new Intent(TermuxCommand.ACTION).setClassName(TermuxCommand.PACKAGE, TermuxCommand.SERVICE);
+        for (java.util.Map.Entry<String, Object> extra : TermuxCommand.extras().entrySet()) {
+            Object value = extra.getValue();
+            if (value instanceof String[]) intent.putExtra(extra.getKey(), (String[]) value);
+            else if (value instanceof Boolean) intent.putExtra(extra.getKey(), ((Boolean) value).booleanValue());
+            else intent.putExtra(extra.getKey(), (String) value);
+        }
+        return intent;
+    }
+    private void restartTermux() {
+        if (closed || !app.settings.bridgeEnabled()) return;
+        Intent intent = termuxIntent();
+        if (Build.VERSION.SDK_INT >= 26) {
+            try {
+                if (startForegroundService(intent) != null) {
+                    app.bridgeLog("Salud: reanimación solicitada a Termux"); return;
+                }
+                app.bridgeLog("Salud: servicio Termux no encontrado; intentando respaldo");
+            } catch (SecurityException | IllegalStateException e) {
+                app.bridgeLog("Salud: inicio en primer plano rechazado (" + e.getClass().getSimpleName() + "); intentando respaldo");
+            }
+        }
+        try {
+            boolean accepted = startService(intent) != null;
+            app.bridgeLog(accepted ? "Salud: reanimación solicitada a Termux por respaldo"
+                    : "Salud: servicio Termux no encontrado");
+        } catch (SecurityException | IllegalStateException e) {
+            app.bridgeLog("Salud: reanimación rechazada (" + e.getClass().getSimpleName() + ")");
+        }
     }
     private void serve() {
         try (ServerSocket socket = new ServerSocket()) {
@@ -134,7 +175,7 @@ public final class BridgeService extends Service {
                 incomingAudio = request.audio != null;
                 if (request.backup) { deliverBackup(client); return; }
                 if (request.pending || request.confirm) {
-                    if (request.pending) { health.poll(request.whatsapp, System.currentTimeMillis()); checkHealth(); }
+                    if (request.pending) { health.poll(request.whatsapp); checkHealth(); }
                     if (!app.settings.bridgeEnabled() || arrivalToken != app.core.cancellationToken()) throw new BridgeHttp.Failure(503);
                     if (request.confirm) {
                         app.db.acknowledge(request.ids, System.currentTimeMillis());
@@ -237,7 +278,7 @@ public final class BridgeService extends Service {
         closed = true; close(server);
         app.stop();
         for (Socket client : clients) close(client);
-        listener.shutdownNow(); handlers.shutdownNow(); deadlines.shutdownNow(); voice.close();
+        listener.shutdownNow(); handlers.shutdownNow(); deadlines.shutdownNow(); healthChecks.shutdownNow(); voice.close();
         getSystemService(NotificationManager.class).cancel(HEALTH_ID);
         app.bridgeLog("Aceptado: servicio detenido");
         stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy();
