@@ -118,6 +118,9 @@ public final class AssistantDb extends SQLiteOpenHelper implements dev.poco.asis
     @Override public synchronized org.json.JSONArray lease(long now, boolean quiet) throws Exception {
         SQLiteDatabase db = getWritableDatabase(); db.beginTransaction();
         try {
+            // Keep the id for deduplication, but do not deliver yesterday's or afternoon's greeting.
+            long cutoff = dev.poco.asistente.core.Nudges.morningExpiryCutoff(now, dev.poco.asistente.core.Reminders.ZONE);
+            db.execSQL("UPDATE salientes SET estado='vencido',texto='' WHERE estado='pendiente' AND tipo='manana' AND creado<=?", new Object[]{cutoff});
             org.json.JSONArray items = new org.json.JSONArray();
             try (Cursor c = db.rawQuery("SELECT id,texto FROM salientes WHERE estado='pendiente' AND (ofrecido=0 OR ofrecido<=?)" + (quiet ? " AND nocturno=1" : "") + " ORDER BY creado,id LIMIT 20", new String[]{Long.toString(now - 600000)})) {
                 int bytes = 2;

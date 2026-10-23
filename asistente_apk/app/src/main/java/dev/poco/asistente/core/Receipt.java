@@ -12,6 +12,9 @@ public final class Receipt {
 
     /** ₲ 25.000, $ 3.500, US$ 10,50: the guaraní has no cents in use, the others show them only when there are. */
     public static String money(long cents, String currency) {
+        return money(java.math.BigInteger.valueOf(cents), currency);
+    }
+    public static String money(java.math.BigInteger cents, String currency) {
         String symbol;
         switch (currency) {
             case "PYG": symbol = "₲"; break;
@@ -21,8 +24,8 @@ public final class Receipt {
             case "BRL": symbol = "R$"; break;
             default: symbol = currency;
         }
-        BigDecimal value = BigDecimal.valueOf(Math.abs(cents), 2);
-        boolean decimals = !currency.equals("PYG") && cents % 100 != 0;
+        BigDecimal value = new BigDecimal(cents.abs(), 2);
+        boolean decimals = !currency.equals("PYG") && cents.remainder(java.math.BigInteger.valueOf(100)).signum() != 0;
         value = value.setScale(decimals ? 2 : 0, RoundingMode.HALF_UP);
         String plain = value.toPlainString();
         String whole = decimals ? plain.substring(0, plain.indexOf('.')) : plain;
@@ -32,7 +35,7 @@ public final class Receipt {
             grouped.append(whole.charAt(i));
         }
         if (decimals) grouped.append(',').append(plain.substring(plain.indexOf('.') + 1));
-        return (cents < 0 ? "-" : "") + symbol + " " + grouped;
+        return (cents.signum() < 0 ? "-" : "") + symbol + " " + grouped;
     }
 
     static String day(String date, LocalDate today) {

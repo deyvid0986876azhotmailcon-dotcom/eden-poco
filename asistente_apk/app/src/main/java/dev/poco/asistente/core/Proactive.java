@@ -92,7 +92,7 @@ public final class Proactive {
         if (now.toLocalTime().isBefore(Reminders.time(settings.morningTime())) || now.getHour() >= 12) return;
         String id = "m_" + now.toLocalDate();
         if (store.queued(id) || cancelled.getAsBoolean()) return;
-        String text = Nudges.morning(store.rows(), store.reminders(), now.toLocalDate(), clock.getZone(), settings.currency());
+        String text = Memory.clip(Nudges.morning(store.rows(), store.reminders(), now.toLocalDate(), clock.getZone(), settings.currency()), 12000);
         core.proactiveAction(ticket, () -> { store.enqueue(id, text, "manana", false, millis, null, 0, null); return null; }, null);
     }
     /** Each big expense is mentioned once (its id); the gym at most every three days, from 18:00. */
