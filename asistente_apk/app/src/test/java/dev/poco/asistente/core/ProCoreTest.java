@@ -8,6 +8,30 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class ProCoreTest {
+    @Test public void naturalClosingsStopChatLocallyAndOtherMentionsKeepChatting() {
+        AtomicInteger cloudCalls = new AtomicInteger(), proCalls = new AtomicInteger();
+        AssistantCore c = core((k,m,b) -> { cloudCalls.incrementAndGet(); return text("Gratis"); },
+                (t,p,m,x) -> { proCalls.incrementAndGet(); return "Te escucho"; }, PhoneTools.UNAVAILABLE);
+        for (String closing : new String[]{"listo", "fin de la charla", "chau", "listo gracias",
+                "listo, ya está", "bueno ya está", "chau nos vemos", "nos vemos", "hablamos después",
+                "gracias por la charla", "terminamos", "salir del modo charla",
+                "Listo, ya tengo una opinión, gracias", "  ¡LISTO,   GRACIAS!  "}) {
+            c.receive("charlemos");
+            int cloudBefore = cloudCalls.get(), proBefore = proCalls.get();
+            assertTrue(closing, c.receive(closing).contains("dejamos la charla"));
+            assertEquals(closing, cloudBefore, cloudCalls.get());
+            assertEquals(closing, proBefore, proCalls.get());
+            assertEquals(closing, "Gratis", c.receive("Hola"));
+        }
+        for (String continuing : new String[]{"no estoy listo para hablar de eso", "me dijo chau y se fue",
+                "¿estás lista?", "listo para hablar", "chau es una palabra", "no terminamos",
+                "listo, pero quiero seguir hablando", "gracias por la charla pero quiero seguir hablando",
+                "nos vemos mañana para hablar de eso"}) {
+            c.receive("charlemos");
+            assertEquals(continuing, "Te escucho", c.receive(continuing));
+            assertEquals(continuing, "Te escucho", c.receive("Hola"));
+        }
+    }
     private static final class Settings implements AssistantCore.Settings {
         volatile boolean pro = true, phone = true;
         public String apiKey() { return "abcdefghijklmnopqrstuv"; }

@@ -19,9 +19,19 @@ public final class ChatMode {
             if (!enabled) return "Encendé «Usar mi Google AI Pro» en Ajustes para charlar así.";
             on = true; last = elapsed.getAsLong(); return "Dale, charlemos. ¿Qué tenés en la cabeza?";
         }
-        if (normalized.equals("listo") || normalized.equals("fin de la charla") || normalized.equals("chau")) {
+        if (isClosing(normalized)) {
             clear(); return "Dale, dejamos la charla por acá.";
         }
         return null;
+    }
+
+    private static boolean isClosing(String normalized) {
+        // Whole messages only, up to seven words (including David's reported closing).
+        // Fixed phrases and courtesy suffixes avoid swallowing "listo para hablar" or requests.
+        String words = normalized.replaceAll("[\\p{P}]+", " ").trim().replaceAll("\\s+", " ");
+        if (words.isEmpty() || words.split(" ").length > 7) return false;
+        return words.matches("(?:bueno )?(?:listo(?: ya esta| ya tengo una opinion)?|ya esta|"
+                + "fin de la charla|chau|nos vemos|hablamos despues|gracias por la charla|"
+                + "terminamos|salir del modo charla)(?: gracias)?(?: nos vemos| hablamos despues)?");
     }
 }
