@@ -33,6 +33,20 @@ public class DocumentsTest {
         assertThrows(IllegalArgumentException.class, () -> Documents.requireUserUrl("https://example.com/a", "https://example.com/abc"));
         assertThrows(IllegalArgumentException.class, () -> Documents.requireUserUrl("https://example.com/a", "https://example.com/a?secret=1"));
     }
+    @Test public void blocksRecognizeTitlesBulletsAndAmountRows() {
+        java.util.List<Documents.Block> b = Documents.blocks("# Gastos\n- Comida: ₲ 25.000\nTransporte — ₲ 10.000\n- pan y leche\n\nTotal: US$ 10,50\nHora: 15:00\n#");
+        assertEquals('h', b.get(0).kind); assertEquals("Gastos", b.get(0).text);
+        assertEquals('r', b.get(1).kind); assertEquals("Comida", b.get(1).text); assertEquals("₲ 25.000", b.get(1).amount);
+        assertEquals('r', b.get(2).kind); assertEquals("₲ 10.000", b.get(2).amount);
+        assertEquals('b', b.get(3).kind); assertEquals("pan y leche", b.get(3).text);
+        assertEquals(' ', b.get(4).kind);
+        assertEquals("US$ 10,50", b.get(5).amount);
+        assertEquals('p', b.get(6).kind); // a time is not an amount
+        assertEquals('p', b.get(7).kind);
+    }
+    @Test public void wrapKeepsEveryWord() {
+        assertEquals(java.util.Arrays.asList("uno dos", "tres"), Documents.wrap("uno dos tres", s -> s.length(), 7));
+    }
     @Test public void pdfPageLimit() {
         assertThrows(IllegalArgumentException.class, () -> Documents.pages("x\n".repeat(101), s -> s.length(), 10, 1));
     }

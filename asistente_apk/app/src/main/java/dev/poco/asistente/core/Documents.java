@@ -73,6 +73,33 @@ public final class Documents {
         if (name.isEmpty()) name = "Documento";
         return name.substring(0, Math.min(100, name.length())) + ".pdf";
     }
+    /** One line of the PDF body: 'h' section title (# ...), 'b' bullet (- ...), 'r' row «concept: amount», 'p' text, ' ' blank. */
+    public static final class Block {
+        public final char kind;
+        public final String text, amount;
+        Block(char kind, String text, String amount) { this.kind = kind; this.text = text; this.amount = amount; }
+    }
+    private static final java.util.regex.Pattern ROW = java.util.regex.Pattern.compile(
+            "(.+?)\\s*[:—–]\\s*(-?\\s?(?:₲|US\\$|R\\$|\\$|€|Gs\\.?)\\s?-?[0-9][0-9.]*(?:,[0-9]+)?)");
+    public static List<Block> blocks(String text) {
+        List<Block> out = new ArrayList<>();
+        for (String raw : text.replace("\r\n", "\n").replace('\r', '\n').replace('\t', ' ').split("\n", -1)) {
+            String line = raw.trim();
+            if (line.isEmpty()) { out.add(new Block(' ', "", null)); continue; }
+            String heading = line.replaceFirst("^#+\\s*", "");
+            if (line.startsWith("#") && !heading.isEmpty()) { out.add(new Block('h', heading, null)); continue; }
+            boolean bullet = line.matches("[-*•]\\s+.+");
+            if (bullet) line = line.replaceFirst("^[-*•]\\s+", "");
+            java.util.regex.Matcher row = ROW.matcher(line);
+            if (row.matches()) out.add(new Block('r', row.group(1), row.group(2)));
+            else out.add(new Block(bullet ? 'b' : 'p', line, null));
+        }
+        return out;
+    }
+    /** Word wrap of one paragraph to a width; never loses characters. */
+    public static List<String> wrap(String text, Width width, float maxWidth) {
+        return pages(text.replace('\n', ' '), width, maxWidth, Integer.MAX_VALUE).get(0);
+    }
     public interface Width { float measure(String value); }
     public static List<List<String>> pages(String text, Width width, float maxWidth, int lines) {
         if (text == null || text.length() > 100000 || lines < 1 || maxWidth <= 0) throw new IllegalArgumentException("Contenido demasiado largo o paginado inválido.");

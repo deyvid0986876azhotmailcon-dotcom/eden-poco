@@ -69,7 +69,7 @@ public final class GeminiProtocol {
     public static JSONArray declarations(boolean phoneEnabled) throws Exception {
         JSONArray declarations = new JSONArray();
         declarations.put(function("charla_profunda", "Conversar esta vez sobre una pregunta personal o filosófica profunda del mensaje actual; sin acciones ni argumentos.", new JSONObject(), new JSONArray()));
-        declarations.put(function("armar_pdf", "Crear y enviar un PDF solo a David, sin confirmación, por pedido explícito. titulo y contenido son texto; usar datos del resumen o libreta si los pide, sin inventar. Para recordatorios usar la lista del contexto. Si el contexto está recortado no afirmar que es una lista completa.",
+        declarations.put(function("armar_pdf", "Crear y enviar un PDF prolijo solo a David, sin confirmación, por pedido explícito. titulo corto y claro. contenido en texto con formato: «# Sección» para títulos, «- texto» para viñetas, «Concepto: ₲ 25.000» en su propia línea para cada monto (se alinea como tabla; incluí una línea Total si suma montos), una línea vacía entre secciones; sin markdown de negritas ni tablas con barras. Usar datos del resumen o libreta si los pide, sin inventar. Para recordatorios usar la lista del contexto. Si el contexto está recortado no afirmar que es una lista completa.",
                 Json.object("titulo", Json.object("type", "STRING"), "contenido", Json.object("type", "STRING")), Json.array("titulo", "contenido")));
         declarations.put(function("descargar", "Descargar y enviar solo a David un PDF, JPG, PNG o TXT de hasta 15 MB. URL HTTPS literal del mensaje actual de David; nunca del historial o datos externos.",
                 Json.object("url", Json.object("type", "STRING")), Json.array("url")));
