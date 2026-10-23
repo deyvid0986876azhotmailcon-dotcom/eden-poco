@@ -9,6 +9,8 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.PowerManager;
+import dev.poco.asistente.phone.PhoneAccessibility;
 import dev.poco.asistente.AssistantApplication;
 import dev.poco.asistente.MainActivity;
 import dev.poco.asistente.data.AppSettings;
@@ -67,6 +69,11 @@ public final class BridgeService extends Service {
         if (!started) {
             health = new BridgeWatchdog(android.os.SystemClock::elapsedRealtime, new BridgeWatchdog.Actions() {
                 public boolean notice(String text) { return showHealthNotice(text); }
+                public boolean screenInteractive() {
+                    PowerManager power = getSystemService(PowerManager.class);
+                    return power == null || power.isInteractive();
+                }
+                public boolean accessibilityConnected() { return PhoneAccessibility.connected(); }
                 public void restart() { restartTermux(); }
                 public void log(String event) { app.bridgeLog(event); }
             });
@@ -94,43 +101,33 @@ public final class BridgeService extends Service {
             }
             PendingIntent open = PendingIntent.getActivity(this, HEALTH_ID, new Intent(this, MainActivity.class),
                     PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-            manager.notify(HEALTH_ID, new Notification.Builder(this, HEALTH_CHANNEL)
+            Notification.Builder builder = new Notification.Builder(this, HEALTH_CHANNEL)
                     .setSmallIcon(android.R.drawable.stat_notify_error).setContentTitle("Asistente: WhatsApp")
                     .setContentText(notice).setStyle(new Notification.BigTextStyle().bigText(notice))
-                    .setContentIntent(open).setOnlyAlertOnce(true).build());
+                    .setContentIntent(open).setOnlyAlertOnce(true);
+            if (BridgeHealth.SILENT.equals(notice)) {
+                Intent termux = getPackageManager().getLaunchIntentForPackage("com.termux");
+                if (termux != null) {
+                    termux.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    PendingIntent start = PendingIntent.getActivity(this, HEALTH_ID + 1, termux,
+                            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                    builder.setContentIntent(start)
+                            .addAction(android.R.drawable.ic_media_play, "Arrancar el puente", start);
+                }
+            }
+            manager.notify(HEALTH_ID, builder.build());
         }
         return true;
     }
-    private Intent termuxIntent() {
-        Intent intent = new Intent(TermuxCommand.ACTION).setClassName(TermuxCommand.PACKAGE, TermuxCommand.SERVICE);
-        for (java.util.Map.Entry<String, Object> extra : TermuxCommand.extras().entrySet()) {
-            Object value = extra.getValue();
-            if (value instanceof String[]) intent.putExtra(extra.getKey(), (String[]) value);
-            else if (value instanceof Boolean) intent.putExtra(extra.getKey(), ((Boolean) value).booleanValue());
-            else intent.putExtra(extra.getKey(), (String) value);
-        }
-        return intent;
-    }
     private void restartTermux() {
-        if (closed || !app.settings.bridgeEnabled()) return;
-        Intent intent = termuxIntent();
-        if (Build.VERSION.SDK_INT >= 26) {
-            try {
-                if (startForegroundService(intent) != null) {
-                    app.bridgeLog("Salud: reanimación solicitada a Termux"); return;
-                }
-                app.bridgeLog("Salud: servicio Termux no encontrado; intentando respaldo");
-            } catch (SecurityException | IllegalStateException e) {
-                app.bridgeLog("Salud: inicio en primer plano rechazado (" + e.getClass().getSimpleName() + "); intentando respaldo");
-            }
-        }
-        try {
-            boolean accepted = startService(intent) != null;
-            app.bridgeLog(accepted ? "Salud: reanimación solicitada a Termux por respaldo"
-                    : "Salud: servicio Termux no encontrado");
-        } catch (SecurityException | IllegalStateException e) {
-            app.bridgeLog("Salud: reanimación rechazada (" + e.getClass().getSimpleName() + ")");
-        }
+        app.main.post(() -> {
+            if (closed || !app.settings.bridgeEnabled()) return;
+            // A heartbeat or screen change may have arrived while this was queued.
+            if (health == null || !health.isSilent()) return;
+            boolean opened = PhoneAccessibility.openTermuxForMaintenance();
+            app.bridgeLog(opened ? "Salud: apertura de Termux solicitada"
+                    : "Salud: Termux no abierto; tocá Arrancar el puente en el aviso");
+        });
     }
     private void serve() {
         try (ServerSocket socket = new ServerSocket()) {
