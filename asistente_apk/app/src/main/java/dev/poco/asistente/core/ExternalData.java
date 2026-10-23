@@ -12,14 +12,15 @@ public final class ExternalData {
     public static String history(String text) { return isExternal(text) ? "Mostré datos externos; su contenido no se guarda en la conversación." : text; }
     /** Live keeps its own context. Once it has seen external data, only speech is allowed until a new call. */
     public static final class Guard {
+        public final VoiceConfirmation voice = new VoiceConfirmation();
         private boolean exposed;
         private volatile boolean closed;
         private String userText = "";
         public synchronized boolean allowsTools() { return !exposed; }
         // Must not wait for a read/network operation holding this guard when the user hangs up.
-        public void close() { closed = true; }
+        public void close() { closed = true; voice.cancel(); }
         public boolean closed() { return closed; }
-        public synchronized void expose() { exposed = true; }
+        public synchronized void expose() { exposed = true; voice.cancel(); }
         public synchronized void userSpeech(String text) { userText = Memory.clip(userText + " " + text, 4000); }
         public synchronized void clearSpeech() { userText = ""; }
         public synchronized String userText() { return userText; }

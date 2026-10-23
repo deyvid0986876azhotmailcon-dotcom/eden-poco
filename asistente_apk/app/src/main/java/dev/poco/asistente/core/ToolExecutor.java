@@ -23,7 +23,12 @@ public final class ToolExecutor {
         final String code;
         final Store.Row row;
         final long expires;
-        Pending(String code, Store.Row row, long expires) { this.code = code; this.row = row; this.expires = expires; }
+        final String tool, description;
+        final JSONObject args;
+        Pending(String code, Store.Row row, long expires) { this(code, row, expires, null, null, null); }
+        Pending(String code, Store.Row row, long expires, String tool, JSONObject args, String description) {
+            this.code = code; this.row = row; this.expires = expires; this.tool = tool; this.args = args; this.description = description;
+        }
     }
     public ToolExecutor(Store store, Clock clock) { this(store, clock, () -> System.nanoTime() / 1_000_000L); }
     public ToolExecutor(Store store, Clock clock, LongSupplier elapsedMillis) {
@@ -42,6 +47,7 @@ public final class ToolExecutor {
             if (tool.equals("buscar_en_internet")) throw new IllegalArgumentException("La búsqueda necesita el canal aislado.");
             String previous = store.receipt(operationId);
             if (previous != null) return previous;
+            if (PhoneTools.confirmation(tool)) return proposePhone(actor, tool, args, null);
             JSONObject checked = beginPhone(operationId, tool, args);
             try {
                 String result = phone.execute(tool, checked);
@@ -76,10 +82,8 @@ public final class ToolExecutor {
                     || (tool.equals("cancelar_recordatorio") && !row.kind.equals("recordatorio")))
                 throw new IllegalArgumentException("El ID no corresponde a esa herramienta.");
             // New proposal replaces the previous one for this actor. Snapshot/version binds its contents.
-            byte[] bytes = new byte[8]; random.nextBytes(bytes);
-            StringBuilder code = new StringBuilder();
-            for (byte b : bytes) code.append(String.format(java.util.Locale.ROOT, "%02X", b & 255));
-            pending.put(actor, new Pending(code.toString(), row, elapsedMillis.getAsLong() + TTL));
+            String code = code();
+            pending.put(actor, new Pending(code, row, elapsedMillis.getAsLong() + TTL));
             // the code binds this exact deletion; the rest reads like a message, without record IDs
             String what = row.kind.equals("memoria") ? "me olvido de «" + row.data.optString("texto") + "»"
                     : row.kind.equals("recordatorio") ? "cancelo el recordatorio «" + row.data.optString("texto") + "»"
@@ -124,9 +128,17 @@ public final class ToolExecutor {
         String receipt = store.receipt(operationId);
         if (receipt != null) return receipt;
         Pending p = pending.get(actor);
-        if (p == null || !p.code.equals(code)) return "Ese código no corresponde a un borrado pendiente tuyo.";
+        if (p == null || !p.code.equals(code)) return "Ese código no corresponde a una operación pendiente tuya.";
         pending.remove(actor); // consume even if expired, changed, or storage fails; never replay
-        if (elapsedMillis.getAsLong() >= p.expires) return "El código venció. Pedí el borrado otra vez.";
+        if (elapsedMillis.getAsLong() >= p.expires) return "El código venció. Pedí la operación otra vez.";
+        if (p.tool != null) {
+            requirePhone();
+            store.beginAction(operationId, p.tool, clock.millis());
+            try { return finishPhone(operationId, p.tool, phone.execute(p.tool, Json.copy(p.args))); }
+            catch (Exception e) {
+                store.finishAction(operationId, "No pude completar " + p.tool + ". Revisá antes de repetirlo."); throw e;
+            }
+        }
         Store.Row current = store.find(p.row.id);
         if (current == null || current.version != p.row.version)
             return "El registro cambió o ya no existe. Pedí el borrado otra vez.";
@@ -136,6 +148,38 @@ public final class ToolExecutor {
         return store.mutate(operationId, p.row, null, done, clock.millis());
     }
     public synchronized void cancel() { pending.clear(); }
+    private String code() {
+        byte[] bytes = new byte[8]; random.nextBytes(bytes); StringBuilder out = new StringBuilder();
+        for (byte b : bytes) out.append(String.format(java.util.Locale.ROOT, "%02X", b & 255));
+        return out.toString();
+    }
+    public synchronized String proposePhone(String actor, String tool, JSONObject args, VoiceConfirmation voice) throws Exception {
+        pending.remove(actor);
+        if (voice != null) voice.cancel();
+        return stagePhone(actor, tool, preparePhone(tool, args), voice);
+    }
+    /** Provider reads run outside AssistantCore's action gate so PARAR can invalidate them. */
+    public JSONObject preparePhone(String tool, JSONObject args) throws Exception {
+        requirePhone();
+        if (!PhoneTools.confirmation(tool)) throw new IllegalArgumentException("No se confirma esa herramienta por voz; pagos y compras nunca.");
+        return Json.copy(phone.prepare(tool, PhoneTools.validate(tool, args)));
+    }
+    public synchronized String stagePhone(String actor, String tool, JSONObject snapshot, VoiceConfirmation voice) throws Exception {
+        requirePhone();
+        if (!PhoneTools.confirmation(tool)) throw new IllegalArgumentException("No se confirma esa herramienta por voz; pagos y compras nunca.");
+        pending.entrySet().removeIf(entry -> elapsedMillis.getAsLong() >= entry.getValue().expires);
+        pending.remove(actor); // failed replacement must not leave a different action armed
+        if (voice != null) voice.cancel();
+        JSONObject prepared = Json.copy(snapshot);
+        String description = PhoneTools.describe(tool, prepared), code = code();
+        pending.put(actor, new Pending(code, null, elapsedMillis.getAsLong() + TTL, tool, prepared, description));
+        if (voice != null) {
+            voice.propose(code, description);
+            return "Leé exactamente esta acción en voz alta, y luego pedí que diga sí, confirmo: " + description;
+        }
+        return description + "\nPara confirmar, respondé:\nSÍ " + code + "\n(vale 5 minutos; PARAR cancela)";
+    }
+    public synchronized void cancelActor(String actor) { pending.remove(actor); }
     public void requirePhone() {
         if (!phoneEnabled.getAsBoolean()) throw new IllegalArgumentException("El control del teléfono está apagado. Encendelo desde Ajustes de la app.");
     }

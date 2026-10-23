@@ -78,6 +78,7 @@ public final class AssistantCore {
             try {
                 if ("buscar_en_internet".equals(tool)) SearchProtocol.requireUserQuery(Validation.string(args, "consulta", 300), guard.userText());
                 if (PhoneTools.external(tool)) guard.expose();
+                if (PhoneTools.confirmation(tool)) return phoneProposal(guard.voice.actor, tool, args, guard.voice, ticket, guard::closed);
                 return dispatch("llamada", "llamada:" + UUID.randomUUID(), tool, args, ticket, guard::closed, new RequestBudget(elapsedMillis));
             }
             catch (IllegalArgumentException e) { return e.getMessage(); }
@@ -85,6 +86,24 @@ public final class AssistantCore {
         }
     }
     public long cancellationToken() { return generation.get(); }
+    /** Only Live's input transcription path calls this; no function declaration exposes confirmation. */
+    public String callSpeech(ExternalData.Guard guard, String text, boolean finished, boolean drained, long ticket) {
+        synchronized (guard) {
+            synchronized (actionGate) {
+                if (ticket != generation.get() || guard.closed() || !guard.allowsTools()) { guard.voice.cancel(); return null; }
+                String code = guard.voice.input(text, finished, drained);
+                if (code == null) return null;
+                try { return executor.confirm(guard.voice.actor, "voz-confirmacion:" + UUID.randomUUID(), code); }
+                catch (IllegalArgumentException e) { return e.getMessage(); }
+                catch (Exception e) { return "No pude completar la acción. Revisá antes de repetirla."; }
+            }
+        }
+    }
+    public void closeCall(ExternalData.Guard guard) {
+        guard.close();
+        // Hanging up is a UI action; never wait for an in-flight provider/Android operation.
+        new Thread(() -> { synchronized (actionGate) { executor.cancelActor(guard.voice.actor); } }, "voice-confirmation-cleanup").start();
+    }
     public RequestBudget newRequestBudget() { return new RequestBudget(elapsedMillis); }
     /** The trusted inbox calls this inside the shared queue, then feeds the literal text to receive. */
     public String transcribe(AudioInput audio, long ticket) throws Exception {
@@ -304,8 +323,22 @@ public final class AssistantCore {
         } catch (Exception ignored) { }
         return ticket != generation.get() ? "Pedido cancelado." : answer + "\n" + ProProtocol.FALLBACK;
     }
+    /** Contacts/calendar lookups run outside the gate (PARAR must not wait on a provider); staging rechecks the ticket. */
+    private String phoneProposal(String actor, String tool, org.json.JSONObject args, VoiceConfirmation voice, long ticket,
+            java.util.function.BooleanSupplier closed) throws Exception {
+        synchronized (actionGate) {
+            if (ticket != generation.get() || closed.getAsBoolean()) return "Pedido cancelado.";
+            executor.requirePhone();
+        }
+        org.json.JSONObject snapshot = executor.preparePhone(tool, args);
+        synchronized (actionGate) {
+            if (ticket != generation.get() || closed.getAsBoolean()) return "Pedido cancelado.";
+            return executor.stagePhone(actor, tool, snapshot, voice);
+        }
+    }
     private String dispatch(String actor, String operation, String tool, org.json.JSONObject args, long ticket,
             java.util.function.BooleanSupplier closed, RequestBudget budget) throws Exception {
+        if (PhoneTools.confirmation(tool)) return phoneProposal(actor, tool, args, null, ticket, closed);
         org.json.JSONObject checked;
         synchronized (actionGate) {
             if (ticket != generation.get() || closed.getAsBoolean()) return "Pedido cancelado.";

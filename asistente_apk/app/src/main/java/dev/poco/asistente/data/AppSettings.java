@@ -51,6 +51,11 @@ public final class AppSettings implements dev.poco.asistente.core.Proactive.Sett
         }
     }
     @Override public boolean phoneEnabled() { return prefs.getBoolean("phone_enabled", false); }
+    public String phoneBotNumber() { return prefs.getString("phone_bot_number", ""); }
+    public void savePhoneBotNumber(String value) {
+        String number = dev.poco.asistente.core.ContactPolicy.mobile(value);
+        if (!prefs.edit().putString("phone_bot_number", number).commit()) throw new IllegalStateException("No pude guardar el número del bot.");
+    }
     @Override public void disablePhone() { setPhoneEnabled(false); }
     public void setPhoneEnabled(boolean enabled) {
         // Commit before returning so a process restart cannot restore control after PARAR.
