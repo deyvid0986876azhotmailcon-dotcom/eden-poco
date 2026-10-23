@@ -38,6 +38,7 @@ public final class AssistantApplication extends Application {
         db = new AssistantDb(this);
         core = new AssistantCore(db, settings, new GeminiClient(), Clock.system(dev.poco.asistente.core.Reminders.ZONE), SystemClock::elapsedRealtime,
                 new dev.poco.asistente.phone.AndroidPhone(this), new dev.poco.asistente.net.ProClient(settings::bridgeToken));
+        core.setDocuments(new dev.poco.asistente.phone.AndroidDocuments());
         proactive = new dev.poco.asistente.core.Proactive(db, settings, new GeminiClient(), Clock.system(dev.poco.asistente.core.Reminders.ZONE), core);
         proactive.onReminderCall = text -> main.post(() -> dev.poco.asistente.call.CallLauncher.ring(this, text));
         importBankReader();

@@ -346,6 +346,21 @@ En Xiaomi/HyperOS hay que permitir "Inicio automático" a Termux y a Asistente, 
 
 ## Recordatorios y resúmenes salientes
 
+La cola también acepta un documento por lote con
+`{"id":"doc_UUID","documento":{"nombre":"Gastos.pdf","mime":"application/pdf","base64":"..."}}`.
+Actualizar `documentos.cjs` junto a `pendientes.cjs`. El puente valida nombre sin
+rutas, extensión, MIME (PDF/JPEG/PNG/TXT), base64 canónico y hasta 15 MB decodificados;
+el límite HTTP es 20 MB más 64 KiB. Usa Baileys `document` y siempre el chat del dueño,
+con el mismo registro de entregas y ACK que los textos. Nunca acepta un destinatario.
+La app migra SQLite de 3 a 4; guarda metadatos pequeños en SQLite y archivos privados
+en `files/documentos`, evitando meter 15 MB en un CursorWindow. Conserva los archivos
+después del envío. El recibo inicial indica que quedó listo, no afirma una entrega
+que WhatsApp todavía no confirmó. No hay limpieza automática de documentos.
+El ACK actualiza el registro de acciones a «Te mandé…». Si se restaura solo SQLite
+y falta un archivo pendiente, ese envío se cancela sin bloquear los recordatorios.
+Validación pendiente en Android: migración, PDF de varias páginas, descarga máxima,
+redirección HTTP rechazada, PARAR durante descarga y entrega tras reiniciar.
+
 Actualizar también `pendientes.cjs` junto a `index.cjs`, `lib.cjs` y `respaldo.cjs`.
 No cambia `config.json` ni se agregan dependencias. Cada 60 s se consulta
 `GET /pendientes` con el Bearer actual; después de enviar se confirma con

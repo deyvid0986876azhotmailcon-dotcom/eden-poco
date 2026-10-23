@@ -122,6 +122,16 @@ Datos históricos aportados por el proyecto, no vueltos a verificar por Codex en
 |---|---|
 | Alarmas y temporizadores, leer notificaciones, abrir apps y música, consultar la agenda, buscar en internet y resumir | Ninguna (riesgo bajo) |
 | Descargar lo que pida a una carpeta propia del asistente, armar PDFs y mandarlos por WhatsApp | Ninguna, solo a David |
+
+Implementado en la rama `pdf`: `armar_pdf(titulo, contenido)` genera texto paginado con
+título y fecha; `descargar(url)` exige una URL HTTPS literal del mensaje actual,
+valida cada redirección y limita la descarga a 45 segundos y 15 MB. Solo PDF, JPEG,
+PNG y TXT. Se conservan en `files/documentos`, privados de la app, y se ponen en
+la cola del puente para David; no se aceptan destinos ni rutas del modelo.
+El recibo dice «listo para enviar» hasta la entrega; PARAR interrumpe la descarga
+y evita encolar el resultado tardío. Los archivos descargados no se leen como
+instrucciones ni se mandan al modelo. El armado de texto y paginado tiene pruebas
+JVM; renderizado Android y entrega real requieren prueba en teléfono.
 | Mandar mensajes a otros, llamar a contactos, agendar en el calendario, cambiar ajustes (wifi, bluetooth, no molestar, brillo) | Por WhatsApp o app: SÍ + código. En la llamada: ella lee en voz alta exactamente qué va a hacer y David dice «sí, confirmo» (lo pedido en esa misma llamada) |
 | Pagos y compras | Siempre SÍ + código, también en la llamada |
 
