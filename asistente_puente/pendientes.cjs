@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { candidate } = require('./lib.cjs');
+const { documentBody, MAX_RESPONSE } = require('./documentos.cjs');
 const ID = /^[A-Za-z0-9_-]{1,120}$/;
 
 function durableAppend(filename, line) {
@@ -64,7 +65,7 @@ async function request(config, endpoint, body, fetcher = fetch, whatsapp) {
     while (true) {
       const { value, done } = await reader.read(); if (done) break;
       size += value.length;
-      if (size > 256 * 1024) { await reader.cancel(); throw new Error('Respuesta demasiado grande'); }
+      if (size > (endpoint === '/pendientes' ? MAX_RESPONSE : 256 * 1024)) { await reader.cancel(); throw new Error('Respuesta demasiado grande'); }
       chunks.push(Buffer.from(value));
     }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -94,9 +95,17 @@ class PendingPoller {
     if (!['conectado', 'desconectado', 'desvinculado'].includes(status)) throw new Error('Estado inválido');
     const items = await request(this.config, '/pendientes', undefined, this.fetcher, status);
     if (!current()) return;
-    if (!Array.isArray(items) || items.length > 20 || items.some(item => !item || Object.keys(item).sort().join(',') !== 'id,texto'
-        || typeof item.id !== 'string' || !ID.test(item.id) || typeof item.texto !== 'string' || !item.texto.trim() || item.texto.length > 60000)
-        || new Set(items.map(item => item.id)).size !== items.length) throw new Error('Salientes inválidos');
+    if (!Array.isArray(items) || items.length > 20 || items.some(item => !item || typeof item.id !== 'string' || !ID.test(item.id))
+        || new Set(items.map(item => item.id)).size !== items.length) throw new Error('Salientes invalidos');
+    const bodies = items.map(item => {
+      if (Object.hasOwn(item, 'documento')) {
+        if (items.length !== 1) throw new Error('Un documento por lote');
+        return documentBody(item);
+      }
+      if (Object.keys(item).sort().join(',') !== 'id,texto' || typeof item.texto !== 'string' || !item.texto.trim() || item.texto.length > 60000)
+        throw new Error('Saliente invalido');
+      return { text: item.texto };
+    });
     const sent = [];
     for (const item of items) {
       if (!current()) return;
@@ -108,7 +117,7 @@ class PendingPoller {
       if (state !== 'sent') {
         this.ledger.record(item.id, 'sending');
         try {
-          await session.socket.sendMessage(this.chat.chat, { text: item.texto });
+          await session.socket.sendMessage(this.chat.chat, bodies[items.indexOf(item)]);
           this.ledger.record(item.id, 'sent');
           this.log(`Salientes: enviado ${item.id}`);
         } catch {

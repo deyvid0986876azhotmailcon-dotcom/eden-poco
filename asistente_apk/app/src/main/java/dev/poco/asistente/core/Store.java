@@ -26,6 +26,9 @@ public interface Store {
     default List<Row> reminders() throws Exception { return java.util.Collections.emptyList(); }
     default List<Memory.Exchange> conversation() throws Exception { return java.util.Collections.emptyList(); }
     default void exchange(String id, String user, String model) throws Exception {}
+    default String enqueueDocument(String operation, Documents.Prepared document, long time) throws Exception {
+        throw new IllegalStateException("Envío de documentos no disponible.");
+    }
     default void clearConversation() throws Exception {}
 
 }

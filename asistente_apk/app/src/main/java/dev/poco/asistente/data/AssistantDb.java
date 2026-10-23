@@ -13,7 +13,11 @@ import org.json.JSONObject;
 
 /** Validated typed records share one table; payload is JSON, never contains credentials. */
 public final class AssistantDb extends SQLiteOpenHelper implements dev.poco.asistente.core.Proactive.Port {
-    public AssistantDb(Context context) { super(context, "asistente.db", null, 3); }
+    private final java.io.File documentDir;
+    public AssistantDb(Context context) {
+        super(context, "asistente.db", null, 4);
+        documentDir = new java.io.File(context.getFilesDir(), "documentos");
+    }
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE registros (id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('movimiento','peso','comida','entreno','presupuesto','meta')), version INTEGER NOT NULL, payload TEXT NOT NULL, budget_key TEXT UNIQUE)");
         db.execSQL("CREATE INDEX registros_kind ON registros(kind)");
@@ -21,10 +25,12 @@ public final class AssistantDb extends SQLiteOpenHelper implements dev.poco.asis
         db.execSQL("CREATE INDEX operaciones_fecha ON operaciones(fecha)");
         createMessaging(db);
         createMemory(db);
+        db.execSQL("ALTER TABLE salientes ADD COLUMN documento TEXT");
     }
     @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
         if (oldVersion < 2) createMessaging(db);
         if (oldVersion < 3) createMemory(db);
+        if (oldVersion < 4) db.execSQL("ALTER TABLE salientes ADD COLUMN documento TEXT");
     }
     private void createMessaging(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE wa_messages (id TEXT PRIMARY KEY NOT NULL, sender TEXT NOT NULL, state TEXT NOT NULL, response TEXT NOT NULL DEFAULT '', updated INTEGER NOT NULL)");
@@ -115,17 +121,67 @@ public final class AssistantDb extends SQLiteOpenHelper implements dev.poco.asis
             db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
     }
+    @Override public synchronized String enqueueDocument(String operation, dev.poco.asistente.core.Documents.Prepared document, long now) throws Exception {
+        dev.poco.asistente.core.Documents.validate(document.name, document.mime, document.bytes.length);
+        if (!documentDir.isDirectory() && !documentDir.mkdirs()) throw new java.io.IOException("No pude crear documentos");
+        String key = java.util.UUID.randomUUID().toString();
+        java.io.File file = new java.io.File(documentDir, key);
+        boolean committed = false;
+        String result = "Dejé «" + document.name + "» listo para enviártelo por WhatsApp.";
+        try {
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(file)) { out.write(document.bytes); out.getFD().sync(); }
+            SQLiteDatabase db = getWritableDatabase(); db.beginTransaction();
+            try {
+                String id = "doc_" + key;
+                enqueue(id, "", "documento", true, now, null, 0, null);
+                JSONObject metadata = dev.poco.asistente.core.Json.object("archivo", key, "nombre", document.name, "mime", document.mime, "operacion", operation);
+                db.execSQL("UPDATE salientes SET documento=? WHERE id=?", new Object[]{metadata.toString(), id});
+                finishAction(operation, result);
+                db.setTransactionSuccessful();
+            } finally { db.endTransaction(); }
+            committed = true;
+            return result;
+        } finally { if (!committed) file.delete(); }
+    }
     @Override public synchronized org.json.JSONArray lease(long now, boolean quiet) throws Exception {
         SQLiteDatabase db = getWritableDatabase(); db.beginTransaction();
         try {
             org.json.JSONArray items = new org.json.JSONArray();
-            try (Cursor c = db.rawQuery("SELECT id,texto FROM salientes WHERE estado='pendiente' AND (ofrecido=0 OR ofrecido<=?)" + (quiet ? " AND nocturno=1" : "") + " ORDER BY creado,id LIMIT 20", new String[]{Long.toString(now - 600000)})) {
+            try (Cursor c = db.rawQuery("SELECT id,texto,documento FROM salientes WHERE estado='pendiente' AND (ofrecido=0 OR ofrecido<=?)" + (quiet ? " AND nocturno=1" : "") + " ORDER BY creado,id LIMIT 20", new String[]{Long.toString(now - 600000)})) {
                 int bytes = 2;
                 while (c.moveToNext()) {
                     JSONObject item = dev.poco.asistente.core.Json.object("id", c.getString(0), "texto", c.getString(1));
-                    int length = item.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1;
-                    if (bytes + length > 192 * 1024) break;
+                    boolean document = !c.isNull(2);
+                    if (document) {
+                        if (items.length() > 0) break; // one document per bounded response
+                        JSONObject metadata = new JSONObject(c.getString(2));
+                        String key = metadata.getString("archivo");
+                        if (!key.matches("[0-9a-f-]{36}")) throw new IllegalStateException("Archivo inválido");
+                        java.io.File file = new java.io.File(documentDir, key);
+                        // A database-only restore must not block all future reminders on a missing file.
+                        if (!file.isFile()) {
+                            db.execSQL("UPDATE salientes SET estado='cancelado',documento=NULL WHERE id=?", new Object[]{c.getString(0)});
+                            finishAction(metadata.getString("operacion"), "No envié el documento: falta el archivo local. Pedime prepararlo otra vez.");
+                            messagingLog("Salientes", "Archivo local ausente · " + c.getString(0));
+                            continue;
+                        }
+                        dev.poco.asistente.core.Documents.validate(metadata.getString("nombre"), metadata.getString("mime"), file.length());
+                        byte[] data;
+                        try (java.io.InputStream in = new java.io.FileInputStream(file); java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+                            byte[] buffer = new byte[16384]; int n;
+                            while ((n = in.read(buffer)) != -1) {
+                                dev.poco.asistente.core.Documents.size((long) out.size() + n); out.write(buffer, 0, n);
+                            }
+                            data = out.toByteArray();
+                        }
+                        dev.poco.asistente.core.Documents.validate(metadata.getString("nombre"), metadata.getString("mime"), data.length);
+                        item = dev.poco.asistente.core.Json.object("id", c.getString(0), "documento", dev.poco.asistente.core.Json.object(
+                                "nombre", metadata.getString("nombre"), "mime", metadata.getString("mime"), "base64", java.util.Base64.getEncoder().encodeToString(data)));
+                    }
+                    int length = document ? 0 : item.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1;
+                    if (!document && bytes + length > 192 * 1024) break;
                     items.put(item); bytes += length;
+                    if (document) break;
                 }
             }
             for (int i = 0; i < items.length(); i++) {
@@ -141,11 +197,15 @@ public final class AssistantDb extends SQLiteOpenHelper implements dev.poco.asis
         try {
             for (String id : ids) {
                 String origin = null;
-                try (Cursor c = db.rawQuery("SELECT origen_id FROM salientes WHERE id=? AND estado='pendiente' AND ofrecido>0", new String[]{id})) {
+                try (Cursor c = db.rawQuery("SELECT origen_id,documento FROM salientes WHERE id=? AND estado='pendiente' AND ofrecido>0", new String[]{id})) {
                     if (!c.moveToFirst()) continue;
                     origin = c.getString(0);
+                    if (!c.isNull(1)) {
+                        JSONObject document = new JSONObject(c.getString(1));
+                        finishAction(document.getString("operacion"), "Te mandé «" + document.getString("nombre") + "» por WhatsApp.");
+                    }
                 }
-                db.execSQL("UPDATE salientes SET estado='entregado',entregado=?,texto='' WHERE id=?", new Object[]{now, id});
+                db.execSQL("UPDATE salientes SET estado='entregado',entregado=?,texto='',documento=NULL WHERE id=?", new Object[]{now, id});
                 if (origin != null) {
                     try (Cursor c = db.rawQuery("SELECT payload FROM recordatorios WHERE id=?", new String[]{origin})) {
                         if (c.moveToFirst()) {
@@ -167,7 +227,7 @@ public final class AssistantDb extends SQLiteOpenHelper implements dev.poco.asis
                 JSONObject data = dev.poco.asistente.core.Json.copy(row.data); data.put("activo", false);
                 db.update("recordatorios", extraValues(new Row(row.id, row.kind, row.version, data)), "id=?", new String[]{row.id});
             }
-            db.execSQL("UPDATE salientes SET estado='cancelado',texto='' WHERE estado='pendiente'");
+            db.execSQL("UPDATE salientes SET estado='cancelado',texto='',documento=NULL WHERE estado='pendiente'");
             db.setTransactionSuccessful();
         } catch (Exception e) { throw new IllegalStateException("No se pudo cancelar la cola saliente."); }
         finally { db.endTransaction(); }
@@ -264,7 +324,7 @@ public final class AssistantDb extends SQLiteOpenHelper implements dev.poco.asis
                         : db.update(table, values(after), "id=? AND version=?", args);
                 if (changed != 1) throw new IllegalArgumentException("El registro cambió. Consultá su estado y repetí el pedido.");
             }
-            if (after == null && before.kind.equals("recordatorio")) db.execSQL("UPDATE salientes SET estado='cancelado',texto='' WHERE origen_id=? AND estado<>'entregado'", new Object[]{before.id});
+            if (after == null && before.kind.equals("recordatorio")) db.execSQL("UPDATE salientes SET estado='cancelado',texto='',documento=NULL WHERE origen_id=? AND estado<>'entregado'", new Object[]{before.id});
             ContentValues log = new ContentValues();
             log.put("id", id); log.put("instante", time);
             log.put("fecha", Instant.ofEpochMilli(time).atZone(dev.poco.asistente.core.Reminders.ZONE).toLocalDate().toString());

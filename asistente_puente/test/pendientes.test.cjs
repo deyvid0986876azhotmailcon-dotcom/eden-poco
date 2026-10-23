@@ -88,7 +88,7 @@ test('invalid batches fail closed and pending endpoint is bounded/authenticated'
     await new PendingPoller(root, config, { chat: config.remitente }, () => session, () => {}, async () => response(items)).poll();
   }
   assert.equal(sends, 0);
-  await assert.rejects(() => request(config, '/pendientes', undefined, async () => new Response('x'.repeat(300000))));
+  await assert.rejects(() => request(config, '/pendientes', undefined, async () => new Response('x'.repeat(require('../documentos.cjs').MAX_RESPONSE + 1))));
   await assert.rejects(() => request(config, '/pendientes', undefined, async () => new Response('{}', { status: 401 })));
 });
 test('journal rejects torn writes instead of silently losing deduplication', t => {

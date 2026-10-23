@@ -28,6 +28,7 @@ public final class AssistantCore {
     private final Clock clock;
     private final ToolExecutor executor;
     private final Pro pro;
+    private Documents.Port documents;
     private final ChatMode chatMode;
     private final LongSupplier elapsedMillis;
     private volatile boolean proactivePaused;
@@ -48,6 +49,7 @@ public final class AssistantCore {
         this.pro = pro; this.chatMode = new ChatMode(elapsedMillis); this.elapsedMillis = elapsedMillis;
         executor = new ToolExecutor(store, clock, elapsedMillis, settings::phoneEnabled, phone);
     }
+    public void setDocuments(Documents.Port documents) { this.documents = documents; }
     public void clearChatMode() { chatMode.clear(); }
     public String receive(String text) { return receive(text, Source.LOCAL_USER, UUID.randomUUID().toString()); }
 
@@ -214,13 +216,13 @@ public final class AssistantCore {
                 }
                 // In chat mode the fast model still decides first: a request («buscá el clima», an alarm) runs
                 // its tool; only conversation goes to Pro (on 2026-10-21 Pro refused a weather search as «a friend»).
-                boolean chatting = chatMode.active() && settings.proEnabled();
+                boolean chatting = chatMode.active() && settings.proEnabled() && !Documents.requested(text);
                 if (chatting && ProProtocol.sensitive(text)) return ProProtocol.PRIVATE;
                 String key;
                 try { key = settings.apiKey(); }
                 catch (Exception e) { return "No pude abrir la clave cifrada. Borrala y volvé a pegarla en Ajustes. Las reglas locales siguen disponibles."; }
                 if (key == null || key.isEmpty()) return "No entendí el pedido con las reglas locales. Podés repetirlo como en «ayuda» o pegar tu clave de Gemini en Ajustes.";
-                String context = "Fecha y hora local: " + java.time.ZonedDateTime.now(clock) + "\n" + Summary.render(store.rows(), LocalDate.now(clock), false);
+                String context = "Fecha y hora local: " + java.time.ZonedDateTime.now(clock) + "\n" + Summary.render(store.rows(), LocalDate.now(clock), false) + "\nRecordatorios (datos):\n" + Reminders.list(store.reminders());
                 if (context.length() > 6000) context = context.substring(0, 6000) + "\n[contexto recortado]";
                 org.json.JSONObject request = chatting
                         ? ProProtocol.routingRequest(text, java.time.ZonedDateTime.now(clock), settings.currency(), store.conversation(), store.memories(), settings.phoneEnabled())
@@ -238,6 +240,17 @@ public final class AssistantCore {
                 if ("charla_profunda".equals(reply.tool)) {
                     Validation.keys(reply.args, "");
                     return chat(text, ticket, budget);
+                }
+                if (Documents.contains(reply.tool)) {
+                    if ("descargar".equals(reply.tool)) {
+                        Validation.keys(reply.args, "url");
+                        Documents.requireUserUrl(Validation.string(reply.args, "url", 2048), text);
+                    } else {
+                        Validation.keys(reply.args, "titulo,contenido");
+                        Validation.string(reply.args, "titulo", 150);
+                        Documents.content(reply.args);
+                    }
+                    return document(operation, reply.tool, reply.args, ticket, budget);
                 }
                 return dispatch(actor, operation, reply.tool, reply.args, ticket, () -> false, budget);
             } catch (java.util.concurrent.TimeoutException e) {
@@ -303,6 +316,27 @@ public final class AssistantCore {
             }
         } catch (Exception ignored) { }
         return ticket != generation.get() ? "Pedido cancelado." : answer + "\n" + ProProtocol.FALLBACK;
+    }
+    private String document(String operation, String tool, org.json.JSONObject args, long ticket, RequestBudget budget) throws Exception {
+        synchronized (actionGate) {
+            if (ticket != generation.get()) return "Pedido cancelado.";
+            if (documents == null) return "Los documentos no están disponibles.";
+            String previous = store.receipt(operation);
+            if (previous != null) return previous;
+            store.beginAction(operation, tool, clock.millis());
+        }
+        try {
+            java.util.function.BooleanSupplier cancelled = () -> ticket != generation.get() || budget.expired();
+            Documents.Prepared result = budget.read(() -> documents.prepare(tool, args, cancelled), cancelled, 45000);
+            synchronized (actionGate) {
+                if (cancelled.getAsBoolean()) throw new IllegalArgumentException("Pedido cancelado.");
+                return store.enqueueDocument(operation, result, clock.millis());
+            }
+        } catch (Exception e) {
+            synchronized (actionGate) { store.finishAction(operation, "No envié el documento; pedido cancelado o fallido."); }
+            if (e instanceof IllegalArgumentException) throw e;
+            return "No pude preparar el archivo. No lo envié.";
+        }
     }
     private String dispatch(String actor, String operation, String tool, org.json.JSONObject args, long ticket,
             java.util.function.BooleanSupplier closed, RequestBudget budget) throws Exception {
