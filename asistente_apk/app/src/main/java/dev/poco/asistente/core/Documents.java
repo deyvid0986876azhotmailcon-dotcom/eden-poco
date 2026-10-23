@@ -88,7 +88,7 @@ public final class Documents {
                     end = next;
                 }
                 if (!remaining.isEmpty() && end == 0) throw new IllegalArgumentException("Un carácter no cabe en la página.");
-                if (end < remaining.length() && space > 0) end = space;
+                if (end < remaining.length() && remaining.charAt(end) != ' ' && space > 0) end = space; // a full line ending at a space keeps its last word
                 if (page.size() == lines) { page = new ArrayList<>(); pages.add(page); }
                 page.add(remaining.substring(0, end));
                 remaining = remaining.substring(end);
