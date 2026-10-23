@@ -383,13 +383,13 @@ public final class MainActivity extends Activity {
         key.setSaveEnabled(false); key.setFilters(new InputFilter[]{new InputFilter.LengthFilter(200)}); gemini.addView(key);
         gemini.addView(button("Guardar clave", true, () -> {
             String value = key.getText().toString().trim(); key.setText("");
-            try { app.settings.vault.save(value); status.setText("Clave cifrada guardada."); }
-            catch (Exception e) { status.setText("No pude guardar la clave. Revisá el formato y volvé a pegarla."); }
+            try { app.settings.vault.save(value); report(status, "Clave cifrada guardada."); }
+            catch (Exception e) { report(status, "No pude guardar la clave. Revisá el formato y volvé a pegarla."); }
         }));
         gemini.addView(button("Borrar clave", false, () -> {
             app.stop(); key.setText("");
-            try { app.settings.vault.clear(); status.setText("Clave borrada. Las reglas locales siguen disponibles."); }
-            catch (Exception e) { status.setText("No pude completar el borrado de la clave."); }
+            try { app.settings.vault.clear(); report(status, "Clave borrada. Las reglas locales siguen disponibles."); }
+            catch (Exception e) { report(status, "No pude completar el borrado de la clave."); }
         }));
 
         LinearLayout prefs = ui.card(); form.addView(prefs);
@@ -399,8 +399,8 @@ public final class MainActivity extends Activity {
         prefs.addView(label("Moneda predeterminada"));
         Spinner currency = spinner(Validation.CURRENCIES, app.settings.currency()); prefs.addView(currency);
         prefs.addView(button("Guardar ajustes", true, () -> {
-            try { app.settings.save((String) model.getSelectedItem(), (String) currency.getSelectedItem()); status.setText("Modelo y moneda guardados."); }
-            catch (Exception e) { status.setText("No pude guardar los ajustes."); }
+            try { app.settings.save((String) model.getSelectedItem(), (String) currency.getSelectedItem()); report(status, "Modelo y moneda guardados."); }
+            catch (Exception e) { report(status, "No pude guardar los ajustes."); }
         }));
 
         LinearLayout audioPrefs = ui.card(); form.addView(audioPrefs);
@@ -411,8 +411,8 @@ public final class MainActivity extends Activity {
         Spinner audioMode = spinner(audioLabels, audioLabels[audioSelected < 0 ? 1 : audioSelected]); audioPrefs.addView(audioMode);
         TextView audioStatus = label("También se conserva la respuesta escrita."); audioPrefs.addView(audioStatus);
         audioPrefs.addView(button("Guardar audio", true, () -> {
-            try { app.settings.saveAudioReplyMode(audioModes[audioMode.getSelectedItemPosition()]); audioStatus.setText("Preferencia de audio guardada."); }
-            catch (Exception e) { audioStatus.setText("No pude guardar la preferencia de audio."); }
+            try { app.settings.saveAudioReplyMode(audioModes[audioMode.getSelectedItemPosition()]); report(audioStatus, "Preferencia de audio guardada."); }
+            catch (Exception e) { report(audioStatus, "No pude guardar la preferencia de audio."); }
         }));
 
         LinearLayout summaries = ui.card(); form.addView(summaries);
@@ -422,13 +422,13 @@ public final class MainActivity extends Activity {
         EditText hour = field("Hora local HH:mm"); hour.setSingleLine(true); hour.setText(app.settings.summaryTime()); summaries.addView(hour);
         TextView summaryStatus = label("Hora de Paraguay. Silencio de 23:00 a 07:00, salvo recordatorios que pediste a esa hora."); summaries.addView(summaryStatus);
         summaries.addView(button("Guardar resúmenes", true, () -> {
-            try { app.settings.saveSummaries(daily.isChecked(), weekly.isChecked(), hour.getText().toString().trim()); summaryStatus.setText("Resúmenes guardados."); }
-            catch (Exception e) { summaryStatus.setText(e.getMessage()); }
+            try { app.settings.saveSummaries(daily.isChecked(), weekly.isChecked(), hour.getText().toString().trim()); report(summaryStatus, "Resúmenes guardados."); }
+            catch (Exception e) { report(summaryStatus, e.getMessage()); }
         }));
         Switch morning = toggle("Buen día a las 7:30 (recordatorios, gastos de ayer, presupuesto)"); morning.setChecked(app.settings.morningBrief()); summaries.addView(morning);
-        morning.setOnCheckedChangeListener((view, checked) -> app.settings.setMorningBrief(checked));
+        morning.setOnCheckedChangeListener((view, checked) -> { app.settings.setMorningBrief(checked); say(checked ? "Buen día activado." : "Buen día desactivado."); });
         Switch nudges = toggle("Avisos: gasto fuera de lo normal y gym"); nudges.setChecked(app.settings.nudges()); summaries.addView(nudges);
-        nudges.setOnCheckedChangeListener((view, checked) -> app.settings.setNudges(checked));
+        nudges.setOnCheckedChangeListener((view, checked) -> { app.settings.setNudges(checked); say(checked ? "Avisos activados." : "Avisos desactivados."); });
 
         LinearLayout whatsapp = ui.card(); form.addView(whatsapp);
         whatsapp.addView(ui.cardTitle(Icons.WHATSAPP, "WhatsApp (puente QR)", true));
@@ -442,8 +442,8 @@ public final class MainActivity extends Activity {
             try {
                 app.settings.setProEnabled(checked);
                 if (!checked) app.core.clearChatMode();
-                proStatus.setText(checked ? "Pro preferido. Termux necesita una sesión de Antigravity iniciada." : "Pro apagado; uso el modelo gratis y Tavily.");
-            } catch (RuntimeException e) { view.setChecked(app.settings.proEnabled()); proStatus.setText("No pude guardar el ajuste Pro."); }
+                report(proStatus, checked ? "Pro preferido. Termux necesita una sesión de Antigravity iniciada." : "Pro apagado; uso el modelo gratis y Tavily.");
+            } catch (RuntimeException e) { view.setChecked(app.settings.proEnabled()); report(proStatus, "No pude guardar el ajuste Pro."); }
         });
         bridgeToggle = toggle("Puente de WhatsApp");
         bridgeToggle.setChecked(app.settings.bridgeEnabled()); whatsapp.addView(bridgeToggle);
@@ -460,10 +460,10 @@ public final class MainActivity extends Activity {
                 } else {
                     app.settings.setBridgeEnabled(false); app.stop(); stopService(new Intent(this, BridgeService.class));
                 }
-                bridgeStatus.setText(checked ? "Puente habilitado. Consultá Registro para comprobar el inicio." : "Puente apagado; cola y confirmaciones canceladas.");
+                report(bridgeStatus, checked ? "Puente habilitado. Consultá Registro para comprobar el inicio." : "Puente apagado; cola y confirmaciones canceladas.");
             } catch (Exception e) {
                 app.settings.setBridgeEnabled(false); stopService(new Intent(this, BridgeService.class));
-                view.setChecked(false); bridgeStatus.setText("No pude iniciar el puente. Revisá Registro.");
+                view.setChecked(false); report(bridgeStatus, "No pude iniciar el puente. Revisá Registro.");
             }
         });
         whatsapp.addView(button("Copiar configuración del puente", false, () -> {
@@ -475,8 +475,8 @@ public final class MainActivity extends Activity {
                     extras.putBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE, true); clip.getDescription().setExtras(extras);
                 }
                 getSystemService(android.content.ClipboardManager.class).setPrimaryClip(clip);
-                bridgeStatus.setText("Copiado: pegá puerto y token en config.json de Termux y agregá tu remitente autorizado.");
-            } catch (Exception e) { bridgeStatus.setText("No pude copiar la configuración cifrada."); }
+                report(bridgeStatus, "Copiado: pegá puerto y token en config.json de Termux y agregá tu remitente autorizado.");
+            } catch (Exception e) { report(bridgeStatus, "No pude copiar la configuración cifrada."); }
         }));
 
         LinearLayout notices = ui.card(); form.addView(notices);
@@ -491,23 +491,23 @@ public final class MainActivity extends Activity {
         enabled.setChecked(app.settings.whatsappEnabled()); notices.addView(enabled);
         enabled.setOnCheckedChangeListener((view, checked) -> {
             if (checked == app.settings.whatsappEnabled()) return;
-            if (checked && app.settings.bridgeEnabled()) { view.setChecked(false); whatsappStatus.setText("Apagá primero el puente QR."); return; }
+            if (checked && app.settings.bridgeEnabled()) { view.setChecked(false); report(whatsappStatus, "Apagá primero el puente QR."); return; }
             try {
                 // Turning off always works, even if an unfinished field is currently invalid.
                 app.configureWhatsapp(checked, checked ? owner.getText().toString() : app.settings.whatsappName(),
                         checked ? phone.getText().toString().trim() : app.settings.whatsappPhone());
-                whatsappStatus.setText(checked ? "Respuestas habilitadas. Falta conceder el acceso si aún no lo diste." : "Respuestas desactivadas; cola cancelada.");
-            } catch (Exception e) { enabled.setChecked(app.settings.whatsappEnabled()); whatsappStatus.setText(e.getMessage()); }
+                report(whatsappStatus, checked ? "Respuestas habilitadas. Falta conceder el acceso si aún no lo diste." : "Respuestas desactivadas; cola cancelada.");
+            } catch (Exception e) { enabled.setChecked(app.settings.whatsappEnabled()); report(whatsappStatus, e.getMessage()); }
         });
         notices.addView(button("Guardar remitente de WhatsApp", false, () -> {
             try {
                 app.configureWhatsapp(enabled.isChecked(), owner.getText().toString(), phone.getText().toString().trim());
-                whatsappStatus.setText("Remitente guardado. Se cancelaron los pedidos anteriores.");
-            } catch (Exception e) { whatsappStatus.setText(e.getMessage()); }
+                report(whatsappStatus, "Remitente guardado. Se cancelaron los pedidos anteriores.");
+            } catch (Exception e) { report(whatsappStatus, e.getMessage()); }
         }));
         notices.addView(button("Dar acceso a notificaciones", false, () -> {
             try { startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)); }
-            catch (RuntimeException e) { whatsappStatus.setText("Abrí Ajustes del sistema → Acceso a notificaciones → Asistente."); }
+            catch (RuntimeException e) { report(whatsappStatus, "Abrí Ajustes del sistema → Acceso a notificaciones → Asistente."); }
         }));
 
         LinearLayout calls = ui.card(); form.addView(calls);
@@ -516,18 +516,18 @@ public final class MainActivity extends Activity {
         TextView callStatus = ui.text("", 14, color.text, false); calls.addView(callStatus);
         Switch ringReminders = toggle("Recordatorios por llamada");
         ringReminders.setChecked(app.settings.callReminders());
-        ringReminders.setOnCheckedChangeListener((view, checked) -> app.settings.setCallReminders(checked));
+        ringReminders.setOnCheckedChangeListener((view, checked) -> { app.settings.setCallReminders(checked); say(checked ? "Los recordatorios te van a llamar." : "Los recordatorios ya no llaman."); });
         calls.addView(ringReminders);
         calls.addView(button("Llamar a la asistente", true, () -> dev.poco.asistente.call.CallActivity.callNow(this)));
         calls.addView(button("Probar: que me llame en 10 segundos", false, () -> {
-            callStatus.setText("En 10 segundos te llama. Podés bloquear la pantalla.");
+            report(callStatus, "En 10 segundos te llama. Podés bloquear la pantalla.");
             app.main.postDelayed(() -> dev.poco.asistente.call.CallLauncher.ring(app, "Esta es una llamada de prueba"), 10_000);
         }));
         if (!dev.poco.asistente.call.CallLauncher.canRingFullScreen(this)) {
             callStatus.setText("Para que la llamada aparezca con la pantalla bloqueada, permití las notificaciones de pantalla completa.");
             calls.addView(button("Permitir llamada en pantalla completa", false, () -> {
                 try { startActivity(new Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, android.net.Uri.parse("package:" + getPackageName()))); }
-                catch (RuntimeException e) { callStatus.setText("Abrí Ajustes → Apps → Asistente → Notificaciones de pantalla completa."); }
+                catch (RuntimeException e) { report(callStatus, "Abrí Ajustes → Apps → Asistente → Notificaciones de pantalla completa."); }
             }));
         }
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
@@ -545,14 +545,33 @@ public final class MainActivity extends Activity {
         about.addView(label("Asistente " + version + " — firmada con tu clave privada."));
         about.addView(label(Icons.CREDIT));
     }
+    private boolean granted(String permission) { return checkSelfPermission(permission) == android.content.pm.PackageManager.PERMISSION_GRANTED; }
+    private static String yes(boolean on) { return on ? "permitido" : "sin permiso"; }
+    /** Every settings action ends with a visible toast: the status labels sit above the buttons, out of sight. */
+    private void say(String text) {
+        android.widget.Toast.makeText(this, text == null || text.isEmpty() ? "No se pudo completar." : text, android.widget.Toast.LENGTH_LONG).show();
+    }
+    private void report(TextView label, String text) { if (label != null) label.setText(text); say(text); }
+    /** Android shows no dialog for a permission already granted: say so instead of doing nothing. */
+    private void ask(int code, String... permissions) {
+        boolean all = true;
+        for (String p : permissions) all &= granted(p);
+        if (all) say("Ya está permitido."); else requestPermissions(permissions, code);
+    }
     private void refreshPhoneStatus() {
         if (phoneToggle != null) phoneToggle.setChecked(app.settings.phoneEnabled());
         if (phoneStatus == null) return;
         boolean notices = getSystemService(android.app.NotificationManager.class).isNotificationListenerAccessGranted(
                 new android.content.ComponentName(this, dev.poco.asistente.phone.PhoneNotifications.class));
-        boolean calendar = checkSelfPermission(android.Manifest.permission.READ_CALENDAR) == android.content.pm.PackageManager.PERMISSION_GRANTED;
-        phoneStatus.setText("Accesibilidad: " + (dev.poco.asistente.phone.PhoneAccessibility.connected() ? "conectada" : "sin conectar")
+        boolean calendar = granted(android.Manifest.permission.READ_CALENDAR), events = granted(android.Manifest.permission.WRITE_CALENDAR);
+        boolean contacts = granted(android.Manifest.permission.READ_CONTACTS), calls = granted(android.Manifest.permission.CALL_PHONE);
+        boolean dnd = getSystemService(android.app.NotificationManager.class).isNotificationPolicyAccessGranted();
+        phoneStatus.setText("Control del teléfono: " + (app.settings.phoneEnabled() ? "encendido" : "APAGADO")
+                + "\nAccesibilidad: " + (dev.poco.asistente.phone.PhoneAccessibility.connected() ? "conectada" : "sin conectar")
                 + "\nNotificaciones: " + (notices ? "permitidas" : "sin permiso") + "\nAgenda: " + (calendar ? "lectura permitida" : "sin permiso")
+                + "\nCrear eventos: " + yes(events) + "\nContactos: " + yes(contacts) + "\nLlamadas: " + yes(calls)
+                + "\nNo molestar: " + yes(dnd) + "\nBrillo: " + yes(Settings.System.canWrite(this))
+                + "\nNúmero del bot: " + (app.settings.phoneBotNumber().isEmpty() ? "sin cargar" : "guardado")
                 + "\nBúsquedas este mes: " + app.settings.searchesThisMonth());
     }
     private void phoneCard(LinearLayout form) {
@@ -566,33 +585,36 @@ public final class MainActivity extends Activity {
                 // Invalidate work admitted while control was off before enabling from the visible app.
                 app.stop(); app.settings.setPhoneEnabled(true); app.changed();
             } else app.stop();
-            refreshPhoneStatus();
+            refreshPhoneStatus(); say(enabled ? "Control del teléfono encendido." : "Control del teléfono apagado.");
         });
         phoneStatus = label(""); card.addView(phoneStatus);
         card.addView(button("Accesibilidad", false, () -> phoneSetting(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         card.addView(button("Notificaciones", false, () -> phoneSetting(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)));
-        card.addView(button("Permitir lectura de agenda", false, () -> requestPermissions(new String[]{android.Manifest.permission.READ_CALENDAR}, 44)));
-        card.addView(button("Permitir contactos y llamadas", false, () -> requestPermissions(new String[]{android.Manifest.permission.READ_CONTACTS, android.Manifest.permission.CALL_PHONE}, 45)));
-        card.addView(button("Permitir crear eventos", false, () -> requestPermissions(new String[]{android.Manifest.permission.READ_CALENDAR, android.Manifest.permission.WRITE_CALENDAR}, 46)));
+        card.addView(button("Permitir lectura de agenda", false, () -> ask(44, android.Manifest.permission.READ_CALENDAR)));
+        card.addView(button("Permitir contactos y llamadas", false, () -> ask(45, android.Manifest.permission.READ_CONTACTS, android.Manifest.permission.CALL_PHONE)));
+        card.addView(button("Permitir crear eventos", false, () -> ask(46, android.Manifest.permission.READ_CALENDAR, android.Manifest.permission.WRITE_CALENDAR)));
         card.addView(button("Acceso a No molestar", false, () -> phoneSetting(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)));
         card.addView(button("Modificar brillo del sistema", false, () -> {
             try { startActivity(new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, android.net.Uri.parse("package:" + getPackageName()))); }
-            catch (RuntimeException e) { phoneStatus.setText("Abrí Modificar ajustes del sistema desde los permisos de Asistente."); }
+            catch (RuntimeException e) { report(phoneStatus, "Abrí Modificar ajustes del sistema desde los permisos de Asistente."); }
         }));
         card.addView(label("Número del bot (se bloqueará como destinatario). Obligatorio para preparar WhatsApp. Solo móviles paraguayos y espacio principal."));
         EditText botNumber = field("+5959…"); botNumber.setSingleLine(true); botNumber.setText(app.settings.phoneBotNumber()); card.addView(botNumber);
         card.addView(button("Guardar número del bot", false, () -> {
-            try { app.stop(); app.settings.savePhoneBotNumber(botNumber.getText().toString().trim()); phoneStatus.setText("Número guardado. Volvé a encender Control del teléfono."); }
-            catch (RuntimeException e) { phoneStatus.setText(e.getMessage()); }
+            try { app.stop(); app.settings.savePhoneBotNumber(botNumber.getText().toString().trim()); refreshPhoneStatus(); say("Número guardado. Volvé a encender Control del teléfono."); }
+            catch (RuntimeException e) { report(phoneStatus, e.getMessage()); }
         }));
         card.addView(label("Activá «Asistente: abrir apps» y «Asistente: leer avisos». Si Android lo bloquea, permití ajustes restringidos en la información de Asistente."));
         refreshPhoneStatus();
     }
     private void phoneSetting(String action) {
         try { startActivity(new Intent(action)); }
-        catch (RuntimeException e) { if (phoneStatus != null) phoneStatus.setText("Abrí ese permiso desde Ajustes del teléfono → Asistente."); }
+        catch (RuntimeException e) { if (phoneStatus != null) report(phoneStatus, "Abrí ese permiso desde Ajustes del teléfono → Asistente."); }
     }
     @Override public void onRequestPermissionsResult(int code, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(code, permissions, results); refreshPhoneStatus();
+        boolean all = results.length > 0;
+        for (int r : results) all &= r == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        say(all ? "Permiso dado." : "No se dio el permiso. Si Android ya no pregunta, dalo en Ajustes del teléfono → Apps → Asistente → Permisos.");
     }
 }
