@@ -24,7 +24,8 @@ public final class AndroidDocuments implements Documents.Port {
         Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG); paint.setTextSize(12);
         String text = title + "\n" + java.time.LocalDate.now(dev.poco.asistente.core.Reminders.ZONE) + "\n\n" + content;
         List<List<String>> pages = Documents.pages(text, paint::measureText, 499, 44);
-        try (PdfDocument pdf = new PdfDocument(); ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+        PdfDocument pdf = new PdfDocument(); // not AutoCloseable
+        try (ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
             int number = 0;
             for (List<String> lines : pages) {
                 check(cancelled);
@@ -36,7 +37,7 @@ public final class AndroidDocuments implements Documents.Port {
             }
             pdf.writeTo(bytes); check(cancelled);
             return new Documents.Prepared(Documents.filename(title), "application/pdf", bytes.toByteArray());
-        }
+        } finally { pdf.close(); }
     }
     private static void check(BooleanSupplier cancelled) {
         if (cancelled.getAsBoolean() || Thread.currentThread().isInterrupted()) throw new IllegalArgumentException("Pedido cancelado.");
