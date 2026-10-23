@@ -425,6 +425,10 @@ public final class MainActivity extends Activity {
             try { app.settings.saveSummaries(daily.isChecked(), weekly.isChecked(), hour.getText().toString().trim()); summaryStatus.setText("Resúmenes guardados."); }
             catch (Exception e) { summaryStatus.setText(e.getMessage()); }
         }));
+        Switch morning = toggle("Buen día a las 7:30 (recordatorios, gastos de ayer, presupuesto)"); morning.setChecked(app.settings.morningBrief()); summaries.addView(morning);
+        morning.setOnCheckedChangeListener((view, checked) -> app.settings.setMorningBrief(checked));
+        Switch nudges = toggle("Avisos: gasto fuera de lo normal y gym"); nudges.setChecked(app.settings.nudges()); summaries.addView(nudges);
+        nudges.setOnCheckedChangeListener((view, checked) -> app.settings.setNudges(checked));
 
         LinearLayout whatsapp = ui.card(); form.addView(whatsapp);
         whatsapp.addView(ui.cardTitle(Icons.WHATSAPP, "WhatsApp (puente QR)", true));

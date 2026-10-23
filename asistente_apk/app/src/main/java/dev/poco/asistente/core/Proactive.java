@@ -26,6 +26,10 @@ public final class Proactive {
         String summaryTime();
         /** Reminders also ring the phone as a call (call/CallLauncher); off unless David turns it on. */
         default boolean callReminders() { return false; }
+        /** Point 10, she speaks first: morning brief and nudges (big expense, gym). The app turns them on. */
+        default boolean morningBrief() { return false; }
+        default String morningTime() { return "07:30"; }
+        default boolean nudges() { return false; }
     }
     /** Set by the app: rings a call for a due reminder. Core stays free of Android. */
     public volatile java.util.function.Consumer<String> onReminderCall;
@@ -72,6 +76,8 @@ public final class Proactive {
             LocalDate weekly = daily.with(TemporalAdjusters.previousOrSame(DayOfWeek.SUNDAY));
             if (settings.dailySummary()) summary("d_", daily, false, millis, cancelled, ticket);
             if (settings.weeklySummary() && daily.getDayOfWeek() == DayOfWeek.SUNDAY) summary("w_", weekly, true, millis, cancelled, ticket);
+            if (settings.morningBrief()) morning(now, millis, cancelled, ticket);
+            if (settings.nudges()) nudges(now, millis, cancelled, ticket);
         }
         BankFeed feed = bank;
         if (feed != null && !cancelled.getAsBoolean()) {
@@ -80,6 +86,28 @@ public final class Proactive {
         }
         if (cancelled.getAsBoolean()) return new JSONArray();
         return core.proactiveAction(ticket, () -> store.lease(clock.millis(), Reminders.quiet(ZonedDateTime.now(clock))), new JSONArray());
+    }
+    /** Once a day from morningTime until noon: a morning that was missed (phone off) is not sent at night. */
+    private void morning(ZonedDateTime now, long millis, BooleanSupplier cancelled, long ticket) throws Exception {
+        if (now.toLocalTime().isBefore(Reminders.time(settings.morningTime())) || now.getHour() >= 12) return;
+        String id = "m_" + now.toLocalDate();
+        if (store.queued(id) || cancelled.getAsBoolean()) return;
+        String text = Nudges.morning(store.rows(), store.reminders(), now.toLocalDate(), clock.getZone(), settings.currency());
+        core.proactiveAction(ticket, () -> { store.enqueue(id, text, "manana", false, millis, null, 0, null); return null; }, null);
+    }
+    /** Each big expense is mentioned once (its id); the gym at most every three days, from 18:00. */
+    private void nudges(ZonedDateTime now, long millis, BooleanSupplier cancelled, long ticket) throws Exception {
+        LocalDate today = now.toLocalDate();
+        for (Store.Row row : Nudges.bigExpenses(store.rows(), today, settings.currency())) {
+            String id = "g_" + row.id;
+            if (store.queued(id) || cancelled.getAsBoolean()) continue;
+            String text = Nudges.bigExpense(row, settings.currency());
+            core.proactiveAction(ticket, () -> { store.enqueue(id, text, "aviso", false, millis, null, 0, null); return null; }, null);
+        }
+        if (now.getHour() < 18 || !Nudges.gymDue(store.rows(), today)) return;
+        for (int back = 0; back < 3; back++) if (store.queued("gym_" + today.minusDays(back))) return;
+        if (cancelled.getAsBoolean()) return;
+        core.proactiveAction(ticket, () -> { store.enqueue("gym_" + today, Nudges.GYM, "aviso", false, millis, null, 0, null); return null; }, null);
     }
     private void summary(String prefix, LocalDate date, boolean weekly, long now, BooleanSupplier cancelled, long ticket) throws Exception {
         String id = prefix + date;

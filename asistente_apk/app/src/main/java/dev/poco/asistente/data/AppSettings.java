@@ -88,6 +88,12 @@ public final class AppSettings implements dev.poco.asistente.core.Proactive.Sett
     /** Reminders ring the phone as a call (CallLauncher); David asked for it, so it starts on. */
     @Override public boolean callReminders() { return prefs.getBoolean("call_reminders", true); }
     public void setCallReminders(boolean on) { prefs.edit().putBoolean("call_reminders", on).apply(); }
+    /** She speaks first (morning brief, big expense, gym): David asked for it, so both start on. */
+    @Override public boolean morningBrief() { return prefs.getBoolean("morning_brief", true); }
+    @Override public String morningTime() { return prefs.getString("morning_time", "07:30"); }
+    @Override public boolean nudges() { return prefs.getBoolean("nudges", true); }
+    public void setMorningBrief(boolean on) { prefs.edit().putBoolean("morning_brief", on).apply(); }
+    public void setNudges(boolean on) { prefs.edit().putBoolean("nudges", on).apply(); }
     public boolean whatsappEnabled() { return prefs.getBoolean("whatsapp_enabled", false); }
     public String whatsappName() { return prefs.getString("whatsapp_name", ""); }
     public String whatsappPhone() { return prefs.getString("whatsapp_phone", ""); }
