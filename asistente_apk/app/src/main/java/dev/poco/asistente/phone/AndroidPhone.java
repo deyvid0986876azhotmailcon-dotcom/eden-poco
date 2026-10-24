@@ -101,10 +101,22 @@ public final class AndroidPhone implements PhoneTools.Port {
             String pkg = a.getString("app").equals("spotify") ? "com.spotify.music" : "app.morphe.android.apps.youtube.music";
             // No URI from the model: a plain-text query through Android's standard play-from-search, pinned to the chosen player.
             if (action.equals("abrir")) { launchApp(pkg); return "Pedí abrir " + a.getString("app") + "."; }
-            launchResolved(new Intent(android.provider.MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).setPackage(pkg)
-                    .putExtra(android.app.SearchManager.QUERY, a.getString("consulta"))
-                    .putExtra(android.provider.MediaStore.EXTRA_MEDIA_FOCUS, "vnd.android.cursor.item/*"));
-            return "Puse «" + a.getString("consulta") + "» en " + (pkg.equals("com.spotify.music") ? "Spotify" : "YouTube Music") + ".";
+            String query = a.getString("consulta"), name = pkg.equals("com.spotify.music") ? "Spotify" : "YouTube Music";
+            // The play-from-search intent alone opened YT Music (Morphe) without playing (2026-10-23); its media
+            // session does accept playFromSearch, so the query goes to the session, opening the app first if needed.
+            MediaController session = playerSession(pkg);
+            if (session == null) {
+                launchResolved(new Intent(android.provider.MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).setPackage(pkg)
+                        .putExtra(android.app.SearchManager.QUERY, query)
+                        .putExtra(android.provider.MediaStore.EXTRA_MEDIA_FOCUS, "vnd.android.cursor.item/*"));
+                // at most ~3.6 s: this runs inside the action gate, so PARAR waits that long at worst
+                for (int i = 0; i < 12 && session == null; i++) { Thread.sleep(300); session = playerSession(pkg); }
+            }
+            PlaybackState state = session == null ? null : session.getPlaybackState();
+            if (state == null || (state.getActions() & PlaybackState.ACTION_PLAY_FROM_SEARCH) == 0)
+                return "Abrí " + name + " con «" + query + "». Si no arrancó sola, tocá play ahí.";
+            session.getTransportControls().playFromSearch(query, new android.os.Bundle());
+            return "Puse «" + query + "» en " + name + ".";
         }
         if (!PhoneNotifications.connected()) throw new IllegalArgumentException("Habilitá Notificaciones en Control del teléfono para identificar qué app está reproduciendo.");
         MediaSessionManager manager = app.getSystemService(MediaSessionManager.class);
@@ -125,6 +137,16 @@ public final class AndroidPhone implements PhoneTools.Port {
         boolean down = target.dispatchMediaButtonEvent(new KeyEvent(KeyEvent.ACTION_DOWN, key));
         boolean up = target.dispatchMediaButtonEvent(new KeyEvent(KeyEvent.ACTION_UP, key));
         return down && up ? "Mandé al reproductor la orden de " + action + "." : "El reproductor no aceptó la orden. Probá desde su app.";
+    }
+    /** The player's media session, or null while it is not running; needs the notification access already used for the media keys. */
+    private MediaController playerSession(String pkg) {
+        if (!PhoneNotifications.connected()) return null;
+        try {
+            for (MediaController session : app.getSystemService(MediaSessionManager.class)
+                    .getActiveSessions(new ComponentName(app, PhoneNotifications.class)))
+                if (pkg.equals(session.getPackageName())) return session;
+        } catch (RuntimeException ignored) { }
+        return null;
     }
     private String calendar(JSONObject a) {
         if (app.checkSelfPermission(Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED)
