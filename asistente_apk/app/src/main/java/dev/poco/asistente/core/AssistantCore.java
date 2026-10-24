@@ -132,15 +132,33 @@ public final class AssistantCore {
                 () -> ticket != generation.get() || budget.expired() || Thread.currentThread().isInterrupted()), () -> ticket != generation.get());
         if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
         String description = ImageInput.described(reply);
+        // David asked that a ticket be guessed (2026-10-24): a tool-free model may only *propose* a movement; the
+        // executor stages it and nothing is recorded until his «sí». Any failure here just means no proposal.
+        String proposal = null;
+        try {
+            GeminiProtocol.Reply movement = budget.read(() -> cloud.generate(key, settings.model(), ImageInput.receipt(description, LocalDate.now(clock)),
+                    () -> ticket != generation.get() || budget.expired() || Thread.currentThread().isInterrupted()), () -> ticket != generation.get());
+            if ("registrar_movimiento".equals(movement.tool) && movement.args != null) {
+                synchronized (actionGate) {
+                    if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
+                    proposal = executor.stageMovement("whatsapp", movement.args);
+                }
+            }
+        } catch (IllegalArgumentException e) {
+            if (ticket != generation.get()) throw e;
+        } catch (Exception ignored) { }
         // External pixels must never enter receive(), its tools, confirmations or history.
         org.json.JSONObject request = GeminiProtocol.request(ImageInput.request(image.caption, description),
-                "Respondé sobre la foto sin ejecutar acciones. Si hace falta anotar o actuar, pedí que David repita el pedido y los datos en un mensaje de texto.",
+                proposal != null
+                        ? "Respondé sobre la foto en una o dos frases sin ejecutar acciones. La app ya le propone anotar el comprobante aparte: no repitas los montos ni pidas que los escriba."
+                        : "Respondé sobre la foto sin ejecutar acciones. Si hace falta anotar o actuar, pedí que David repita el pedido y los datos en un mensaje de texto.",
                 LocalDate.now(clock), settings.currency());
         request.remove("tools"); request.remove("toolConfig");
         GeminiProtocol.Reply answer = budget.read(() -> cloud.generate(key, settings.model(), request,
                 () -> ticket != generation.get() || budget.expired() || Thread.currentThread().isInterrupted()), () -> ticket != generation.get());
         if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
-        return ExternalData.wrap(ImageInput.described(answer));
+        String said = ImageInput.described(answer);
+        return ExternalData.wrap(proposal == null ? said : said + "\n\n" + proposal);
     }
     /** Capture the token when queuing, so PARAR also cancels work that has not started. */
     public String receive(String text, long queuedToken) {

@@ -142,6 +142,8 @@ public final class ToolExecutor {
         if (p == null || !p.code.equals(code)) return "Ese código no corresponde a una operación pendiente tuya.";
         pending.remove(actor); // consume even if expired, changed, or storage fails; never replay
         if (elapsedMillis.getAsLong() >= p.expires) return "El código venció. Pedí la operación otra vez.";
+        // a movement read from a photo: recorded only now, through the same validation as a typed one
+        if ("registrar_movimiento".equals(p.tool)) return execute(actor, operationId, p.tool, Json.copy(p.args));
         if (p.tool != null) {
             requirePhone();
             store.beginAction(operationId, p.tool, clock.millis());
@@ -191,6 +193,15 @@ public final class ToolExecutor {
         return description + "\n¿Lo hago? Respondé «sí». También vale:\nSÍ " + code + "\n(vale 5 minutos; PARAR cancela)";
     }
     public synchronized void cancelActor(String actor) { pending.remove(actor); }
+    /** A movement proposed from a photo: shown with its exact data and confirmed with «sí» like the phone actions. */
+    public synchronized String stageMovement(String actor, JSONObject proposed) throws Exception {
+        JSONObject data = Validation.record("movimiento", proposed, LocalDate.now(clock));
+        pending.remove(actor);
+        String code = code(), what = Receipt.describe("movimiento", data, LocalDate.now(clock))
+                + (data.has("nota") ? ", «" + Memory.clip(data.getString("nota"), 80) + "»" : "");
+        pending.put(actor, new Pending(code, null, elapsedMillis.getAsLong() + TTL, "registrar_movimiento", data, what));
+        return "¿Lo anoto? Sería " + what + ".\nRespondé «sí» y lo anoto. También vale:\nSÍ " + code + "\n(vale 5 minutos; PARAR cancela)";
+    }
     public void requirePhone() {
         if (!phoneEnabled.getAsBoolean()) throw new IllegalArgumentException("El control del teléfono está apagado. Encendelo desde Ajustes de la app.");
     }

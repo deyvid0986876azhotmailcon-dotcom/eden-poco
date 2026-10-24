@@ -18,6 +18,17 @@ public class ExecutorTest {
         String result = run("borrar_registro", Json.object("id", id));
         return result.substring(result.indexOf("SÍ ") + 3, result.indexOf("\n(vale"));
     }
+    @Test public void photoTicketIsOnlyRecordedAfterTheOwnersYes() throws Exception {
+        String proposal = executor.stageMovement("whatsapp", movement().put("nota", "Super6"));
+        assertTrue(proposal, proposal.startsWith("¿Lo anoto? Sería un gasto de ") && proposal.contains("«Super6»") && proposal.contains("Respondé «sí»"));
+        assertTrue(store.rows().isEmpty());
+        assertFalse(executor.hasPending("david")); // another actor cannot confirm it
+        assertTrue(executor.confirmLatest("whatsapp", "wa:1").startsWith("Anoté un gasto de "));
+        assertEquals(1, store.rows().size());
+        assertEquals("No tengo nada pendiente para confirmar.", executor.confirmLatest("whatsapp", "wa:2")); // single use
+        assertThrows(IllegalArgumentException.class, () -> executor.stageMovement("whatsapp", movement().put("tipo", "robo")));
+        assertFalse(executor.hasPending("whatsapp"));
+    }
     @Test public void rejectsWrongTypesUnknownFieldsAndAmountsWithoutWrites() throws Exception {
         Object[] bad = {"350000", -1, 0, 1.1, Validation.MONEY_LIMIT, JSONObject.NULL};
         for (Object amount : bad) {
