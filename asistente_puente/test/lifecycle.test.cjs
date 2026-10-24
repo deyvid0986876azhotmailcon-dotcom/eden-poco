@@ -57,6 +57,7 @@ async function harness(prelocked = false, manual = false) {
         } };
       }
       if (name === './audio.cjs') return require('../audio.cjs');
+      if (name === './imagen.cjs') return require('../imagen.cjs');
       if (name === './lib.cjs') return { ...lib, post: async (_, message) => { posts.push({ ...message }); return { respuesta: 'Hecho' }; } };
       if (name === 'node:os') return { homedir: () => home };
       if (name === '@whiskeysockets/baileys') return {
