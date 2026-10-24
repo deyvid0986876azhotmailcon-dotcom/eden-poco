@@ -47,11 +47,12 @@ function candidate(message, type, owner, connectedAt, now = Date.now()) {
   }
   if (typeof key.id !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(key.id)) return { reason: 'id inválido' };
   let content = message.message;
-  // Ephemeral TEXT is allowed; media captions, protocol edits, reactions and quoted text are not orders.
+  // Ephemeral TEXT is allowed; protocol edits, reactions and quoted text are not orders. A photo's caption
+  // travels only with that photo, as David's words about it.
   if (content?.ephemeralMessage) content = content.ephemeralMessage.message;
   const text = content?.conversation ?? content?.extendedTextMessage?.text;
-  const audio = content?.audioMessage;
-  if (!audio && (typeof text !== 'string' || !text.trim() || text.length > 4000)) return { reason: 'no es texto válido' };
+  const audio = content?.audioMessage, image = content?.imageMessage;
+  if (!audio && !image && (typeof text !== 'string' || !text.trim() || text.length > 4000)) return { reason: 'no es texto válido' };
   const timestamp = Number(message.messageTimestamp?.toString());
   if (type !== 'notify' || !connectedAt || !Number.isSafeInteger(timestamp)
       || timestamp < connectedAt || timestamp > Math.floor(now / 1000) + 30) return { reason: 'mensaje antiguo o de historial', id: key.id };
@@ -61,6 +62,11 @@ function candidate(message, type, owner, connectedAt, now = Date.now()) {
     try { require('./audio.cjs').metadata(audio); }
     catch { return { reason: 'audio inválido (máximo 5 MB y 3 minutos)', id: key.id }; }
     return { id: key.id, media: message, chat: key.remoteJid };
+  }
+  if (image) {
+    try { require('./imagen.cjs').metadata(image); }
+    catch { return { reason: 'imagen inválida (JPG, PNG o WEBP de hasta 5 MB)', id: key.id }; }
+    return { id: key.id, media: message, kind: 'imagen', chat: key.remoteJid };
   }
   return { id: key.id, text, chat: key.remoteJid };
 }
@@ -86,7 +92,7 @@ async function post(config, message, fetcher = fetch, timeout = 90000, detailed 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
-    const audio = message.audio;
+    const audio = message.audio, image = message.image;
     const headers = { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json' };
     if (audio) {
       const policy = require('./audio.cjs');
@@ -95,11 +101,20 @@ async function post(config, message, fetcher = fetch, timeout = 90000, detailed 
           || !/^[A-Za-z0-9_-]{1,120}$/.test(message.id)) throw new Error('Audio inválido');
       headers['Content-Type'] = policy.mime(audio.mime);
       headers['X-Message-Id'] = message.id; headers['X-Audio-Seconds'] = String(audio.seconds);
+    } else if (image) {
+      const policy = require('./imagen.cjs');
+      if (!Buffer.isBuffer(image.bytes) || !image.bytes.length || image.bytes.length > policy.MAX_BYTES
+          || !/^[A-Za-z0-9_-]{1,120}$/.test(message.id)) throw new Error('Imagen inválida');
+      headers['Content-Type'] = policy.mime(image.mime);
+      headers['X-Message-Id'] = message.id;
+      // headers are ASCII: the caption travels as base64url of its UTF-8
+      const text = policy.caption(image.caption);
+      if (text) headers['X-Caption'] = Buffer.from(text, 'utf8').toString('base64url');
     }
-    const response = await fetcher(`http://127.0.0.1:${config.puerto}/${audio ? 'audio' : 'mensaje'}`, {
+    const response = await fetcher(`http://127.0.0.1:${config.puerto}/${audio ? 'audio' : image ? 'imagen' : 'mensaje'}`, {
       method: 'POST', redirect: 'error', signal: controller.signal,
       headers,
-      body: audio ? audio.bytes : JSON.stringify({ id: message.id, texto: message.text })
+      body: audio ? audio.bytes : image ? image.bytes : JSON.stringify({ id: message.id, texto: message.text })
     });
     if (!response.ok) throw new Error('Respuesta HTTP fallida');
     // The deadline also covers the body. Bound memory even if a different local process owns the port.
@@ -115,7 +130,10 @@ async function post(config, message, fetcher = fetch, timeout = 90000, detailed 
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if (typeof body.respuesta !== 'string' || !body.respuesta.trim()) throw new Error('Respuesta inválida');
     return detailed ? body : body.respuesta;
-  } catch { return detailed ? { respuesta: message.audio ? require('./audio.cjs').LISTEN_FAILED : FALLBACK } : FALLBACK; }
+  } catch {
+    if (!detailed) return FALLBACK;
+    return { respuesta: message.audio ? require('./audio.cjs').LISTEN_FAILED : message.image ? require('./imagen.cjs').SEE_FAILED : FALLBACK };
+  }
   finally { clearTimeout(timer); }
 }
 /** Dispatch immediately to the APP's queue: a local PARAR must also cancel waiting WhatsApp work. */

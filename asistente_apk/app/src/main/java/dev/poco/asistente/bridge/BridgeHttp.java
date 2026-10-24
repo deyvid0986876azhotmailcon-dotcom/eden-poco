@@ -25,6 +25,7 @@ public final class BridgeHttp {
     public static final class Request {
         public String whatsapp;
         public dev.poco.asistente.core.AudioInput audio;
+        public dev.poco.asistente.core.ImageInput image;
         public final boolean backup, pending, confirm;
         public final java.util.List<String> ids;
         public final String id, text;
@@ -38,7 +39,7 @@ public final class BridgeHttp {
         String[] first = line(input, budget).split(" ", -1);
         if (first.length != 3 || !first[2].equals("HTTP/1.1")) throw new Failure(400);
         if (!first[0].equals("POST") && !first[0].equals("GET")) throw new Failure(405);
-        if (!java.util.Arrays.asList("/audio", "/mensaje", "/respaldo", "/pendientes", "/pendientes/confirmar").contains(first[1])) throw new Failure(404);
+        if (!java.util.Arrays.asList("/audio", "/imagen", "/mensaje", "/respaldo", "/pendientes", "/pendientes/confirmar").contains(first[1])) throw new Failure(404);
         boolean readOnly = first[1].equals("/respaldo") || first[1].equals("/pendientes");
         if (!first[0].equals(readOnly ? "GET" : "POST")) throw new Failure(405);
         Map<String, String> headers = new HashMap<>();
@@ -64,16 +65,19 @@ public final class BridgeHttp {
             return request;
         }
         String type = headers.getOrDefault("content-type", "");
-        boolean audio = first[1].equals("/audio");
+        boolean audio = first[1].equals("/audio"), image = first[1].equals("/imagen");
         if (audio) {
             try { type = dev.poco.asistente.core.AudioInput.mime(type); }
+            catch (IllegalArgumentException e) { throw new Failure(415); }
+        } else if (image) {
+            try { type = dev.poco.asistente.core.ImageInput.mime(type); }
             catch (IllegalArgumentException e) { throw new Failure(415); }
         } else if (!type.matches("(?i)application/json(?:\\s*;\\s*charset=utf-8)?")) throw new Failure(415);
         String length = headers.get("content-length");
         if (length == null) throw new Failure(411);
         if (!length.matches("[0-9]{1,10}")) throw new Failure(400);
         long count = Long.parseLong(length);
-        if (count > (audio ? dev.poco.asistente.core.AudioInput.MAX_BYTES : MAX_BODY)) throw new Failure(413);
+        if (count > (audio ? dev.poco.asistente.core.AudioInput.MAX_BYTES : image ? dev.poco.asistente.core.ImageInput.MAX_BYTES : MAX_BODY)) throw new Failure(413);
         if (count == 0) throw new Failure(400);
         String audioId = headers.getOrDefault("x-message-id", "");
         double seconds = 0;
@@ -82,6 +86,18 @@ public final class BridgeHttp {
             if (!audioId.matches("[A-Za-z0-9_-]{1,120}") || !duration.matches("[0-9]{1,3}(?:\\.[0-9]{1,3})?")) throw new Failure(400);
             seconds = Double.parseDouble(duration);
             if (seconds <= 0 || seconds > dev.poco.asistente.core.AudioInput.MAX_SECONDS) throw new Failure(413);
+        }
+        String caption = "";
+        if (image) {
+            if (!audioId.matches("[A-Za-z0-9_-]{1,120}")) throw new Failure(400);
+            String encoded = headers.getOrDefault("x-caption", "");
+            // base64url of UTF-8 (headers are ASCII); at most 1000 characters once decoded
+            if (encoded.length() > 5400 || !encoded.matches("[A-Za-z0-9_-]*")) throw new Failure(400);
+            try {
+                caption = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(java.util.Base64.getUrlDecoder().decode(encoded))).toString();
+                dev.poco.asistente.core.ImageInput.caption(caption);
+            } catch (CharacterCodingException | IllegalArgumentException e) { throw new Failure(400); }
         }
         byte[] body = new byte[(int) count];
         int used = 0;
@@ -94,6 +110,11 @@ public final class BridgeHttp {
         if (audio) {
             Request request = new Request(first[1], audioId, null, java.util.Collections.emptyList());
             request.audio = new dev.poco.asistente.core.AudioInput(body, type, seconds);
+            return request;
+        }
+        if (image) {
+            Request request = new Request(first[1], audioId, null, java.util.Collections.emptyList());
+            request.image = new dev.poco.asistente.core.ImageInput(body, type, caption);
             return request;
         }
         String json;

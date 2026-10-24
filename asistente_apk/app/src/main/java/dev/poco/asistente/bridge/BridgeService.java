@@ -197,6 +197,9 @@ public final class BridgeService extends Service {
                     }
                     if (android.os.SystemClock.elapsedRealtime() - startedAt >= 80000) throw new TimeoutException();
                     result = app.bridge.acceptAudio(request.id, request.audio, arrivalToken, budget);
+                } else if (request.image != null) {
+                    if (android.os.SystemClock.elapsedRealtime() - startedAt >= 80000) throw new TimeoutException();
+                    result = app.bridge.acceptImage(request.id, request.image, arrivalToken, budget);
                 } else result = app.bridge.accept(request.id, request.text, arrivalToken, budget);
                 response = result.get(Math.max(1, 80000 - (android.os.SystemClock.elapsedRealtime() - startedAt)), TimeUnit.MILLISECONDS);
                 stopped = BridgeInbox.wasStopped(result);

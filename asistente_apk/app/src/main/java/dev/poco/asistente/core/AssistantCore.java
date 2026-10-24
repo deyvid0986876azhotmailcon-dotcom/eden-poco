@@ -120,6 +120,16 @@ public final class AssistantCore {
         if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
         return AudioProtocol.transcript(reply);
     }
+    /** Like transcribe: a call without tools sees the photo; the result is a request with the description as data. */
+    public String describeImage(ImageInput image, long ticket, RequestBudget budget) throws Exception {
+        if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
+        String key = settings.apiKey();
+        if (key == null || key.isEmpty()) throw new IllegalArgumentException(ImageInput.FALLBACK);
+        GeminiProtocol.Reply reply = budget.read(() -> cloud.generate(key, settings.model(), ImageInput.description(image),
+                () -> ticket != generation.get() || budget.expired() || Thread.currentThread().isInterrupted()), () -> ticket != generation.get());
+        if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
+        return ImageInput.request(image.caption, ImageInput.described(reply));
+    }
     /** Capture the token when queuing, so PARAR also cancels work that has not started. */
     public String receive(String text, long queuedToken) {
         return receive(text, Source.LOCAL_USER, UUID.randomUUID().toString(), queuedToken);

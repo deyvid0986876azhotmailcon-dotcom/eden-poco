@@ -36,15 +36,19 @@ public final class BridgeInbox {
         return accept(id, text, arrivalToken, core.newRequestBudget());
     }
     public CompletableFuture<String> accept(String id, String text, long arrivalToken, dev.poco.asistente.core.RequestBudget budget) {
-        return accept(id, text, null, arrivalToken, budget);
+        return accept(id, text, null, null, arrivalToken, budget);
     }
     public CompletableFuture<String> acceptAudio(String id, dev.poco.asistente.core.AudioInput audio, long arrivalToken) {
         return acceptAudio(id, audio, arrivalToken, core.newRequestBudget());
     }
     public CompletableFuture<String> acceptAudio(String id, dev.poco.asistente.core.AudioInput audio, long arrivalToken, dev.poco.asistente.core.RequestBudget budget) {
-        return accept(id, "", audio, arrivalToken, budget);
+        return accept(id, "", audio, null, arrivalToken, budget);
     }
-    private CompletableFuture<String> accept(String id, String text, dev.poco.asistente.core.AudioInput audio, long arrivalToken, dev.poco.asistente.core.RequestBudget budget) {
+    public CompletableFuture<String> acceptImage(String id, dev.poco.asistente.core.ImageInput image, long arrivalToken, dev.poco.asistente.core.RequestBudget budget) {
+        return accept(id, "", null, image, arrivalToken, budget);
+    }
+    private CompletableFuture<String> accept(String id, String text, dev.poco.asistente.core.AudioInput audio, dev.poco.asistente.core.ImageInput image,
+                                             long arrivalToken, dev.poco.asistente.core.RequestBudget budget) {
         synchronized (gate) {
             if (!enabled.getAsBoolean()) throw new IllegalStateException("Puente apagado");
             // Reserve room for PARAR even when the ordinary queue is full.
@@ -84,6 +88,13 @@ public final class BridgeInbox {
                                 result.complete("Cola vaciada y confirmaciones canceladas. No se deshacen acciones ya terminadas.");
                                 return;
                             }
+                        }
+                    }
+                    if (image != null) {
+                        try { understood = core.describeImage(image, ticket, budget); }
+                        catch (Exception e) { result.complete(dev.poco.asistente.core.ImageInput.FALLBACK); return; }
+                        synchronized (gate) {
+                            if (result.isDone() || !enabled.getAsBoolean() || ticket != core.cancellationToken()) return;
                         }
                     }
                     String response = core.receive(understood, AssistantCore.Source.WHATSAPP_OWNER, requestId, ticket, budget);

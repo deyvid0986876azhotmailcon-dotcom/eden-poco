@@ -8,6 +8,7 @@ const { OwnerChat, PendingPoller } = require('./pendientes.cjs');
 const { Guardian } = require('./guardian.cjs');
 const { isStop } = require('./lib.cjs');
 const { downloadAudio, sendReply, LISTEN_FAILED } = require('./audio.cjs');
+const { downloadImage, SEE_FAILED } = require('./imagen.cjs');
 const { Backups, signalBackup } = require('./respaldo.cjs');
 const { configuration, split, candidate, Ledger, post, DeliveryQueue, privateDirectory, FALLBACK } = require('./lib.cjs');
 // Do not print library errors, message objects or auth material to logs.
@@ -23,20 +24,22 @@ let backups, ownerChat, pending, guardian, pro, proServer;
 const queue = new DeliveryQueue(async (message, current) => {
   let response;
   if (message.media) {
-    if (downloading >= 2) response = { respuesta: LISTEN_FAILED };
+    const isImage = message.kind === 'imagen', failed = isImage ? SEE_FAILED : LISTEN_FAILED;
+    if (downloading >= 2) response = { respuesta: failed };
     else {
       downloading++;
       const source = connection;
       try {
-        message.audio = await downloadAudio(message.media, downloadMediaMessage,
-          { logger, reuploadRequest: source.socket.updateMediaMessage });
-      } catch { response = { respuesta: LISTEN_FAILED }; log('Audio rechazado o descarga fallida'); }
+        const context = { logger, reuploadRequest: source.socket.updateMediaMessage };
+        if (isImage) message.image = await downloadImage(message.media, downloadMediaMessage, context);
+        else message.audio = await downloadAudio(message.media, downloadMediaMessage, context);
+      } catch { response = { respuesta: failed }; log(isImage ? 'Imagen rechazada o descarga fallida' : 'Audio rechazado o descarga fallida'); }
       finally { downloading--; delete message.media; }
       if (!current() || source !== connection || !source?.opened) return;
     }
   }
   if (!response) response = await post(config, message, fetch, 90000, true);
-  delete message.audio;
+  delete message.audio; delete message.image;
   if (!current()) return;
   if (response.parar === true) { queue.cancel(); pending.pause(); }
   log(response.respuesta === FALLBACK ? 'Fallido: app no disponible o tiempo agotado' : 'Aceptado: respuesta de la app');
@@ -130,7 +133,8 @@ async function connect() {
         if (decision.reason) { log(`Ignorado: ${decision.reason}`); continue; }
         ownerChat.accept(message, event.type, session.connectedAt);
         if (isStop(decision.text)) { pending.pause(); pro?.cancel(); } else pending.resume();
-        log(decision.media ? 'Aceptado: audio privado del remitente autorizado' : 'Aceptado: texto privado del remitente autorizado');
+        log(decision.kind === 'imagen' ? 'Aceptado: imagen privada del remitente autorizado'
+          : decision.media ? 'Aceptado: audio privado del remitente autorizado' : 'Aceptado: texto privado del remitente autorizado');
         if (!queue.add(decision)) log('Fallido: cola llena; no se ejecuta ni se reintenta');
       } catch { fatal(); return; }
     }
