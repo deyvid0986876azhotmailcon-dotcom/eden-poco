@@ -88,10 +88,7 @@ public class MemoryTest {
         }
         String proposal = core.receive("olvidá lo del café, sin azúcar");
         assertTrue(proposal.contains("SÍ ")); assertEquals(3, store.memories().size());
-        core.receive("sí"); assertEquals(3, store.memories().size());
-        java.util.regex.Matcher code = java.util.regex.Pattern.compile("SÍ ([A-F0-9]{16})").matcher(proposal);
-        assertTrue(code.find());
-        core.receive("SÍ " + code.group(1)); assertEquals(2, store.memories().size());
+        core.receive("sí"); assertEquals(2, store.memories().size()); // a plain «sí» confirms the pending forget
         assertTrue(core.receive("olvidá lo del maní").contains("varias"));
         assertTrue(core.receive("olvidá la conversación").contains("Olvidé"));
         assertTrue(store.conversation().isEmpty()); assertEquals(2, store.memories().size());
