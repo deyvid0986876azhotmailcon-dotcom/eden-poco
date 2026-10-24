@@ -97,10 +97,11 @@ final class AndroidActions {
                 TelecomManager telecom = app.getSystemService(TelecomManager.class);
                 if (android.os.Build.VERSION.SDK_INT >= 29 && app.getSystemService(android.telephony.TelephonyManager.class).isEmergencyNumber(number))
                     throw new IllegalArgumentException("No llamo a números de emergencia.");
-                String dialer = telecom.getDefaultDialerPackage();
-                if (PhonePolicy.blocked(dialer)) throw new IllegalArgumentException("No encontré un marcador permitido.");
-                phone.launchResolved(new Intent(Intent.ACTION_CALL, Uri.fromParts("tel", number, null)).setPackage(dialer));
-                return "Pedí llamar a " + a.getString("contacto") + " (" + number + ").";
+                // ACTION_CALL is handled by Telecom, not by the dialer app (setPackage(dialer) never resolved on
+                // 2026-10-23); placeCall needs only CALL_PHONE and no activity start from the background.
+                try { telecom.placeCall(Uri.fromParts("tel", number, null), new android.os.Bundle()); }
+                catch (SecurityException e) { throw new IllegalArgumentException("Falta el permiso de llamadas. Abrí Asistente → Ajustes → Control del teléfono."); }
+                return "Llamando a " + a.getString("contacto") + " (" + number + ").";
             case "mensaje_whatsapp":
                 Uri uri = new Uri.Builder().scheme("https").authority("wa.me")
                         .appendPath(a.getString("numero").substring(1)).appendQueryParameter("text", a.getString("texto")).build();

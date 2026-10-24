@@ -39,7 +39,9 @@ public final class PhoneAccessibility extends AccessibilityService {
     }
     static void launch(Intent intent) {
         PhoneAccessibility service = connected;
-        if (service == null) throw new IllegalArgumentException("En Asistente → Ajustes → Control del teléfono, tocá Accesibilidad y habilitá Asistente: abrir apps.");
+        // After each update Android may keep the service enabled but unbound (seen on HyperOS 2026-10-23): toggling it reconnects.
+        if (service == null) throw new IllegalArgumentException("Android desconectó «Asistente: abrir apps» (pasa tras una actualización). "
+                + "En Ajustes del teléfono → Accesibilidad → Apps instaladas, apagalo y volvé a prenderlo, y repetí el pedido.");
         if (!((AssistantApplication) service.getApplication()).settings.phoneEnabled()) throw new IllegalArgumentException("El control del teléfono está apagado.");
         String pkg = intent.getComponent() == null ? intent.getPackage() : intent.getComponent().getPackageName();
         if (PhonePolicy.blocked(pkg)) throw new IllegalArgumentException("Esa no la puedo abrir.");
