@@ -140,7 +140,7 @@ JVM; renderizado Android y entrega real requieren prueba en teléfono.
 
 **Finanzas desde el correo del banco:** en vez de entrar al banco, leer con permiso de solo lectura de Gmail solo los correos del remitente del banco, anotar gastos e ingresos (monto, comercio, fecha) y avisar; si un correo no se entiende, preguntar antes de anotar. Falta: qué banco y un correo de ejemplo de gasto y de ingreso (con la cuenta tapada). El saldo, por captura de pantalla que manda David.
 
-**Pendiente de aclarar:** «verificación de paso» (¿contador de pasos?).
+**Descartado (2026-10-23):** «verificación de paso»; David no recordaba a qué se refería.
 
 **Cómo:** servicio de accesibilidad de la app (ver pantalla, tocar, escribir) con lista cerrada de acciones y apps permitidas; ejecutor que valida cada acción como hoy los registros. Primero lo que solo lee, después acciones simples, al final lo que pide confirmación.
 
