@@ -154,7 +154,8 @@ public final class AndroidPhone implements PhoneTools.Port {
             java.net.URL url = new java.net.URL("https://www.youtube.com/results?search_query=" + java.net.URLEncoder.encode(query, "UTF-8"));
             connection = (java.net.HttpURLConnection) url.openConnection();
             connection.setConnectTimeout(5000); connection.setReadTimeout(5000); connection.setInstanceFollowRedirects(false);
-            connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14)");
+            // a phone User-Agent gets a 302 to m.youtube.com (redirects are off): ask for the desktop page
+            connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
             connection.setRequestProperty("Accept-Language", "es-PY,es;q=0.9");
             if (connection.getResponseCode() != 200) return null;
             StringBuilder page = new StringBuilder();
