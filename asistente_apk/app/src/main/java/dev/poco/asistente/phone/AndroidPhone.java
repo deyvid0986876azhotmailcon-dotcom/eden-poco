@@ -99,9 +99,12 @@ public final class AndroidPhone implements PhoneTools.Port {
         String action = a.getString("accion");
         if (action.equals("abrir") || action.equals("buscar")) {
             String pkg = a.getString("app").equals("spotify") ? "com.spotify.music" : "app.morphe.android.apps.youtube.music";
-            // No URI from the model, no auto-play/deep-link purchases. Open the explicitly chosen player.
-            launchApp(pkg);
-            return "Pedí abrir " + a.getString("app") + (action.equals("buscar") ? ". Buscá ahí «" + a.getString("consulta") + "»; todavía no elijo canciones dentro de la app." : ".");
+            // No URI from the model: a plain-text query through Android's standard play-from-search, pinned to the chosen player.
+            if (action.equals("abrir")) { launchApp(pkg); return "Pedí abrir " + a.getString("app") + "."; }
+            launchResolved(new Intent(android.provider.MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).setPackage(pkg)
+                    .putExtra(android.app.SearchManager.QUERY, a.getString("consulta"))
+                    .putExtra(android.provider.MediaStore.EXTRA_MEDIA_FOCUS, "vnd.android.cursor.item/*"));
+            return "Puse «" + a.getString("consulta") + "» en " + (pkg.equals("com.spotify.music") ? "Spotify" : "YouTube Music") + ".";
         }
         if (!PhoneNotifications.connected()) throw new IllegalArgumentException("Habilitá Notificaciones en Control del teléfono para identificar qué app está reproduciendo.");
         MediaSessionManager manager = app.getSystemService(MediaSessionManager.class);

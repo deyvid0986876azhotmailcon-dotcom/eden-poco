@@ -26,6 +26,10 @@ public class PhoneToolsTest {
         assertThrows(IllegalArgumentException.class, () -> PhoneTools.validate("consultar_agenda", Json.object("desde", "2026-10-01", "hasta", "2026-12-01")));
         assertThrows(IllegalArgumentException.class, () -> PhoneTools.validate("musica", Json.object("accion", "buscar", "app", "intent://evil", "consulta", "song")));
         assertThrows(IllegalArgumentException.class, () -> PhoneTools.validate("musica", Json.object("accion", "pausar", "app", "spotify")));
+        // «poné kilómetros de los kaligaris en yt music» (2026-10-23): a song with reproducir is a search, YT Music by default
+        org.json.JSONObject song = PhoneTools.validate("musica", Json.object("accion", "reproducir", "app", "yt music", "consulta", "Kilómetros Los Caligaris"));
+        assertEquals("buscar", song.getString("accion")); assertEquals("youtube music", song.getString("app"));
+        assertEquals("youtube music", PhoneTools.validate("musica", Json.object("accion", "buscar", "consulta", "Kilómetros")).getString("app"));
         assertThrows(IllegalArgumentException.class, () -> PhoneTools.validate("agendar", new JSONObject()));
     }
     @Test public void calendarLimitsCountBothDatesAndSeparateAllDayFromLocalInstants() throws Exception {
