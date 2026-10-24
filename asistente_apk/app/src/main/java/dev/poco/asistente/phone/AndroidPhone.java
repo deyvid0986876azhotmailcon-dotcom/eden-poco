@@ -110,7 +110,8 @@ public final class AndroidPhone implements PhoneTools.Port {
                 String id = youtubeVideoId(query);
                 if (id != null) {
                     launchResolved(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://music.youtube.com/watch?v=" + id)).setPackage(pkg));
-                    return "Puse «" + query + "» en YouTube Music.";
+                    return started(pkg) ? "Puse «" + query + "» en YouTube Music."
+                            : "Abrí «" + query + "» en YouTube Music, pero no arrancó sola. Tocá play ahí.";
                 }
             }
             MediaController session = playerSession(pkg);
@@ -125,7 +126,9 @@ public final class AndroidPhone implements PhoneTools.Port {
             if (state == null || (state.getActions() & PlaybackState.ACTION_PLAY_FROM_SEARCH) == 0)
                 return "Abrí " + name + " con «" + query + "». Si no arrancó sola, tocá play ahí.";
             session.getTransportControls().playFromSearch(query, new android.os.Bundle());
-            return "Puse «" + query + "» en " + name + ".";
+            // say «Puse» only when the player confirms: on 2026-10-23 it said so while YT Music stayed paused
+            return started(pkg) ? "Puse «" + query + "» en " + name + "."
+                    : "Le pasé «" + query + "» a " + name + ", pero no arrancó. Abrila y tocá play.";
         }
         if (!PhoneNotifications.connected()) throw new IllegalArgumentException("Habilitá Notificaciones en Control del teléfono para identificar qué app está reproduciendo.");
         MediaSessionManager manager = app.getSystemService(MediaSessionManager.class);
@@ -171,6 +174,17 @@ public final class AndroidPhone implements PhoneTools.Port {
         } catch (Exception ignored) { }
         finally { if (connection != null) connection.disconnect(); }
         return null;
+    }
+    /** True once the player reports playing (or buffering towards it) within ~5 s. Runs inside the action gate. */
+    private boolean started(String pkg) throws InterruptedException {
+        for (int i = 0; i < 17; i++) {
+            MediaController session = playerSession(pkg);
+            PlaybackState state = session == null ? null : session.getPlaybackState();
+            int now = state == null ? PlaybackState.STATE_NONE : state.getState();
+            if (now == PlaybackState.STATE_PLAYING || now == PlaybackState.STATE_BUFFERING || now == PlaybackState.STATE_CONNECTING) return true;
+            Thread.sleep(300);
+        }
+        return false;
     }
     /** The player's media session, or null while it is not running; needs the notification access already used for the media keys. */
     private MediaController playerSession(String pkg) {
