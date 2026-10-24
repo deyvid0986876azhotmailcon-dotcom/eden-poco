@@ -120,8 +120,11 @@ public final class AssistantCore {
         if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
         return AudioProtocol.transcript(reply);
     }
-    /** Both photo calls are tool-free; the final external response bypasses receive() and history. */
+    /** Photos only propose movements; serialize with text so a newer request cannot overtake a proposal. */
     public String describeImage(ImageInput image, long ticket, RequestBudget budget) throws Exception {
+        synchronized (requestGate) { return describeImageInternal(image, ticket, budget); }
+    }
+    private String describeImageInternal(ImageInput image, long ticket, RequestBudget budget) throws Exception {
         synchronized (actionGate) {
             if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
             executor.cancelActor("whatsapp");
@@ -132,16 +135,15 @@ public final class AssistantCore {
                 () -> ticket != generation.get() || budget.expired() || Thread.currentThread().isInterrupted()), () -> ticket != generation.get());
         if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
         String description = ImageInput.described(reply);
-        // David asked that a ticket be guessed (2026-10-24): a tool-free model may only *propose* a movement; the
-        // executor stages it and nothing is recorded until his «sí». Any failure here just means no proposal.
-        String proposal = null;
+        // The only allowed tool output is a proposal. Return its exact validated data immediately:
+        // no further cloud call may fail after staging and leave an unseen confirmation behind.
         try {
             GeminiProtocol.Reply movement = budget.read(() -> cloud.generate(key, settings.model(), ImageInput.receipt(description, LocalDate.now(clock)),
                     () -> ticket != generation.get() || budget.expired() || Thread.currentThread().isInterrupted()), () -> ticket != generation.get());
             if ("registrar_movimiento".equals(movement.tool) && movement.args != null) {
                 synchronized (actionGate) {
                     if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
-                    proposal = executor.stageMovement("whatsapp", movement.args);
+                    return ExternalData.wrap(executor.stageMovement("whatsapp", movement.args));
                 }
             }
         } catch (IllegalArgumentException e) {
@@ -149,16 +151,17 @@ public final class AssistantCore {
         } catch (Exception ignored) { }
         // External pixels must never enter receive(), its tools, confirmations or history.
         org.json.JSONObject request = GeminiProtocol.request(ImageInput.request(image.caption, description),
-                proposal != null
-                        ? "Respondé sobre la foto en una o dos frases sin ejecutar acciones. La app ya le propone anotar el comprobante aparte: no repitas los montos ni pidas que los escriba."
-                        : "Respondé sobre la foto sin ejecutar acciones. Si hace falta anotar o actuar, pedí que David repita el pedido y los datos en un mensaje de texto.",
+                "Respondé sobre la foto sin ejecutar acciones. Si hace falta anotar o actuar, pedí que David repita el pedido y los datos en un mensaje de texto.",
                 LocalDate.now(clock), settings.currency());
         request.remove("tools"); request.remove("toolConfig");
-        GeminiProtocol.Reply answer = budget.read(() -> cloud.generate(key, settings.model(), request,
-                () -> ticket != generation.get() || budget.expired() || Thread.currentThread().isInterrupted()), () -> ticket != generation.get());
+        String said = description;
+        try {
+            GeminiProtocol.Reply answer = budget.read(() -> cloud.generate(key, settings.model(), request,
+                    () -> ticket != generation.get() || budget.expired() || Thread.currentThread().isInterrupted()), () -> ticket != generation.get());
+            said = ImageInput.described(answer);
+        } catch (Exception ignored) { /* Preserve the successful description if optional enrichment fails. */ }
         if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
-        String said = ImageInput.described(answer);
-        return ExternalData.wrap(proposal == null ? said : said + "\n\n" + proposal);
+        return ExternalData.wrap(said);
     }
     /** Capture the token when queuing, so PARAR also cancels work that has not started. */
     public String receive(String text, long queuedToken) {

@@ -29,6 +29,14 @@ public class ExecutorTest {
         assertThrows(IllegalArgumentException.class, () -> executor.stageMovement("whatsapp", movement().put("tipo", "robo")));
         assertFalse(executor.hasPending("whatsapp"));
     }
+    @Test public void photoProposalShowsFullNoteAndRejectsRoundedGuaranies() throws Exception {
+        String note = new String(new char[120]).replace('\0', 'x') + " final";
+        assertTrue(executor.stageMovement("whatsapp", movement().put("nota",note)).contains(note));
+        executor.cancelActor("whatsapp");
+        assertThrows(IllegalArgumentException.class, () -> executor.stageMovement("whatsapp",
+                movement().put("moneda","PYG").put("centavos",101)));
+        assertFalse(executor.hasPending("whatsapp")); assertTrue(store.rows().isEmpty());
+    }
     @Test public void rejectsWrongTypesUnknownFieldsAndAmountsWithoutWrites() throws Exception {
         Object[] bad = {"350000", -1, 0, 1.1, Validation.MONEY_LIMIT, JSONObject.NULL};
         for (Object amount : bad) {

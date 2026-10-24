@@ -196,9 +196,12 @@ public final class ToolExecutor {
     /** A movement proposed from a photo: shown with its exact data and confirmed with «sí» like the phone actions. */
     public synchronized String stageMovement(String actor, JSONObject proposed) throws Exception {
         JSONObject data = Validation.record("movimiento", proposed, LocalDate.now(clock));
+        // Receipt.money displays whole guaranies; do not confirm a silently rounded amount.
+        if ("PYG".equals(data.getString("moneda")) && data.getLong("centavos") % 100 != 0)
+            throw new IllegalArgumentException("El monto en guaraníes debe ser entero.");
         pending.remove(actor);
         String code = code(), what = Receipt.describe("movimiento", data, LocalDate.now(clock))
-                + (data.has("nota") ? ", «" + Memory.clip(data.getString("nota"), 80) + "»" : "");
+                + (data.has("nota") ? ", «" + data.getString("nota") + "»" : "");
         pending.put(actor, new Pending(code, null, elapsedMillis.getAsLong() + TTL, "registrar_movimiento", data, what));
         return "¿Lo anoto? Sería " + what + ".\nRespondé «sí» y lo anoto. También vale:\nSÍ " + code + "\n(vale 5 minutos; PARAR cancela)";
     }

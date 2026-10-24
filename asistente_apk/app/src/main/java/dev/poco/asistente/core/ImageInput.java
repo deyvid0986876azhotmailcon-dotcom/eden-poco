@@ -48,7 +48,7 @@ public final class ImageInput {
         return Memory.clip(reply.text.trim(), MAX_DESCRIPTION);
     }
     /**
-     * Second tool-free look at the description: if it is a ticket or payment of David's, the only possible output is a
+     * Second look at the description: if it is a ticket or payment of David's, the only accepted tool output is a
      * registrar_movimiento proposal. Nothing runs: the executor stages it and only David's «sí» records it.
      */
     public static JSONObject receipt(String description, java.time.LocalDate today) throws Exception {

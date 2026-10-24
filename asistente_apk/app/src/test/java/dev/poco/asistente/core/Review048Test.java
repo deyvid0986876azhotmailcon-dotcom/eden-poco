@@ -71,8 +71,85 @@ public class Review048Test {
                 ? new GeminiProtocol.Reply("Ticket",null,null,"")
                 : new GeminiProtocol.Reply(null,"brillo",Json.object("porcentaje",20),""),
                 (t,a) -> { throw new AssertionError("Photo reached phone"); });
-        assertThrows(IllegalArgumentException.class, () -> core.describeImage(
-                new ImageInput(new byte[]{1},"image/jpeg",""),core.cancellationToken(),core.newRequestBudget()));
+        assertTrue(core.describeImage(new ImageInput(new byte[]{1},"image/jpeg",""),
+                core.cancellationToken(),core.newRequestBudget()).contains("Ticket"));
+        assertTrue(store.rows().isEmpty());
+    }
+    private JSONObject ticket() throws Exception {
+        return Json.object("tipo","gasto","centavos",350000,"moneda","PYG",
+                "categoria","comida","fecha",java.time.LocalDate.now(clock).toString());
+    }
+    private String photo(AssistantCore core) throws Exception {
+        return core.describeImage(new ImageInput(new byte[]{1},"image/jpeg","sí"),
+                core.cancellationToken(),core.newRequestBudget());
+    }
+    @Test public void ticketIsShownWithoutAFallibleThirdCallAndOnlyOwnerYesRecordsIt() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        AssistantCore core = core((k,m,b) -> {
+            int call = calls.incrementAndGet();
+            if (call == 1) return new GeminiProtocol.Reply("Ticket",null,null,"");
+            if (call == 2) return new GeminiProtocol.Reply(null,"registrar_movimiento",ticket(),"");
+            throw new java.io.IOException("Unavailable");
+        }, PhoneTools.UNAVAILABLE);
+        assertTrue(photo(core).contains("¿Lo anoto?"));
+        assertEquals(2,calls.get()); assertTrue(store.rows().isEmpty());
+        assertTrue(core.receive("sí",AssistantCore.Source.WHATSAPP_OWNER,"yes").startsWith("Anoté"));
+        assertEquals(1,store.rows().size());
+    }
+    @Test public void optionalPhotoFailuresKeepDescriptionAndNoPendingMovement() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        AssistantCore core = core((k,m,b) -> {
+            if (calls.incrementAndGet() == 1) return new GeminiProtocol.Reply("Ticket legible",null,null,"");
+            throw new java.io.IOException("Unavailable");
+        },PhoneTools.UNAVAILABLE);
+        assertTrue(photo(core).contains("Ticket legible"));
+        core.receive("sí",AssistantCore.Source.WHATSAPP_OWNER,"yes");
+        assertTrue(store.rows().isEmpty());
+    }
+    @Test public void stopDuringReceiptExtractionPreventsStaging() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        AtomicInteger calls = new AtomicInteger();
+        AssistantCore core = core((k,m,b) -> {
+            int call = calls.incrementAndGet();
+            if (call == 1) return new GeminiProtocol.Reply("Ticket",null,null,"");
+            if (call > 2) return new GeminiProtocol.Reply("Hola",null,null,"");
+            entered.countDown(); release.await(3,TimeUnit.SECONDS);
+            return new GeminiProtocol.Reply(null,"registrar_movimiento",ticket(),"");
+        },PhoneTools.UNAVAILABLE);
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<String> result = worker.submit(() -> photo(core));
+            assertTrue(entered.await(2,TimeUnit.SECONDS)); core.stop(); release.countDown();
+            assertThrows(ExecutionException.class, () -> result.get(2,TimeUnit.SECONDS));
+            core.receive("sí",AssistantCore.Source.WHATSAPP_OWNER,"yes");
+            assertTrue(store.rows().isEmpty());
+        } finally { release.countDown(); worker.shutdownNow(); }
+    }
+    @Test public void newerRequestWaitsForPhotoThenDisarmsItsProposal() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1), started = new CountDownLatch(1);
+        AtomicInteger calls = new AtomicInteger();
+        AssistantCore core = core((k,m,b) -> {
+            int call = calls.incrementAndGet();
+            if (call == 1) return new GeminiProtocol.Reply("Ticket",null,null,"");
+            if (call == 2) {
+                entered.countDown(); release.await(3,TimeUnit.SECONDS);
+                return new GeminiProtocol.Reply(null,"registrar_movimiento",ticket(),"");
+            }
+            return new GeminiProtocol.Reply("Hola",null,null,"");
+        },PhoneTools.UNAVAILABLE);
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<String> image = workers.submit(() -> photo(core));
+            assertTrue(entered.await(2,TimeUnit.SECONDS));
+            Future<String> newer = workers.submit(() -> { started.countDown();
+                return core.receive("hola",AssistantCore.Source.WHATSAPP_OWNER,"new"); });
+            assertTrue(started.await(2,TimeUnit.SECONDS));
+            assertThrows(TimeoutException.class, () -> newer.get(100,TimeUnit.MILLISECONDS));
+            release.countDown(); assertTrue(image.get(2,TimeUnit.SECONDS).contains("¿Lo anoto?"));
+            newer.get(2,TimeUnit.SECONDS);
+            core.receive("sí",AssistantCore.Source.WHATSAPP_OWNER,"yes");
+            assertTrue(store.rows().isEmpty());
+        } finally { release.countDown(); workers.shutdownNow(); }
     }
     @Test public void stopDuringMusicSearchPreventsLatePlayback() throws Exception {
         CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
