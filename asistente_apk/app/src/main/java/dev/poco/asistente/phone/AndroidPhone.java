@@ -104,6 +104,15 @@ public final class AndroidPhone implements PhoneTools.Port {
             String query = a.getString("consulta"), name = pkg.equals("com.spotify.music") ? "Spotify" : "YouTube Music";
             // The play-from-search intent alone opened YT Music (Morphe) without playing (2026-10-23); its media
             // session does accept playFromSearch, so the query goes to the session, opening the app first if needed.
+            if (!pkg.equals("com.spotify.music")) {
+                // YT Music ignores playFromSearch from apps other than Google's (it stayed paused on the old song);
+                // a music.youtube.com/watch link does play. The video id comes from YouTube's results page, never from the model.
+                String id = youtubeVideoId(query);
+                if (id != null) {
+                    launchResolved(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://music.youtube.com/watch?v=" + id)).setPackage(pkg));
+                    return "Puse «" + query + "» en YouTube Music.";
+                }
+            }
             MediaController session = playerSession(pkg);
             if (session == null) {
                 launchResolved(new Intent(android.provider.MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).setPackage(pkg)
@@ -137,6 +146,30 @@ public final class AndroidPhone implements PhoneTools.Port {
         boolean down = target.dispatchMediaButtonEvent(new KeyEvent(KeyEvent.ACTION_DOWN, key));
         boolean up = target.dispatchMediaButtonEvent(new KeyEvent(KeyEvent.ACTION_UP, key));
         return down && up ? "Mandé al reproductor la orden de " + action + "." : "El reproductor no aceptó la orden. Probá desde su app.";
+    }
+    /** First video id of a YouTube search, or null (no network, page changed). Bounded in time and size. */
+    private static String youtubeVideoId(String query) {
+        java.net.HttpURLConnection connection = null;
+        try {
+            java.net.URL url = new java.net.URL("https://www.youtube.com/results?search_query=" + java.net.URLEncoder.encode(query, "UTF-8"));
+            connection = (java.net.HttpURLConnection) url.openConnection();
+            connection.setConnectTimeout(5000); connection.setReadTimeout(5000); connection.setInstanceFollowRedirects(false);
+            connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14)");
+            connection.setRequestProperty("Accept-Language", "es-PY,es;q=0.9");
+            if (connection.getResponseCode() != 200) return null;
+            StringBuilder page = new StringBuilder();
+            try (java.io.Reader in = new java.io.InputStreamReader(connection.getInputStream(), java.nio.charset.StandardCharsets.UTF_8)) {
+                char[] buffer = new char[16384]; int n;
+                java.util.regex.Pattern video = java.util.regex.Pattern.compile("\"videoId\":\"([A-Za-z0-9_-]{11})\"");
+                while ((n = in.read(buffer)) != -1 && page.length() < 3_000_000) {
+                    page.append(buffer, 0, n);
+                    java.util.regex.Matcher m = video.matcher(page);
+                    if (m.find()) return m.group(1);
+                }
+            }
+        } catch (Exception ignored) { }
+        finally { if (connection != null) connection.disconnect(); }
+        return null;
     }
     /** The player's media session, or null while it is not running; needs the notification access already used for the media keys. */
     private MediaController playerSession(String pkg) {
