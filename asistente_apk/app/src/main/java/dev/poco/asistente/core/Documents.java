@@ -101,6 +101,17 @@ public final class Documents {
         return pages(text.replace('\n', ' '), width, maxWidth, Integer.MAX_VALUE).get(0);
     }
     public interface Width { float measure(String value); }
+    /** Number of wrapped lines that fit without drawing into the footer. */
+    public static int fittingLines(float available, float overhead, float lineHeight, int remaining) {
+        return Math.min(remaining, Math.max(0, (int) Math.floor((available - overhead) / lineHeight)));
+    }
+    /** Only unreferenced UUID files in our private document directory are disposable. */
+    public static void pruneFiles(java.io.File directory, Set<String> retained) {
+        java.io.File[] files = directory.listFiles();
+        if (files == null) return;
+        for (java.io.File file : files)
+            if (file.isFile() && file.getName().matches("[0-9a-f-]{36}") && !retained.contains(file.getName())) file.delete();
+    }
     public static List<List<String>> pages(String text, Width width, float maxWidth, int lines) {
         if (text == null || text.length() > 100000 || lines < 1 || maxWidth <= 0) throw new IllegalArgumentException("Contenido demasiado largo o paginado inválido.");
         List<List<String>> pages = new ArrayList<>(); List<String> page = new ArrayList<>(); pages.add(page);

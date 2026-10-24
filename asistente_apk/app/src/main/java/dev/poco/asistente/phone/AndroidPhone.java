@@ -18,7 +18,15 @@ import org.json.JSONObject;
 public final class AndroidPhone implements PhoneTools.Port {
     private final AssistantApplication app;
     public AndroidPhone(AssistantApplication app) { this.app = app; }
-    @Override public JSONObject prepare(String tool, JSONObject args) throws Exception { return new AndroidActions(app, this).prepare(tool, args); }
+    @Override public JSONObject prepare(String tool, JSONObject args) throws Exception {
+        if (!tool.equals("musica")) return new AndroidActions(app, this).prepare(tool, args);
+        JSONObject prepared = Json.copy(args);
+        if ("buscar".equals(args.optString("accion")) && "youtube music".equals(args.optString("app"))) {
+            String id = youtubeVideoId(args.getString("consulta"));
+            if (id != null) prepared.put("videoId", id);
+        }
+        return prepared;
+    }
     private List<PhonePolicy.App> apps() {
         List<PhonePolicy.App> apps = new ArrayList<>();
         Intent query = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
@@ -102,16 +110,14 @@ public final class AndroidPhone implements PhoneTools.Port {
             // No URI from the model: a plain-text query through Android's standard play-from-search, pinned to the chosen player.
             if (action.equals("abrir")) { launchApp(pkg); return "Pedí abrir " + a.getString("app") + "."; }
             String query = a.getString("consulta"), name = pkg.equals("com.spotify.music") ? "Spotify" : "YouTube Music";
-            // The play-from-search intent alone opened YT Music (Morphe) without playing (2026-10-23); its media
-            // session does accept playFromSearch, so the query goes to the session, opening the app first if needed.
+            // Network resolution happened in prepare(), outside the action gate.
             if (!pkg.equals("com.spotify.music")) {
                 // YT Music ignores playFromSearch from apps other than Google's (it stayed paused on the old song);
                 // a music.youtube.com/watch link does play. The video id comes from YouTube's results page, never from the model.
-                String id = youtubeVideoId(query);
+                String id = a.optString("videoId", null);
                 if (id != null) {
                     launchResolved(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://music.youtube.com/watch?v=" + id)).setPackage(pkg));
-                    return started(pkg) ? "Puse «" + query + "» en YouTube Music."
-                            : "Abrí «" + query + "» en YouTube Music, pero no arrancó sola. Tocá play ahí.";
+                    return "Pedí reproducir «" + query + "» en YouTube Music. Si no arrancó, tocá play ahí.";
                 }
             }
             MediaController session = playerSession(pkg);
@@ -119,16 +125,14 @@ public final class AndroidPhone implements PhoneTools.Port {
                 launchResolved(new Intent(android.provider.MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).setPackage(pkg)
                         .putExtra(android.app.SearchManager.QUERY, query)
                         .putExtra(android.provider.MediaStore.EXTRA_MEDIA_FOCUS, "vnd.android.cursor.item/*"));
-                // at most ~3.6 s: this runs inside the action gate, so PARAR waits that long at worst
-                for (int i = 0; i < 12 && session == null; i++) { Thread.sleep(300); session = playerSession(pkg); }
+                return "Abrí " + name + " con «" + query + "». Si no arrancó sola, tocá play ahí.";
             }
             PlaybackState state = session == null ? null : session.getPlaybackState();
             if (state == null || (state.getActions() & PlaybackState.ACTION_PLAY_FROM_SEARCH) == 0)
                 return "Abrí " + name + " con «" + query + "». Si no arrancó sola, tocá play ahí.";
             session.getTransportControls().playFromSearch(query, new android.os.Bundle());
-            // say «Puse» only when the player confirms: on 2026-10-23 it said so while YT Music stayed paused
-            return started(pkg) ? "Puse «" + query + "» en " + name + "."
-                    : "Le pasé «" + query + "» a " + name + ", pero no arrancó. Abrila y tocá play.";
+            // Do not wait under the action gate or claim the requested song is already playing.
+            return "Le pasé «" + query + "» a " + name + ". Si no arrancó, abrila y tocá play.";
         }
         if (!PhoneNotifications.connected()) throw new IllegalArgumentException("Habilitá Notificaciones en Control del teléfono para identificar qué app está reproduciendo.");
         MediaSessionManager manager = app.getSystemService(MediaSessionManager.class);
@@ -153,6 +157,7 @@ public final class AndroidPhone implements PhoneTools.Port {
     /** First video id of a YouTube search, or null (no network, page changed). Bounded in time and size. */
     private static String youtubeVideoId(String query) {
         java.net.HttpURLConnection connection = null;
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(12);
         try {
             java.net.URL url = new java.net.URL("https://www.youtube.com/results?search_query=" + java.net.URLEncoder.encode(query, "UTF-8"));
             connection = (java.net.HttpURLConnection) url.openConnection();
@@ -166,6 +171,7 @@ public final class AndroidPhone implements PhoneTools.Port {
                 char[] buffer = new char[16384]; int n;
                 java.util.regex.Pattern video = java.util.regex.Pattern.compile("\"videoId\":\"([A-Za-z0-9_-]{11})\"");
                 while ((n = in.read(buffer)) != -1 && page.length() < 3_000_000) {
+                    if (Thread.currentThread().isInterrupted() || System.nanoTime() >= deadline) return null;
                     page.append(buffer, 0, n);
                     java.util.regex.Matcher m = video.matcher(page);
                     if (m.find()) return m.group(1);
@@ -174,17 +180,6 @@ public final class AndroidPhone implements PhoneTools.Port {
         } catch (Exception ignored) { }
         finally { if (connection != null) connection.disconnect(); }
         return null;
-    }
-    /** True once the player reports playing (or buffering towards it) within ~5 s. Runs inside the action gate. */
-    private boolean started(String pkg) throws InterruptedException {
-        for (int i = 0; i < 17; i++) {
-            MediaController session = playerSession(pkg);
-            PlaybackState state = session == null ? null : session.getPlaybackState();
-            int now = state == null ? PlaybackState.STATE_NONE : state.getState();
-            if (now == PlaybackState.STATE_PLAYING || now == PlaybackState.STATE_BUFFERING || now == PlaybackState.STATE_CONNECTING) return true;
-            Thread.sleep(300);
-        }
-        return false;
     }
     /** The player's media session, or null while it is not running; needs the notification access already used for the media keys. */
     private MediaController playerSession(String pkg) {

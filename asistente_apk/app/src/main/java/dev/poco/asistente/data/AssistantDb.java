@@ -122,6 +122,7 @@ public final class AssistantDb extends SQLiteOpenHelper implements dev.poco.asis
         } finally { db.endTransaction(); }
     }
     @Override public synchronized String enqueueDocument(String operation, dev.poco.asistente.core.Documents.Prepared document, long now) throws Exception {
+        pruneDocuments();
         dev.poco.asistente.core.Documents.validate(document.name, document.mime, document.bytes.length);
         if (!documentDir.isDirectory() && !documentDir.mkdirs()) throw new java.io.IOException("No pude crear documentos");
         String key = java.util.UUID.randomUUID().toString();
@@ -144,6 +145,7 @@ public final class AssistantDb extends SQLiteOpenHelper implements dev.poco.asis
         } finally { if (!committed) file.delete(); }
     }
     @Override public synchronized org.json.JSONArray lease(long now, boolean quiet) throws Exception {
+        pruneDocuments();
         SQLiteDatabase db = getWritableDatabase(); db.beginTransaction();
         try {
             // Keep the id for deduplication, but do not deliver yesterday's or afternoon's greeting.
@@ -222,6 +224,7 @@ public final class AssistantDb extends SQLiteOpenHelper implements dev.poco.asis
             }
             db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
+        pruneDocuments();
     }
     public synchronized void cancelOutgoing() {
         SQLiteDatabase db = getWritableDatabase(); db.beginTransaction();
@@ -234,6 +237,16 @@ public final class AssistantDb extends SQLiteOpenHelper implements dev.poco.asis
             db.setTransactionSuccessful();
         } catch (Exception e) { throw new IllegalStateException("No se pudo cancelar la cola saliente."); }
         finally { db.endTransaction(); }
+        pruneDocuments();
+    }
+    /** Read committed references before deleting; a failed transaction keeps its queued files. */
+    private void pruneDocuments() {
+        if (getWritableDatabase().inTransaction()) return;
+        java.util.Set<String> retained = new java.util.HashSet<>();
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT documento FROM salientes WHERE documento IS NOT NULL", null)) {
+            while (c.moveToNext()) retained.add(new JSONObject(c.getString(0)).getString("archivo"));
+        } catch (Exception e) { return; }
+        dev.poco.asistente.core.Documents.pruneFiles(documentDir, retained);
     }
     /** Atomic persistent claim. Never prune these IDs: old updates must not repeat a financial action. */
     public synchronized boolean claimNotice(String id, String sender) {

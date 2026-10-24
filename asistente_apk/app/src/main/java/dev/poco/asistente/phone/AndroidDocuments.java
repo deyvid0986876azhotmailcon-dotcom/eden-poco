@@ -79,46 +79,57 @@ public final class AndroidDocuments implements Documents.Port {
                 case 'r': lines = Documents.wrap(block.text, body::measureText, W - 2 * M - 150); need = Math.max(22, 16 * lines.size() + 6); break;
                 default: lines = Documents.wrap(block.text, body::measureText, W - 2 * M); need = 16 * lines.size() + 2;
             }
-            if (y + need > BOTTOM) {
-                if (pages.size() >= 100) throw new IllegalArgumentException("El PDF supera 100 páginas.");
-                page = new ArrayList<>(); pages.add(page);
-                // Following pages: the title small, above a rule.
-                page.add(c -> { c.drawText(title.length() > 90 ? title.substring(0, 90) + "…" : title, M, 40, small); c.drawLine(M, 48, W - M, 48, rule); });
-                y = 76; zebraRow = 0;
-            }
-            final float top = y; final List<String> text = lines;
-            switch (block.kind) {
-                case 'h':
-                    page.add(c -> {
-                        float ty = top + 14 + 14;
-                        for (String line : text) { c.drawText(line, M, ty, head); ty += 20; }
-                        c.drawLine(M, ty - 12, W - M, ty - 12, rule);
-                    });
-                    zebraRow = 0; break;
-                case 'b':
-                    page.add(c -> {
-                        c.drawCircle(M + 4, top + 7, 2.2f, dot);
-                        float ty = top + 11;
-                        for (String line : text) { c.drawText(line, M + 16, ty, body); ty += 16; }
-                    });
-                    break;
-                case 'r':
-                    final boolean shade = zebraRow++ % 2 == 0; final float height = need; final String value = block.amount;
-                    page.add(c -> {
-                        if (shade) c.drawRect(M - 6, top, W - M + 6, top + height, zebra);
-                        float ty = top + 15;
-                        for (String line : text) { c.drawText(line, M, ty, body); ty += 16; }
-                        c.drawText(value, W - M - amount.measureText(value), top + 15, amount);
-                    });
-                    break;
-                default:
-                    page.add(c -> {
-                        float ty = top + 11;
-                        for (String line : text) { c.drawText(line, M, ty, body); ty += 16; }
-                    });
-                    zebraRow = 0;
-            }
-            y += need;
+            int offset = 0;
+            do {
+                float overhead = block.kind == 'h' ? 22 : block.kind == 'r' ? 6 : 2;
+                float lineHeight = block.kind == 'h' ? 20 : 16;
+                int count = Documents.fittingLines(BOTTOM - y, overhead, lineHeight, lines.size() - offset);
+                if (count == 0 || (offset == 0 && need <= BOTTOM - 76 && y + need > BOTTOM && y > 76)) {
+                    if (pages.size() >= 100) throw new IllegalArgumentException("El PDF supera 100 páginas.");
+                    page = new ArrayList<>(); pages.add(page);
+                    // Following pages: the title small, above a rule.
+                    page.add(c -> { c.drawText(title.length() > 90 ? title.substring(0, 90) + "…" : title, M, 40, small); c.drawLine(M, 48, W - M, 48, rule); });
+                    y = 76; zebraRow = 0;
+                }
+                count = Documents.fittingLines(BOTTOM - y, overhead, lineHeight, lines.size() - offset);
+                if (count == 0) throw new IllegalArgumentException("El texto no cabe en la página.");
+                need = overhead + lineHeight * count;
+                final float top = y; final List<String> text = lines.subList(offset, offset + count);
+                final boolean first = offset == 0;
+                switch (block.kind) {
+                    case 'h':
+                        page.add(c -> {
+                            float ty = top + 14 + 14;
+                            for (String line : text) { c.drawText(line, M, ty, head); ty += 20; }
+                            c.drawLine(M, ty - 12, W - M, ty - 12, rule);
+                        });
+                        zebraRow = 0; break;
+                    case 'b':
+                        page.add(c -> {
+                            if (first) c.drawCircle(M + 4, top + 7, 2.2f, dot);
+                            float ty = top + 11;
+                            for (String line : text) { c.drawText(line, M + 16, ty, body); ty += 16; }
+                        });
+                        break;
+                    case 'r':
+                        final boolean shade = zebraRow++ % 2 == 0; final float height = need; final String value = block.amount;
+                        page.add(c -> {
+                            if (shade) c.drawRect(M - 6, top, W - M + 6, top + height, zebra);
+                            float ty = top + 15;
+                            for (String line : text) { c.drawText(line, M, ty, body); ty += 16; }
+                            if (first) c.drawText(value, W - M - amount.measureText(value), top + 15, amount);
+                        });
+                        break;
+                    default:
+                        page.add(c -> {
+                            float ty = top + 11;
+                            for (String line : text) { c.drawText(line, M, ty, body); ty += 16; }
+                        });
+                        zebraRow = 0;
+                }
+                y += need;
+                offset += count;
+                } while (offset < lines.size());
         }
         return pages;
     }

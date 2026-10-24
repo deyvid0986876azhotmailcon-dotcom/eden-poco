@@ -206,6 +206,15 @@ public final class ToolExecutor {
         store.beginAction(operation, tool, clock.millis());
         return checked;
     }
+    public JSONObject prepareMusic(JSONObject checked) throws Exception {
+        requirePhone();
+        return Json.copy(phone.prepare("musica", checked));
+    }
+    public String executeMusic(String operation, JSONObject prepared) throws Exception {
+        requirePhone();
+        try { return finishPhone(operation, "musica", phone.execute("musica", prepared)); }
+        catch (Exception e) { store.finishAction(operation, "No pude completar música. Revisá antes de repetir."); throw e; }
+    }
     public String finishPhone(String operation, String tool, String result) throws Exception {
         // External contents are neither audit receipts nor conversation memory.
         store.finishAction(operation, PhoneTools.external(tool) ? "Consulté " + tool.replace('_', ' ') + "; el contenido no se guarda en el registro." : result);

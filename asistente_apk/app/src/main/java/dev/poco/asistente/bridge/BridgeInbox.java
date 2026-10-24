@@ -95,7 +95,9 @@ public final class BridgeInbox {
                         catch (Exception e) { result.complete(dev.poco.asistente.core.ImageInput.FALLBACK); return; }
                         synchronized (gate) {
                             if (result.isDone() || !enabled.getAsBoolean() || ticket != core.cancellationToken()) return;
+                            result.complete(understood);
                         }
+                        return; // Photo output is external data, never a new owner command.
                     }
                     String response = core.receive(understood, AssistantCore.Source.WHATSAPP_OWNER, requestId, ticket, budget);
                     synchronized (gate) {

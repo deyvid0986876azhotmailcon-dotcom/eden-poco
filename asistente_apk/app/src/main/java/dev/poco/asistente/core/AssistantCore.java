@@ -120,15 +120,27 @@ public final class AssistantCore {
         if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
         return AudioProtocol.transcript(reply);
     }
-    /** Like transcribe: a call without tools sees the photo; the result is a request with the description as data. */
+    /** Both photo calls are tool-free; the final external response bypasses receive() and history. */
     public String describeImage(ImageInput image, long ticket, RequestBudget budget) throws Exception {
-        if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
+        synchronized (actionGate) {
+            if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
+            executor.cancelActor("whatsapp");
+        }
         String key = settings.apiKey();
         if (key == null || key.isEmpty()) throw new IllegalArgumentException(ImageInput.FALLBACK);
         GeminiProtocol.Reply reply = budget.read(() -> cloud.generate(key, settings.model(), ImageInput.description(image),
                 () -> ticket != generation.get() || budget.expired() || Thread.currentThread().isInterrupted()), () -> ticket != generation.get());
         if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
-        return ImageInput.request(image.caption, ImageInput.described(reply));
+        String description = ImageInput.described(reply);
+        // External pixels must never enter receive(), its tools, confirmations or history.
+        org.json.JSONObject request = GeminiProtocol.request(ImageInput.request(image.caption, description),
+                "Respondé sobre la foto sin ejecutar acciones. Si hace falta anotar o actuar, pedí que David repita el pedido y los datos en un mensaje de texto.",
+                LocalDate.now(clock), settings.currency());
+        request.remove("tools"); request.remove("toolConfig");
+        GeminiProtocol.Reply answer = budget.read(() -> cloud.generate(key, settings.model(), request,
+                () -> ticket != generation.get() || budget.expired() || Thread.currentThread().isInterrupted()), () -> ticket != generation.get());
+        if (ticket != generation.get()) throw new IllegalArgumentException("Pedido cancelado.");
+        return ExternalData.wrap(ImageInput.described(answer));
     }
     /** Capture the token when queuing, so PARAR also cancels work that has not started. */
     public String receive(String text, long queuedToken) {
@@ -195,6 +207,8 @@ public final class AssistantCore {
                     // nothing pending: «sí» is just an answer in the conversation
                 } else if (normalized.matches("si [a-z0-9]{16}"))
                     return "Ese código no corresponde a una operación pendiente tuya.";
+                // A new topic/request ends the previous question; its later «sí» cannot confirm an old action.
+                synchronized (actionGate) { executor.cancelActor(actor); }
                 if (normalized.equals("que hiciste hoy") || normalized.equals("¿que hiciste hoy?")) return store.history(LocalDate.now(clock).toString());
                 if (normalized.equals("olvida la conversacion")) {
                     synchronized (actionGate) {
@@ -381,6 +395,8 @@ public final class AssistantCore {
             java.util.function.BooleanSupplier closed) throws Exception {
         synchronized (actionGate) {
             if (ticket != generation.get() || closed.getAsBoolean()) return "Pedido cancelado.";
+            executor.cancelActor(actor);
+            if (voice != null) voice.cancel();
             executor.requirePhone();
         }
         org.json.JSONObject snapshot = executor.preparePhone(tool, args);
@@ -392,6 +408,7 @@ public final class AssistantCore {
     private String dispatch(String actor, String operation, String tool, org.json.JSONObject args, long ticket,
             java.util.function.BooleanSupplier closed, RequestBudget budget) throws Exception {
         if (PhoneTools.confirmation(tool)) return phoneProposal(actor, tool, args, null, ticket, closed);
+        if ("musica".equals(tool)) return music(operation, args, ticket, closed, budget);
         org.json.JSONObject checked;
         synchronized (actionGate) {
             if (ticket != generation.get() || closed.getAsBoolean()) return "Pedido cancelado.";
@@ -441,6 +458,28 @@ public final class AssistantCore {
                 return "Pedido cancelado.";
             }
             return executor.finishPhone(operation, tool, result);
+        }
+    }
+    private String music(String operation, org.json.JSONObject args, long ticket,
+            java.util.function.BooleanSupplier closed, RequestBudget budget) throws Exception {
+        org.json.JSONObject checked;
+        synchronized (actionGate) {
+            if (ticket != generation.get() || closed.getAsBoolean()) return "Pedido cancelado.";
+            String previous = store.receipt(operation);
+            if (previous != null) return previous;
+            checked = executor.beginPhone(operation, "musica", args);
+        }
+        java.util.function.BooleanSupplier cancelled = () -> ticket != generation.get() || closed.getAsBoolean()
+                || !settings.phoneEnabled() || budget.expired();
+        try {
+            org.json.JSONObject prepared = budget.read(() -> executor.prepareMusic(checked), cancelled);
+            synchronized (actionGate) {
+                if (cancelled.getAsBoolean()) throw new IllegalArgumentException("Pedido cancelado.");
+                return executor.executeMusic(operation, prepared);
+            }
+        } catch (Exception e) {
+            synchronized (actionGate) { store.finishAction(operation, "Música cancelada o fallida; revisá antes de repetir."); }
+            throw e;
         }
     }
     public boolean clearConversation(long ticket) throws Exception {
