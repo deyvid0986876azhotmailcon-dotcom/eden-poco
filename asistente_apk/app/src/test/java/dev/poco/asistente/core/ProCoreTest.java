@@ -49,6 +49,76 @@ public class ProCoreTest {
         return new AssistantCore(store, settings, cloud, clock, elapsed::get, phone, pro);
     }
     private GeminiProtocol.Reply text(String text) { return new GeminiProtocol.Reply(text, null, null, ""); }
+    @Test public void planRoutesIncomeToProHighModelKeepingAmounts() {
+        AtomicInteger proCalls = new AtomicInteger();
+        AssistantCore c = core((k, m, b) -> new GeminiProtocol.Reply(null, "armar_plan", new JSONObject(), ""),
+                (t, p, m, x) -> { proCalls.incrementAndGet();
+                    assertEquals(ProProtocol.CHAT_MODEL, m); assertTrue(p.contains("3500000")); assertTrue(p.contains("plan"));
+                    return "Plan: 50% gastos, 20% ahorro"; }, PhoneTools.UNAVAILABLE);
+        assertEquals("Plan: 50% gastos, 20% ahorro", c.receive("hacé un plan, gano 3500000 por mes"));
+        assertEquals(1, proCalls.get());
+    }
+    @Test public void planFallsBackToWrittenPlanFromFastModelWithoutTools() {
+        AtomicInteger calls = new AtomicInteger();
+        AssistantCore c = core((k, m, b) -> {
+            if (calls.incrementAndGet() == 1) return new GeminiProtocol.Reply(null, "armar_plan", new JSONObject(), "");
+            assertFalse(b.has("tools")); assertFalse(b.has("toolConfig")); return text("Plan escrito sin PDF");
+        }, Pro.UNAVAILABLE, PhoneTools.UNAVAILABLE);
+        assertEquals("Plan escrito sin PDF", c.receive("armá un plan con mi ingreso"));
+        assertEquals(2, calls.get());
+    }
+    @Test public void planFilterAllowsAmountsButBlocksCredentials() throws Exception {
+        for (String amount : new String[]{"gasté 3.500.000 en comida y quiero ahorrar", "gano 3500000 por mes",
+                "ahorrar 100.000.000 este año", "armá un plan con estos gastos: 500000, 600000",  // lista de montos, no un identificador
+                "un plan para la ayuda familiar", "mi banco es el Familiar y gano 3500000",  // nombre de banco (palabra común) permitido
+                "en mi cuenta de ahorro tengo 3.500.000", "mi cuenta es 3.500.000"})  // saldo con puntos tras «cuenta»: NO es un número de cuenta
+            assertFalse(amount, ProProtocol.planSensitive(amount));
+        for (String secret : new String[]{"mi clave es abcd", "pin 1234", "token xyz", "ana@mail.com", "https://x.y",
+                "cuenta 123456789012", "4111 - 1111 - 1111 - 1111", "4111.1111.1111.1111", "١".repeat(12),  // credenciales y tarjeta/CBU (separadores, puntos, Unicode)
+                "mi cuenta bancaria es 12345678", "mi cuenta bancaria 12345678", "cuenta nro 987654", "mi cuenta nro. 12345678",
+                "mi cuenta nro. 1234-5678", "mi cuenta nro. 12.345.678"})  // cuenta corta etiquetada: calificador en medio, con «es», guion, y puntos cuando el marcador «nro» dice que es un identificador
+            assertTrue(secret, ProProtocol.planSensitive(secret));
+        assertThrows(IllegalArgumentException.class, () -> ProProtocol.planPrompt("mi clave es abcd",
+                Collections.emptyList(), Collections.emptyList(), "Saldo PYG 100"));
+        String prompt = ProProtocol.planPrompt("armá un plan", Collections.emptyList(), Collections.emptyList(), "Saldo PYG 3500000");
+        assertTrue(prompt.contains("3500000")); assertTrue(prompt.contains("250 palabras"));
+    }
+    @Test public void planPromptFiltersSecretsInContextButKeepsFinances() throws Exception {
+        List<Memory.Exchange> history = Arrays.asList(new Memory.Exchange("mi token es SECRET_H", "ok"),
+                new Memory.Exchange("mi cuenta es 12345678", "ok"), new Memory.Exchange("gano 3500000", "dale"));
+        List<Store.Row> notes = Arrays.asList(new Store.Row("1", "memoria", 1, Json.object("texto", "mi pin es 1234", "categoria", "otro")),
+                new Store.Row("2", "memoria", 1, Json.object("texto", "me gusta ahorrar", "categoria", "gustos")));
+        String summary = "Saldo: 3500000\nGasto / ayuda familiar: 500000\nGasto / clave del cajero: 90000\nMeta: viaje — 2000000";
+        String prompt = ProProtocol.planPrompt("armá un plan", history, notes, summary);
+        // finanzas y nombre de banco se conservan; credenciales en historial/libreta/categoría se descartan
+        assertTrue(prompt.contains("3500000")); assertTrue(prompt.contains("me gusta ahorrar"));
+        assertTrue(prompt.contains("viaje")); assertTrue(prompt.contains("familiar"));
+        for (String secret : new String[]{"SECRET_H", "12345678", "1234", "cajero"}) assertFalse(secret, prompt.contains(secret));
+    }
+    @Test public void chatModePlanStillRoutesToProWithAmounts() {
+        AtomicInteger proCalls = new AtomicInteger();
+        AssistantCore c = core((k, m, b) -> new GeminiProtocol.Reply(null, "armar_plan", new JSONObject(), ""),
+                (t, p, m, x) -> { proCalls.incrementAndGet(); assertTrue(p.contains("3500000")); return "Plan listo"; }, PhoneTools.UNAVAILABLE);
+        c.receive("charlemos");  // frase sin la palabra «plan»: la detección financiera igual la saca del modo charla
+        assertEquals("Plan listo", c.receive("cómo organizar mi plata, gano 3500000"));
+        assertEquals(1, proCalls.get());
+    }
+    @Test public void planKeepsSafeLinesOfRealSummaryAndDropsSensitiveCategory() throws Exception {
+        List<Store.Row> rows = Arrays.asList(
+                new Store.Row("a", "movimiento", 1, Json.object("fecha", "2026-10-05", "moneda", "PYG", "centavos", 350000000L, "tipo", "ingreso", "categoria", "sueldo")),
+                new Store.Row("b", "movimiento", 1, Json.object("fecha", "2026-10-06", "moneda", "PYG", "centavos", 50000000L, "tipo", "gasto", "categoria", "ayuda familiar")),
+                new Store.Row("c", "movimiento", 1, Json.object("fecha", "2026-10-07", "moneda", "PYG", "centavos", 9000000L, "tipo", "gasto", "categoria", "clave del cajero")));
+        String summary = Summary.render(rows, java.time.LocalDate.of(2026, 10, 30), false);
+        String prompt = ProProtocol.planPrompt("armá un plan", Collections.emptyList(), Collections.emptyList(), summary);
+        assertTrue(prompt.contains("Saldo"));           // la línea de ingresos/saldo se conserva
+        assertTrue(prompt.contains("familiar"));        // una categoría con nombre de banco (palabra común) se conserva
+        assertFalse(prompt.contains("cajero"));          // solo la línea con la credencial («clave») se descarta
+    }
+    @Test public void planWithCredentialReturnsPrivateNotPro() {
+        AssistantCore c = core((k, m, b) -> new GeminiProtocol.Reply(null, "armar_plan", new JSONObject(), ""),
+                (t, p, m, x) -> { throw new AssertionError("no debe llegar al Pro"); }, PhoneTools.UNAVAILABLE);
+        assertEquals(ProProtocol.PRIVATE, c.receive("armá un plan, mi clave es abcd"));
+    }
     @Test public void queuedChatWithTooLittleTimeSkipsProAndNetworkFallback() {
         AtomicInteger routing = new AtomicInteger();
         AssistantCore c = core((k,m,b) -> { routing.incrementAndGet(); elapsed.addAndGet(10_000); return text("chat"); },

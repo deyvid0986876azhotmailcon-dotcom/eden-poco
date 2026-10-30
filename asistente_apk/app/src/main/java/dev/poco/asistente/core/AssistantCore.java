@@ -289,7 +289,10 @@ public final class AssistantCore {
                 }
                 // In chat mode the fast model still decides first: a request («buscá el clima», an alarm) runs
                 // its tool; only conversation goes to Pro (on 2026-10-21 Pro refused a weather search as «a friend»).
-                boolean chatting = chatMode.active() && settings.proEnabled() && !Documents.requested(text);
+                // A plan request must reach the router (and armar_plan) even inside chat mode, where the stricter
+                // chat filter would otherwise block its amounts; the normal router path already sees finances.
+                boolean planAsked = normalized.matches("(?s).*\\b(plan|planific\\w*|presupuest\\w*|ingreso\\w*|sueldo\\w*|ahorr\\w*|financ\\w*|organiza\\w*|administra\\w*|plata|dinero|guita|gasto\\w*)\\b.*");
+                boolean chatting = chatMode.active() && settings.proEnabled() && !Documents.requested(text) && !planAsked;
                 if (chatting && ProProtocol.sensitive(text)) return ProProtocol.PRIVATE;
                 String key;
                 try { key = settings.apiKey(); }
@@ -313,6 +316,10 @@ public final class AssistantCore {
                 if ("charla_profunda".equals(reply.tool)) {
                     Validation.keys(reply.args, "");
                     return chat(text, ticket, budget);
+                }
+                if ("armar_plan".equals(reply.tool)) {
+                    Validation.keys(reply.args, "");
+                    return plan(text, ticket, budget);
                 }
                 if (Documents.contains(reply.tool)) {
                     if ("descargar".equals(reply.tool)) {
@@ -389,6 +396,42 @@ public final class AssistantCore {
             }
         } catch (Exception ignored) { }
         return ticket != generation.get() ? "Pedido cancelado." : answer + "\n" + ProProtocol.FALLBACK;
+    }
+    /** A financial plan: David allowed his amounts to reach Pro (2026-10-30); only credentials stay blocked. */
+    private String plan(String text, long ticket, RequestBudget budget) throws Exception {
+        if (ticket != generation.get()) return "Pedido cancelado.";
+        if (ProProtocol.planSensitive(text)) return ProProtocol.PRIVATE;
+        String summary = Summary.render(store.rows(), LocalDate.now(clock), false);
+        if (settings.proEnabled() && !budget.canUsePro()) return RequestBudget.FALLBACK;
+        if (settings.proEnabled()) {
+            try {
+                String prompt = ProProtocol.planPrompt(text, store.conversation(), store.memories(), summary);
+                String answer = ProProtocol.answer(budget.read(() -> pro.generate("charla", prompt,
+                        ProProtocol.CHAT_MODEL, () -> ticket != generation.get() || !settings.proEnabled() || budget.expired() || Thread.currentThread().isInterrupted()),
+                        () -> ticket != generation.get() || !settings.proEnabled(), RequestBudget.PRO_CHAT_MS));
+                if (ticket != generation.get() || !settings.proEnabled()) return "Pedido cancelado.";
+                return answer;
+            } catch (java.util.concurrent.TimeoutException timeout) {
+                return ticket != generation.get() ? "Pedido cancelado." : RequestBudget.FALLBACK;
+            } catch (Exception ignored) { /* fall back to a written plan from the fast model below */ }
+        }
+        if (ticket != generation.get()) return "Pedido cancelado.";
+        if (budget.expired()) return RequestBudget.FALLBACK;
+        String answer = RequestBudget.FALLBACK;
+        try {
+            String key = settings.apiKey();
+            if (key != null && !key.isEmpty()) {
+                org.json.JSONObject body = GeminiProtocol.request(text, "", LocalDate.now(clock), settings.currency());
+                body.remove("tools"); body.remove("toolConfig");
+                body.put("contents", new org.json.JSONArray().put(Json.object("role", "user", "parts", new org.json.JSONArray().put(
+                        Json.object("text", ProProtocol.planPrompt(text, store.conversation(), store.memories(), summary))))));
+                final org.json.JSONObject planBody = body;
+                GeminiProtocol.Reply fallback = budget.read(() -> cloud.generate(key, settings.model(), planBody,
+                        () -> ticket != generation.get() || budget.expired() || Thread.currentThread().isInterrupted()), () -> ticket != generation.get());
+                if (fallback.tool == null) answer = ProProtocol.answer(fallback.text);
+            }
+        } catch (Exception ignored) { }
+        return ticket != generation.get() ? "Pedido cancelado." : answer;
     }
     private String document(String operation, String tool, org.json.JSONObject args, long ticket, RequestBudget budget) throws Exception {
         synchronized (actionGate) {
