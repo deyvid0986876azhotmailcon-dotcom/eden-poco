@@ -10,6 +10,8 @@ import org.json.JSONObject;
 public final class ProProtocol {
     private ProProtocol() {}
     public static final String CHAT_MODEL = "claude-opus-4-6-thinking", SEARCH_MODEL = "gemini-3.8-flash-high";
+    // Plan uses Gemini at high effort through agy (David's Google AI Pro). Claude Opus via Antigravity was timing out.
+    public static final String PLAN_MODEL = "gemini-3.8-flash-high";
     public static final String FALLBACK = "hoy estoy media lenta, te contesto corto";
     public static final String PRIVATE = "Eso puede tener datos bancarios o credenciales; contámelo sin esos datos.";
     public static final int MAX_PROMPT = 24000;

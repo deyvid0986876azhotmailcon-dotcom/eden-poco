@@ -53,7 +53,7 @@ public class ProCoreTest {
         AtomicInteger proCalls = new AtomicInteger();
         AssistantCore c = core((k, m, b) -> new GeminiProtocol.Reply(null, "armar_plan", new JSONObject(), ""),
                 (t, p, m, x) -> { proCalls.incrementAndGet();
-                    assertEquals(ProProtocol.CHAT_MODEL, m); assertTrue(p.contains("3500000")); assertTrue(p.contains("plan"));
+                    assertEquals(ProProtocol.PLAN_MODEL, m); assertTrue(p.contains("3500000")); assertTrue(p.contains("plan"));
                     return "Plan: 50% gastos, 20% ahorro"; }, PhoneTools.UNAVAILABLE);
         assertEquals("Plan: 50% gastos, 20% ahorro", c.receive("hacé un plan, gano 3500000 por mes"));
         assertEquals(1, proCalls.get());

@@ -407,7 +407,7 @@ public final class AssistantCore {
             try {
                 String prompt = ProProtocol.planPrompt(text, store.conversation(), store.memories(), summary);
                 String answer = ProProtocol.answer(budget.read(() -> pro.generate("charla", prompt,
-                        ProProtocol.CHAT_MODEL, () -> ticket != generation.get() || !settings.proEnabled() || budget.expired() || Thread.currentThread().isInterrupted()),
+                        ProProtocol.PLAN_MODEL, () -> ticket != generation.get() || !settings.proEnabled() || budget.expired() || Thread.currentThread().isInterrupted()),
                         () -> ticket != generation.get() || !settings.proEnabled(), RequestBudget.PRO_CHAT_MS));
                 if (ticket != generation.get() || !settings.proEnabled()) return "Pedido cancelado.";
                 return answer;
